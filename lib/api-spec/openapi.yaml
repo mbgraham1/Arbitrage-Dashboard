@@ -3,13 +3,17 @@ info:
   # Do not change the title, if the title changes, the import paths will be broken
   title: Api
   version: 0.1.0
-  description: API specification
+  description: CAT Arbitrage Dashboard API
 servers:
   - url: /api
     description: Base API path
 tags:
   - name: health
     description: Health operations
+  - name: exchange
+    description: Exchange price and balance operations
+  - name: trades
+    description: Trade execution and history
 paths:
   /healthz:
     get:
@@ -24,6 +28,189 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/HealthStatus"
+
+  /prices:
+    post:
+      operationId: fetchPrices
+      tags: [exchange]
+      summary: Fetch live prices from both exchanges
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ExchangeCredentials"
+      responses:
+        "200":
+          description: Current prices
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PriceData"
+        "400":
+          description: Bad request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Exchange fetch error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /balances:
+    post:
+      operationId: fetchBalances
+      tags: [exchange]
+      summary: Fetch balances from both exchanges
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ExchangeCredentials"
+      responses:
+        "200":
+          description: Current balances
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BalanceData"
+        "400":
+          description: Bad request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Exchange fetch error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /test-kraken:
+    post:
+      operationId: testKraken
+      tags: [exchange]
+      summary: Test Kraken connection
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/KrakenCredentials"
+      responses:
+        "200":
+          description: Connection test result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConnectionTestResult"
+        "400":
+          description: Invalid credentials
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /test-coinbase:
+    post:
+      operationId: testCoinbase
+      tags: [exchange]
+      summary: Test Coinbase connection
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CoinbaseCredentials"
+      responses:
+        "200":
+          description: Connection test result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConnectionTestResult"
+        "400":
+          description: Invalid credentials
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /execute-trade:
+    post:
+      operationId: executeTrade
+      tags: [trades]
+      summary: Execute an arbitrage trade
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TradeRequest"
+      responses:
+        "200":
+          description: Trade result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TradeResult"
+        "400":
+          description: Bad request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Trade execution error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /trades:
+    get:
+      operationId: listTrades
+      tags: [trades]
+      summary: Get trade history
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 50
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            default: 0
+      responses:
+        "200":
+          description: Trade history list
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/TradeRecord"
+
+  /trades/summary:
+    get:
+      operationId: getTradeSummary
+      tags: [trades]
+      summary: Get P&L summary and statistics
+      responses:
+        "200":
+          description: P&L summary
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TradeSummary"
+
 components:
   schemas:
     HealthStatus:
@@ -34,3 +221,200 @@ components:
       required:
         - status
 
+    ErrorResponse:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+
+    KrakenCredentials:
+      type: object
+      required: [krakenKey, krakenSecret]
+      properties:
+        krakenKey:
+          type: string
+        krakenSecret:
+          type: string
+
+    CoinbaseCredentials:
+      type: object
+      required: [coinbaseKey, coinbaseSecret]
+      properties:
+        coinbaseKey:
+          type: string
+        coinbaseSecret:
+          type: string
+
+    ExchangeCredentials:
+      type: object
+      required: [krakenKey, krakenSecret, coinbaseKey, coinbaseSecret]
+      properties:
+        krakenKey:
+          type: string
+        krakenSecret:
+          type: string
+        coinbaseKey:
+          type: string
+        coinbaseSecret:
+          type: string
+
+    PriceData:
+      type: object
+      required: [krakenPrice, coinbasePrice, grossSpreadPct, netEdgePct, route, timestamp]
+      properties:
+        krakenPrice:
+          type: number
+        coinbasePrice:
+          type: number
+        grossSpreadPct:
+          type: number
+        netEdgePct:
+          type: number
+        route:
+          type: string
+        buyExchange:
+          type: string
+        sellExchange:
+          type: string
+        timestamp:
+          type: string
+
+    BalanceEntry:
+      type: object
+      required: [currency, amount]
+      properties:
+        currency:
+          type: string
+        amount:
+          type: number
+
+    BalanceData:
+      type: object
+      required: [kraken, coinbase]
+      properties:
+        kraken:
+          type: array
+          items:
+            $ref: "#/components/schemas/BalanceEntry"
+        coinbase:
+          type: array
+          items:
+            $ref: "#/components/schemas/BalanceEntry"
+        solOnKraken:
+          type: number
+        solOnCoinbase:
+          type: number
+        usdOnCoinbase:
+          type: number
+        suggestedVolume:
+          type: number
+
+    ConnectionTestResult:
+      type: object
+      required: [ok, message]
+      properties:
+        ok:
+          type: boolean
+        message:
+          type: string
+        balances:
+          type: array
+          items:
+            $ref: "#/components/schemas/BalanceEntry"
+
+    TradeRequest:
+      type: object
+      required: [krakenKey, krakenSecret, coinbaseKey, coinbaseSecret, buyExchange, sellExchange, volume, krakenPrice, coinbasePrice, liveMode]
+      properties:
+        krakenKey:
+          type: string
+        krakenSecret:
+          type: string
+        coinbaseKey:
+          type: string
+        coinbaseSecret:
+          type: string
+        buyExchange:
+          type: string
+        sellExchange:
+          type: string
+        volume:
+          type: number
+        krakenPrice:
+          type: number
+        coinbasePrice:
+          type: number
+        liveMode:
+          type: boolean
+        netEdgePct:
+          type: number
+
+    TradeResult:
+      type: object
+      required: [success, isDryRun, estimatedProfitUsd, tradeNumber]
+      properties:
+        success:
+          type: boolean
+        isDryRun:
+          type: boolean
+        estimatedProfitUsd:
+          type: number
+        tradeNumber:
+          type: integer
+        buyOrderId:
+          type: ["string", "null"]
+        sellOrderId:
+          type: ["string", "null"]
+        error:
+          type: ["string", "null"]
+
+    TradeRecord:
+      type: object
+      required: [id, createdAt, buyExchange, sellExchange, volumeSol, estimatedProfitUsd, netEdgePct, isDryRun, krakenPrice, coinbasePrice]
+      properties:
+        id:
+          type: integer
+        createdAt:
+          type: string
+        buyExchange:
+          type: string
+        sellExchange:
+          type: string
+        volumeSol:
+          type: number
+        estimatedProfitUsd:
+          type: number
+        netEdgePct:
+          type: number
+        isDryRun:
+          type: boolean
+        krakenPrice:
+          type: number
+        coinbasePrice:
+          type: number
+        buyOrderId:
+          type: ["string", "null"]
+        sellOrderId:
+          type: ["string", "null"]
+
+    TradeSummary:
+      type: object
+      required: [totalTrades, liveTrades, dryRunTrades, totalProfitUsd, avgNetEdgePct, bestTradeProfitUsd, recentTrades]
+      properties:
+        totalTrades:
+          type: integer
+        liveTrades:
+          type: integer
+        dryRunTrades:
+          type: integer
+        totalProfitUsd:
+          type: number
+        avgNetEdgePct:
+          type: number
+        bestTradeProfitUsd:
+          type: number
+        recentTrades:
+          type: array
+          items:
+            $ref: "#/components/schemas/TradeRecord"

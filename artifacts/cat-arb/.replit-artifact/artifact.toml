@@ -1,0 +1,27 @@
+kind = "web"
+previewPath = "/"
+title = "CAT Arbitrage Dashboard"
+version = "1.0.0"
+id = "artifacts/cat-arb"
+router = "path"
+
+[[services]]
+name = "web"
+paths = [ "/" ]
+localPort = 18437
+
+[services.development]
+run = "pnpm --filter @workspace/cat-arb run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/cat-arb", "run", "build" ]
+serve = "static"
+publicDir = "artifacts/cat-arb/dist/public"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "18437"
+BASE_PATH = "/"

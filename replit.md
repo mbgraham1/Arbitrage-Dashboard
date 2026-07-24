@@ -1,6 +1,6 @@
-# [Project name]
+# CAT Arbitrage Dashboard (BUTTER_PROTOCOL)
 
-_Replace the heading above with the project's name, and this line with one sentence describing what this app does for users._
+A live SOL/USD crypto arbitrage bot dashboard that monitors price spreads between Kraken and Coinbase, executes trades (dry run or live), and tracks P&L history.
 
 ## Run & Operate
 
