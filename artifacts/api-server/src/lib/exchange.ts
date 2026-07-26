@@ -144,20 +144,16 @@ async function coinbaseRequest<T>(
   return resp.json() as Promise<T>;
 }
 
-export async function getCoinbasePrice(creds: CoinbaseCreds): Promise<number> {
-  const data = await coinbaseRequest<{ best_bid: string; best_ask: string }>(
-    creds,
-    "GET",
-    `/api/v3/brokerage/best_bid_ask?product_ids=${COINBASE_PRODUCT}`
-  );
-  // Use mid of bid/ask
-  const pricebooks = (data as unknown as { pricebooks?: Array<{ best_bid: string; best_ask: string }> }).pricebooks;
-  if (pricebooks && pricebooks[0]) {
-    const bid = parseFloat(pricebooks[0].best_bid);
-    const ask = parseFloat(pricebooks[0].best_ask);
-    return (bid + ask) / 2;
-  }
-  throw new Error("Coinbase: no price data in response");
+/** Public endpoint — no API key required. Fixes 401 errors from Advanced Trade auth. */
+export async function getCoinbasePrice(): Promise<number> {
+  const resp = await fetch("https://api.coinbase.com/v2/prices/SOL-USD/spot", {
+    signal: AbortSignal.timeout(10_000),
+  });
+  if (!resp.ok) throw new Error(`Coinbase public price HTTP ${resp.status}`);
+  const json = await resp.json() as { data?: { amount?: string } };
+  const amount = json.data?.amount;
+  if (!amount) throw new Error("Coinbase: missing price in public response");
+  return parseFloat(amount);
 }
 
 export async function getCoinbaseBalances(creds: CoinbaseCreds): Promise<BalanceEntry[]> {

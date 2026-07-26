@@ -41,7 +41,7 @@ router.post("/prices", async (req, res): Promise<void> => {
   try {
     const [krakenPrice, coinbasePrice] = await Promise.all([
       getKrakenPrice(),
-      getCoinbasePrice({ coinbaseKey, coinbaseSecret }),
+      getCoinbasePrice(),
     ]);
     const grossSpreadPct = (Math.abs(krakenPrice - coinbasePrice) / Math.min(krakenPrice, coinbasePrice)) * 100;
     const route = krakenPrice < coinbasePrice
