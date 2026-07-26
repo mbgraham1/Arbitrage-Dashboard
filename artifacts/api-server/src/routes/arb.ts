@@ -13,10 +13,10 @@ import {
   getKrakenPrice,
   getKrakenBalances,
   krakenMarketOrder,
-  getCoinbasePrice,
   getCoinbaseBalances,
   coinbaseMarketOrder,
 } from "../lib/exchange";
+import { getAllPrices } from "../lib/price-cache";
 
 const router: IRouter = Router();
 
@@ -37,28 +37,51 @@ router.post("/prices", async (req, res): Promise<void> => {
     res.status(400).json({ error: parsed.error.message });
     return;
   }
-  const { krakenKey, krakenSecret, coinbaseKey, coinbaseSecret } = parsed.data;
-  try {
-    const [krakenPrice, coinbasePrice] = await Promise.all([
-      getKrakenPrice(),
-      getCoinbasePrice(),
-    ]);
-    const grossSpreadPct = (Math.abs(krakenPrice - coinbasePrice) / Math.min(krakenPrice, coinbasePrice)) * 100;
-    const route = krakenPrice < coinbasePrice
-      ? "Buy Kraken → Sell Coinbase"
-      : "Buy Coinbase → Sell Kraken";
-    const buyExchange = krakenPrice < coinbasePrice ? "Kraken" : "Coinbase";
-    const sellExchange = krakenPrice < coinbasePrice ? "Coinbase" : "Kraken";
 
-    req.log.info({ krakenPrice, coinbasePrice, grossSpreadPct }, "Prices fetched");
+  try {
+    const prices = await getAllPrices();
+    const { kraken: krakenPrice, coinbase: coinbasePrice, binance: binancePrice, kucoin: kuCoinPrice, wsKraken, wsCoinbase } = prices;
+
+    if (!krakenPrice || !coinbasePrice) {
+      res.status(500).json({ error: "Could not fetch prices from Kraken or Coinbase" });
+      return;
+    }
+
+    // Build a map of all available prices to find global best buy / sell
+    const available: Record<string, number> = { Kraken: krakenPrice, Coinbase: coinbasePrice };
+    if (binancePrice) available["Binance"] = binancePrice;
+    if (kuCoinPrice) available["KuCoin"] = kuCoinPrice;
+
+    const bestBuyExchange = Object.entries(available).reduce((a, b) => b[1] < a[1] ? b : a)[0];
+    const bestSellExchange = Object.entries(available).reduce((a, b) => b[1] > a[1] ? b : a)[0];
+    const buyPrice = available[bestBuyExchange]!;
+    const sellPrice = available[bestSellExchange]!;
+
+    const grossSpreadPct = ((sellPrice - buyPrice) / buyPrice) * 100;
+    const route = `Buy ${bestBuyExchange} → Sell ${bestSellExchange}`;
+
+    // Only executable when both sides are Kraken or Coinbase (where we hold keys)
+    const executableExchanges = new Set(["Kraken", "Coinbase"]);
+    const executable = executableExchanges.has(bestBuyExchange) && executableExchanges.has(bestSellExchange) && bestBuyExchange !== bestSellExchange;
+
+    req.log.info({ krakenPrice, coinbasePrice, binancePrice, kuCoinPrice, grossSpreadPct, bestBuyExchange, bestSellExchange }, "Prices fetched");
+
     res.json({
       krakenPrice,
       coinbasePrice,
+      binancePrice: binancePrice ?? null,
+      kuCoinPrice: kuCoinPrice ?? null,
       grossSpreadPct,
       netEdgePct: grossSpreadPct, // caller applies fees/slippage
       route,
-      buyExchange,
-      sellExchange,
+      buyExchange: bestBuyExchange,
+      sellExchange: bestSellExchange,
+      bestBuyExchange,
+      bestSellExchange,
+      buyPrice,
+      sellPrice,
+      executable,
+      wsStatus: { kraken: wsKraken, coinbase: wsCoinbase },
       timestamp: new Date().toISOString(),
     });
   } catch (err) {

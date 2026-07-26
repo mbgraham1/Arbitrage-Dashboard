@@ -30,11 +30,22 @@ export const FetchPricesBody = zod.object({
 export const FetchPricesResponse = zod.object({
   "krakenPrice": zod.number(),
   "coinbasePrice": zod.number(),
+  "binancePrice": zod.number().nullish(),
+  "kuCoinPrice": zod.number().nullish(),
   "grossSpreadPct": zod.number(),
   "netEdgePct": zod.number(),
   "route": zod.string(),
   "buyExchange": zod.string().optional(),
   "sellExchange": zod.string().optional(),
+  "bestBuyExchange": zod.string(),
+  "bestSellExchange": zod.string(),
+  "buyPrice": zod.number(),
+  "sellPrice": zod.number(),
+  "executable": zod.boolean(),
+  "wsStatus": zod.object({
+  "kraken": zod.boolean(),
+  "coinbase": zod.boolean()
+}),
   "timestamp": zod.string()
 })
 

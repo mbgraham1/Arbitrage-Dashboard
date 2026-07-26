@@ -5,14 +5,23 @@
  * CAT Arbitrage Dashboard API
  * OpenAPI spec version: 0.1.0
  */
+import type { WsStatus } from './wsStatus';
 
 export interface PriceData {
   krakenPrice: number;
   coinbasePrice: number;
+  binancePrice?: number | null;
+  kuCoinPrice?: number | null;
   grossSpreadPct: number;
   netEdgePct: number;
   route: string;
   buyExchange?: string;
   sellExchange?: string;
+  bestBuyExchange: string;
+  bestSellExchange: string;
+  buyPrice: number;
+  sellPrice: number;
+  executable: boolean;
+  wsStatus: WsStatus;
   timestamp: string;
 }

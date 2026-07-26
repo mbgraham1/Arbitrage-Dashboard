@@ -21,3 +21,4 @@ export * from './tradeRecord';
 export * from './tradeRequest';
 export * from './tradeResult';
 export * from './tradeSummary';
+export * from './wsStatus';

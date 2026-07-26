@@ -1,0 +1,450 @@
+#!/usr/bin/env python3
+"""
+BUTTER PROTOCOL v5.0 – WebSocket + Multi‑Exchange Scanner
+- Real‑time SOL/USD prices via Kraken + Coinbase WebSockets
+- Background scanner for Binance, KuCoin, Kraken, Coinbase (REST fallback)
+- Preserves your original execution logic (sell‑first, dry‑run, etc.)
+"""
+
+import base64
+import hashlib
+import hmac
+import json
+import os
+import threading
+import time
+import uuid
+from decimal import Decimal
+from urllib.parse import urlencode
+
+import requests
+import streamlit as st
+from coinbase.rest import RESTClient
+import websocket  # must install: pip install websocket-client
+
+# ---------- WebSocket price store ----------
+latest_prices = {
+    "kraken": None,
+    "coinbase": None,
+    "binance": None,
+    "kucoin": None,
+}
+price_lock = threading.Lock()
+ws_running = False
+
+# ---------- Kraken WebSocket ----------
+def on_kraken_message(ws, message):
+    global latest_prices
+    try:
+        data = json.loads(message)
+        if isinstance(data, list) and len(data) > 1 and data[2] == "ticker":
+            tick = data[1]
+            if "c" in tick:
+                price = Decimal(tick["c"][0])
+                with price_lock:
+                    latest_prices["kraken"] = price
+    except Exception:
+        pass
+
+def start_kraken_ws():
+    ws = websocket.WebSocketApp(
+        "wss://ws.kraken.com/v2",
+        on_message=on_kraken_message,
+    )
+    def on_open(ws):
+        sub = {
+            "method": "subscribe",
+            "params": {"channel": "ticker", "symbol": ["SOL/USD"]},
+        }
+        ws.send(json.dumps(sub))
+    ws.on_open = on_open
+    ws.run_forever()
+
+# ---------- Coinbase WebSocket ----------
+def on_coinbase_message(ws, message):
+    global latest_prices
+    try:
+        data = json.loads(message)
+        if data.get("type") == "ticker" and data.get("product_id") == "SOL-USD":
+            price = Decimal(data["price"])
+            with price_lock:
+                latest_prices["coinbase"] = price
+    except Exception:
+        pass
+
+def start_coinbase_ws():
+    ws = websocket.WebSocketApp(
+        "wss://ws-feed.exchange.coinbase.com",
+        on_message=on_coinbase_message,
+    )
+    def on_open(ws):
+        sub = {
+            "type": "subscribe",
+            "product_ids": ["SOL-USD"],
+            "channels": ["ticker"],
+        }
+        ws.send(json.dumps(sub))
+    ws.on_open = on_open
+    ws.run_forever()
+
+# ---------- REST fallback for Binance & KuCoin (quick poll) ----------
+def fetch_binance_price():
+    try:
+        r = requests.get("https://api.binance.com/api/v3/ticker/price?symbol=SOLUSDT", timeout=3)
+        return Decimal(r.json()["price"])
+    except:
+        return None
+
+def fetch_kucoin_price():
+    try:
+        r = requests.get("https://api.kucoin.com/api/v1/market/orderbook/level1?symbol=SOL-USDT", timeout=3)
+        return Decimal(r.json()["data"]["price"])
+    except:
+        return None
+
+# ---------- REST fallback for Kraken & Coinbase (if WS fails) ----------
+def get_kraken_price_rest():
+    try:
+        r = requests.get("https://api.kraken.com/0/public/Ticker", params={"pair": "SOLUSD"}, timeout=3)
+        data = r.json()
+        return D(list(data["result"].values())[0]["c"][0])
+    except:
+        return None
+
+def get_coinbase_price_rest():
+    try:
+        r = requests.get("https://api.coinbase.com/v2/prices/SOL-USD/spot", timeout=3)
+        return D(r.json()["data"]["amount"])
+    except:
+        return None
+
+# ---------- Your existing Kraken/Coinbase API wrappers ----------
+KRAKEN_BASE_URL = "https://api.kraken.com"
+KRAKEN_PAIR = "SOLUSD"
+COINBASE_PRODUCT = "SOL-USD"
+REQUEST_TIMEOUT = 10
+session = requests.Session()
+
+def D(value) -> Decimal:
+    return Decimal(str(value))
+
+def kraken_private_request(api_key, api_secret, path, data):
+    nonce = str(time.time_ns())
+    payload = {"nonce": nonce, **data}
+    postdata = urlencode(payload)
+    encoded = (nonce + postdata).encode()
+    message = path.encode() + hashlib.sha256(encoded).digest()
+    decoded_secret = base64.b64decode(api_secret)
+    api_sign = base64.b64encode(hmac.new(decoded_secret, message, hashlib.sha512).digest()).decode()
+    resp = session.post(KRAKEN_BASE_URL + path, data=payload, headers={"API-Key": api_key, "API-Sign": api_sign}, timeout=REQUEST_TIMEOUT)
+    resp.raise_for_status()
+    result = resp.json()
+    if result.get("error"):
+        raise RuntimeError("Kraken: " + "; ".join(result["error"]))
+    return result
+
+def make_coinbase_client(api_key, api_secret):
+    return RESTClient(api_key=api_key.strip(), api_secret=api_secret.replace("\\n", "\n").strip(), timeout=REQUEST_TIMEOUT)
+
+def get_kraken_balance(api_key, api_secret):
+    res = kraken_private_request(api_key, api_secret, "/0/private/Balance", {})
+    return {k: D(v) for k, v in res["result"].items() if D(v) > 0}
+
+def get_coinbase_balance(client):
+    accounts = client.get_accounts()
+    bal = {}
+    for acc in accounts.accounts:
+        if float(acc.balance) > 0:
+            bal[acc.currency] = D(acc.balance)
+    return bal
+
+def kraken_market_order(api_key, api_secret, side, volume):
+    return kraken_private_request(api_key, api_secret, "/0/private/AddOrder", {
+        "pair": KRAKEN_PAIR,
+        "type": side.lower(),
+        "ordertype": "market",
+        "volume": format(volume, "f"),
+    })
+
+def coinbase_market_order(client, side, volume, price):
+    cid = str(uuid.uuid4())
+    if side.upper() == "BUY":
+        quote = (volume * price).quantize(D("0.01"))
+        return client.market_order_buy(client_order_id=cid, product_id=COINBASE_PRODUCT, quote_size=format(quote, "f"))
+    else:
+        return client.market_order_sell(client_order_id=cid, product_id=COINBASE_PRODUCT, base_size=format(volume, "f"))
+
+def response_to_dict(r):
+    return r.to_dict() if hasattr(r, "to_dict") else r
+
+# ---------- Streamlit UI ----------
+def get_env(key, default=""):
+    return os.environ.get(key, default)
+
+KRAKEN_API_KEY_ENV = get_env("KRAKEN_API_KEY")
+KRAKEN_SECRET_ENV = get_env("KRAKEN_SECRET")
+COINBASE_KEY_ENV = get_env("COINBASE_API_KEY")
+COINBASE_SECRET_ENV = get_env("COINBASE_SECRET")
+
+st.set_page_config(page_title="🐱 BUTTER ARB v5", page_icon="🐱", layout="wide")
+
+# --- Session state ---
+if "running" not in st.session_state:
+    st.session_state.running = False
+if "live_mode" not in st.session_state:
+    st.session_state.live_mode = False
+if "logs" not in st.session_state:
+    st.session_state.logs = []
+if "trade_count" not in st.session_state:
+    st.session_state.trade_count = 0
+if "total_profit_usd" not in st.session_state:
+    st.session_state.total_profit_usd = D("0.00")
+if "last_trade_time" not in st.session_state:
+    st.session_state.last_trade_time = 0.0
+if "kraken_key" not in st.session_state:
+    st.session_state.kraken_key = KRAKEN_API_KEY_ENV
+if "kraken_secret" not in st.session_state:
+    st.session_state.kraken_secret = KRAKEN_SECRET_ENV
+if "coinbase_key" not in st.session_state:
+    st.session_state.coinbase_key = COINBASE_KEY_ENV
+if "coinbase_secret" not in st.session_state:
+    st.session_state.coinbase_secret = COINBASE_SECRET_ENV
+if "ws_started" not in st.session_state:
+    st.session_state.ws_started = False
+
+def add_log(msg):
+    ts = time.strftime("%H:%M:%S")
+    st.session_state.logs.insert(0, f"[{ts}] {msg}")
+    st.session_state.logs = st.session_state.logs[:200]
+
+# --- Sidebar ---
+st.sidebar.title("🐱 BUTTER ARB v5")
+st.sidebar.header("🔐 API KEYS")
+kraken_key = st.sidebar.text_input("Kraken API Key", type="password", key="kraken_key")
+kraken_secret = st.sidebar.text_area("Kraken Private Key", type="password", key="kraken_secret", height=80)
+coinbase_key = st.sidebar.text_input("Coinbase API Key Name", type="password", key="coinbase_key")
+coinbase_secret = st.sidebar.text_area("Coinbase Private Key (PEM)", type="password", key="coinbase_secret", height=120)
+
+st.sidebar.divider()
+st.sidebar.header("⚙️ PARAMETERS")
+min_net_edge = D(st.sidebar.number_input("Min Net Edge (%)", min_value=-1.0, value=0.10, step=0.05, format="%.2f"))
+total_fees = D(st.sidebar.number_input("Combined Fees (%)", min_value=0.0, value=0.80, step=0.05, format="%.2f"))
+slippage = D(st.sidebar.number_input("Slippage (%)", min_value=0.0, value=0.20, step=0.05, format="%.2f"))
+cooldown = st.sidebar.number_input("Cooldown (sec)", min_value=0, value=30, step=5)
+poll = st.sidebar.slider("REST fallback poll (sec)", min_value=2, max_value=15, value=5)
+
+st.sidebar.divider()
+st.sidebar.header("🔴 LIVE TRADING")
+st.session_state.live_mode = st.sidebar.toggle("Enable live orders", value=st.session_state.live_mode)
+if st.session_state.live_mode:
+    st.sidebar.error("⚠️ LIVE TRADING ACTIVE")
+else:
+    st.sidebar.info("🧪 DRY RUN")
+
+if st.sidebar.button("⏹ STOP BOT", use_container_width=True):
+    st.session_state.running = False
+    add_log("⏹ Bot stopped by user.")
+    st.rerun()
+
+creds_ok = all([kraken_key.strip(), kraken_secret.strip(), coinbase_key.strip(), coinbase_secret.strip()])
+
+# --- Main UI ---
+st.title("🐱 CAT ARBITRAGE – BUTTER PROTOCOL v5.0")
+st.caption("WebSocket‑powered • 4‑exchange scanner • Instant updates")
+
+status_placeholder = st.empty()
+metrics_cols = st.columns(4)
+decision_placeholder = st.empty()
+pandl_placeholder = st.empty()
+log_placeholder = st.empty()
+
+col_start, col_test, col_force = st.columns(3)
+with col_start:
+    if st.button("▶ START MONITORING", use_container_width=True, disabled=not creds_ok or st.session_state.running):
+        st.session_state.running = True
+        add_log("🚀 Monitoring started.")
+        st.rerun()
+with col_test:
+    if st.button("Test Connections", use_container_width=True, disabled=not creds_ok):
+        try:
+            k_bal = get_kraken_balance(kraken_key, kraken_secret)
+            client = make_coinbase_client(coinbase_key, coinbase_secret)
+            c_bal = get_coinbase_balance(client)
+            st.success("✅ Both exchanges connected.")
+            st.json({"Kraken": {k: f"{v:.4f}" for k,v in k_bal.items()}, "Coinbase": {k: f"{v:.4f}" for k,v in c_bal.items()}})
+            add_log("Connection tests passed.")
+        except Exception as e:
+            st.error(f"❌ {e}")
+            add_log(f"Test failed: {e}")
+with col_force:
+    if st.button("💣 FORCE TRADE", use_container_width=True, disabled=not creds_ok):
+        # Force a trade using current prices (if live)
+        if not st.session_state.live_mode:
+            st.warning("Enable Live Trading first!")
+        else:
+            try:
+                client = make_coinbase_client(coinbase_key, coinbase_secret)
+                k_price = get_kraken_price_rest() or latest_prices.get("kraken")
+                c_price = get_coinbase_price_rest() or latest_prices.get("coinbase")
+                if not k_price or not c_price:
+                    st.error("Could not fetch prices.")
+                else:
+                    k_bal = get_kraken_balance(kraken_key, kraken_secret)
+                    c_bal = get_coinbase_balance(client)
+                    sol_k = k_bal.get("SOL", D("0"))
+                    sol_c = c_bal.get("SOL", D("0"))
+                    usd_c = c_bal.get("USD", D("0"))
+                    max_sol = min(sol_k, sol_c, usd_c / k_price) * D("0.8")
+                    trade_vol = max_sol if max_sol > D("0.01") else D("0.01")
+                    if k_price < c_price:
+                        buy_ex, sell_ex = "Kraken", "Coinbase"
+                        buy_price, sell_price = k_price, c_price
+                    else:
+                        buy_ex, sell_ex = "Coinbase", "Kraken"
+                        buy_price, sell_price = c_price, k_price
+                    st.info(f"Executing: Buy {trade_vol:.4f} SOL on {buy_ex}, Sell on {sell_ex}")
+                    if sell_ex == "Coinbase":
+                        sell_res = coinbase_market_order(client, "SELL", trade_vol, sell_price)
+                    else:
+                        sell_res = kraken_market_order(kraken_key, kraken_secret, "sell", trade_vol)
+                    if buy_ex == "Coinbase":
+                        buy_res = coinbase_market_order(client, "BUY", trade_vol, buy_price)
+                    else:
+                        buy_res = kraken_market_order(kraken_key, kraken_secret, "buy", trade_vol)
+                    profit = (abs(k_price - c_price) * trade_vol).quantize(D("0.01"))
+                    st.session_state.total_profit_usd += profit
+                    st.session_state.trade_count += 1
+                    add_log(f"💥 FORCE TRADE #{st.session_state.trade_count} | profit ~${profit}")
+                    st.success(f"✅ Trade done! Est. profit: ${profit}")
+                    with st.expander("Order responses", expanded=True):
+                        st.write("Sell:", sell_res)
+                        st.write("Buy:", buy_res)
+            except Exception as e:
+                st.error(f"Force trade failed: {e}")
+                add_log(f"Force trade error: {e}")
+
+# --- Start WebSocket threads (daemon) ---
+if creds_ok and not st.session_state.ws_started:
+    threading.Thread(target=start_kraken_ws, daemon=True).start()
+    threading.Thread(target=start_coinbase_ws, daemon=True).start()
+    st.session_state.ws_started = True
+    add_log("🌐 WebSocket feeds started.")
+
+# --- Main loop ---
+if st.session_state.running and creds_ok:
+    try:
+        client = make_coinbase_client(coinbase_key, coinbase_secret)
+        while st.session_state.running:
+            # Get prices from WebSocket store, fallback to REST
+            with price_lock:
+                k_price = latest_prices.get("kraken")
+                c_price = latest_prices.get("coinbase")
+            if k_price is None:
+                k_price = get_kraken_price_rest()
+            if c_price is None:
+                c_price = get_coinbase_price_rest()
+            b_price = fetch_binance_price()
+            ku_price = fetch_kucoin_price()
+
+            # Build valid dict
+            all_prices = {
+                "Kraken": k_price,
+                "Coinbase": c_price,
+                "Binance": b_price,
+                "KuCoin": ku_price,
+            }
+            valid = {k: v for k, v in all_prices.items() if v is not None}
+            if len(valid) < 2:
+                time.sleep(poll)
+                continue
+
+            # Best buy (lowest) and best sell (highest)
+            best_buy_ex = min(valid, key=valid.get)
+            best_sell_ex = max(valid, key=valid.get)
+            buy_price = valid[best_buy_ex]
+            sell_price = valid[best_sell_ex]
+            gross_pct = (sell_price - buy_price) / buy_price * D("100")
+            net_pct = gross_pct - total_fees - slippage
+
+            # Update UI
+            status_placeholder.success(f"🟢 ACTIVE – {'LIVE' if st.session_state.live_mode else 'DRY RUN'}")
+            metrics_cols[0].metric("Kraken (WS)", f"${k_price:.4f}" if k_price else "—")
+            metrics_cols[1].metric("Coinbase (WS)", f"${c_price:.4f}" if c_price else "—")
+            metrics_cols[2].metric("Binance (REST)", f"${b_price:.4f}" if b_price else "—")
+            metrics_cols[3].metric("KuCoin (REST)", f"${ku_price:.4f}" if ku_price else "—")
+
+            # Determine route
+            route_text = f"Best: Buy {best_buy_ex} → Sell {best_sell_ex}"
+            decision_placeholder.write(f"**{route_text}** | Gross: {gross_pct:.2f}% | Net: {net_pct:.2f}%")
+
+            # Executable? Only if best buy/sell are Kraken or Coinbase (you have keys)
+            executable = (best_buy_ex in ("Kraken", "Coinbase") and best_sell_ex in ("Kraken", "Coinbase") and best_buy_ex != best_sell_ex)
+
+            now = time.time()
+            cooldown_ok = now - st.session_state.last_trade_time >= cooldown
+
+            if executable and net_pct >= min_net_edge and cooldown_ok:
+                if not st.session_state.live_mode:
+                    decision_placeholder.warning("🔍 OPPORTUNITY (DRY RUN) – would execute")
+                    add_log(f"DRY RUN: {best_buy_ex}→{best_sell_ex} | net {net_pct:.3f}%")
+                    st.session_state.last_trade_time = now
+                else:
+                    decision_placeholder.error("🔥 EXECUTING LIVE TRADE")
+                    try:
+                        # Determine buy/sell sides
+                        if best_buy_ex == "Kraken":
+                            buy_res = kraken_market_order(kraken_key, kraken_secret, "buy", trade_vol)
+                        else:
+                            buy_res = coinbase_market_order(client, "BUY", trade_vol, buy_price)
+                        if best_sell_ex == "Kraken":
+                            sell_res = kraken_market_order(kraken_key, kraken_secret, "sell", trade_vol)
+                        else:
+                            sell_res = coinbase_market_order(client, "SELL", trade_vol, sell_price)
+
+                        profit = (sell_price - buy_price) * trade_vol
+                        profit = profit.quantize(D("0.01"))
+                        st.session_state.total_profit_usd += profit
+                        st.session_state.trade_count += 1
+                        st.session_state.last_trade_time = now
+                        add_log(f"✅ LIVE TRADE #{st.session_state.trade_count} | profit ~${profit}")
+                        with st.expander("Order responses", expanded=False):
+                            st.write("Buy:", buy_res)
+                            st.write("Sell:", sell_res)
+                    except Exception as e:
+                        add_log(f"❌ Trade execution error: {e}")
+            elif executable and net_pct >= min_net_edge and not cooldown_ok:
+                remaining = int(cooldown - (now - st.session_state.last_trade_time))
+                decision_placeholder.warning(f"Opportunity, cooldown {remaining}s")
+            else:
+                if not executable and len(valid) >= 2:
+                    decision_placeholder.info(f"📡 Signal on {best_buy_ex}→{best_sell_ex} (not executable – add more API keys)")
+                else:
+                    decision_placeholder.info(f"No trade – net {net_pct:.2f}% < {min_net_edge:.2f}%")
+
+            # P&L
+            pandl_placeholder.metric(
+                "💰 Total P&L (USD)",
+                f"${st.session_state.total_profit_usd:.2f}",
+                delta=f"Trades: {st.session_state.trade_count}"
+            )
+
+            # Logs
+            log_placeholder.subheader("📋 Activity Log")
+            log_placeholder.code("\n".join(st.session_state.logs[:50]) or "No activity.")
+
+            time.sleep(poll)
+
+    except Exception as e:
+        st.error(f"⚠️ Loop error: {e}")
+        add_log(f"Loop error: {e}")
+        st.session_state.running = False
+        st.rerun()
+
+else:
+    if not creds_ok:
+        status_placeholder.warning("Paste all API keys and test connections.")
+    else:
+        status_placeholder.info("Bot idle. Press START MONITORING.")
+
+st.divider()
+st.caption("🔥 WebSocket feeds provide instant price updates. Signals from Binance/KuCoin are shown but only Kraken/Coinbase are executable with current keys.")

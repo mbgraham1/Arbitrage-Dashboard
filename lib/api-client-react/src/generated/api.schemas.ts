@@ -30,14 +30,27 @@ export interface ExchangeCredentials {
   coinbaseSecret: string;
 }
 
+export interface WsStatus {
+  kraken: boolean;
+  coinbase: boolean;
+}
+
 export interface PriceData {
   krakenPrice: number;
   coinbasePrice: number;
+  binancePrice?: number | null;
+  kuCoinPrice?: number | null;
   grossSpreadPct: number;
   netEdgePct: number;
   route: string;
   buyExchange?: string;
   sellExchange?: string;
+  bestBuyExchange: string;
+  bestSellExchange: string;
+  buyPrice: number;
+  sellPrice: number;
+  executable: boolean;
+  wsStatus: WsStatus;
   timestamp: string;
 }
 
