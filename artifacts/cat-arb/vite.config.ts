@@ -69,6 +69,13 @@ export default defineConfig({
     strictPort: true,
     host: '0.0.0.0',
     allowedHosts: true,
+    // Proxy /api to the API server in dev so the browser doesn't 404
+    proxy: {
+      '/api': {
+        target: 'http://localhost:8080',
+        changeOrigin: true,
+      },
+    },
     fs: {
       strict: true,
     },

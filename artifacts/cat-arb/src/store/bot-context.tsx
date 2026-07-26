@@ -63,11 +63,37 @@ const DEFAULT_SETTINGS: BotSettings = {
   pollInterval: 5,
 };
 
+// Bump this when defaults change meaningfully — forces a one-time reset for existing users
+const SETTINGS_VERSION = 2;
+
 export function BotProvider({ children }: { children: React.ReactNode }) {
   const queryClient = useQueryClient();
 
   const [credentials, setCredentials] = useLocalStorage<ExchangeCredentials>("cat_arb_creds", EMPTY_CREDS);
-  const [settings, setSettings] = useLocalStorage<BotSettings>("cat_arb_settings", DEFAULT_SETTINGS);
+
+  // Settings versioning: if stored version is old, reset to new defaults once
+  const [storedSettingsRaw, setStoredSettingsRaw] = useLocalStorage<BotSettings & { _v?: number }>(
+    "cat_arb_settings",
+    { ...DEFAULT_SETTINGS, _v: SETTINGS_VERSION },
+  );
+  const needsMigration = !storedSettingsRaw._v || storedSettingsRaw._v < SETTINGS_VERSION;
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  const { _v: _ignored, ...storedSettingsClean } = storedSettingsRaw;
+  const settings: BotSettings = needsMigration
+    ? DEFAULT_SETTINGS
+    : { ...DEFAULT_SETTINGS, ...storedSettingsClean };
+  const setSettings = (s: BotSettings) => setStoredSettingsRaw({ ...s, _v: SETTINGS_VERSION });
+
+  // Run migration once on mount
+  const migrationDoneRef = useRef(false);
+  useEffect(() => {
+    if (migrationDoneRef.current) return;
+    migrationDoneRef.current = true;
+    if (needsMigration) {
+      setStoredSettingsRaw({ ...DEFAULT_SETTINGS, _v: SETTINGS_VERSION });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   const [isRunning, setIsRunning] = useState(false);
   const [liveMode, setLiveMode] = useLocalStorage("cat_arb_live_mode", false);
   const [latestPriceData, setLatestPriceData] = useState<PriceData | null>(null);
