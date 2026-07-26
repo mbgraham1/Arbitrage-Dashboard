@@ -194,22 +194,54 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
   );
 
   // ── Force Trade ───────────────────────────────────────────────────────────────
+  // Always executes on Kraken/Coinbase only — uses cached prices when available,
+  // falls back to a fresh fetch, then buys on the cheaper side and sells on the
+  // more expensive side (mirroring: k_price or kraken_rest(), c_price or coinbase_rest()).
   const forceTrade = useCallback(async () => {
     if (isExecutingRef.current) return;
     setIsForcingTrade(true);
     try {
-      let data = latestPriceDataRef.current;
-      if (!data) {
+      // Use cached prices if present (from latest WS snapshot), else fetch fresh
+      let kPrice = latestPriceDataRef.current?.krakenPrice;
+      let cPrice = latestPriceDataRef.current?.coinbasePrice;
+      let priceData = latestPriceDataRef.current;
+
+      if (!kPrice || !cPrice) {
         addLog("info", "[FORCE] Fetching prices...");
-        data = await fetchPricesMutation.mutateAsync({ data: credentialsRef.current });
-        latestPriceDataRef.current = data;
-        setLatestPriceData(data);
+        priceData = await fetchPricesMutation.mutateAsync({ data: credentialsRef.current });
+        latestPriceDataRef.current = priceData;
+        setLatestPriceData(priceData);
+        kPrice = priceData.krakenPrice;
+        cPrice = priceData.coinbasePrice;
       }
-      if (!data.executable) {
-        addLog("warning", "[FORCE] Route not executable — best spread is on Binance/KuCoin (no keys)");
+
+      if (!kPrice || !cPrice || !priceData) {
+        addLog("error", "[FORCE] Could not get Kraken/Coinbase prices");
         return;
       }
-      await runExecuteTrade(data, true);
+
+      // Determine direction: buy on cheaper exchange, sell on more expensive
+      const buyEx  = kPrice < cPrice ? "Kraken"   : "Coinbase";
+      const sellEx = kPrice < cPrice ? "Coinbase"  : "Kraken";
+      const buyPrice      = Math.min(kPrice, cPrice);
+      const sellPrice     = Math.max(kPrice, cPrice);
+      const grossSpreadPct = ((sellPrice - buyPrice) / buyPrice) * 100;
+
+      // Build a price-data object forced to the Kraken/Coinbase route
+      const forcedData: PriceData = {
+        ...priceData,
+        bestBuyExchange: buyEx,
+        bestSellExchange: sellEx,
+        buyExchange: buyEx,
+        sellExchange: sellEx,
+        buyPrice,
+        sellPrice,
+        grossSpreadPct,
+        route: `Buy ${buyEx} → Sell ${sellEx}`,
+        executable: true,
+      };
+
+      await runExecuteTrade(forcedData, true);
     } catch (err) {
       addLog("error", `[FORCE] Error: ${err instanceof Error ? err.message : "Unknown"}`);
     } finally {
