@@ -55,6 +55,14 @@ export interface BalanceData {
   suggestedVolume?: number;
 }
 
+export interface PreloadedCredentials {
+  krakenKey: string;
+  krakenSecret: string;
+  coinbaseKey: string;
+  coinbaseSecret: string;
+  anyLoaded: boolean;
+}
+
 export interface ConnectionTestResult {
   ok: boolean;
   message: string;

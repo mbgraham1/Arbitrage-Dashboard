@@ -20,7 +20,15 @@ import {
 
 const router: IRouter = Router();
 
-// ── GET /prices (public Kraken price only, no creds needed for display) ───────
+// ── GET /credentials/preloaded ────────────────────────────────────────────────
+router.get("/credentials/preloaded", async (_req, res): Promise<void> => {
+  const krakenKey = process.env["KRAKEN_API_KEY"] ?? "";
+  const krakenSecret = process.env["KRAKEN_SECRET"] ?? "";
+  const coinbaseKey = process.env["COINBASE_API_KEY"] ?? "";
+  const coinbaseSecret = process.env["COINBASE_SECRET"] ?? "";
+  const anyLoaded = !!(krakenKey || krakenSecret || coinbaseKey || coinbaseSecret);
+  res.json({ krakenKey, krakenSecret, coinbaseKey, coinbaseSecret, anyLoaded });
+});
 
 // ── POST /prices ──────────────────────────────────────────────────────────────
 router.post("/prices", async (req, res): Promise<void> => {

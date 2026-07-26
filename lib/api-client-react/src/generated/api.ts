@@ -28,6 +28,7 @@ import type {
   HealthStatus,
   KrakenCredentials,
   ListTradesParams,
+  PreloadedCredentials,
   PriceData,
   TradeRecord,
   TradeRequest,
@@ -281,6 +282,83 @@ export const useFetchBalances = <TError = ErrorType<ErrorResponse>,
       > => {
       return useMutation(getFetchBalancesMutationOptions(options));
     }
+
+export const getGetPreloadedCredentialsUrl = () => {
+
+
+
+
+  return `/api/credentials/preloaded`
+}
+
+/**
+ * @summary Read API credentials from server environment variables (Replit Secrets)
+ */
+export const getPreloadedCredentials = async ( options?: RequestInit): Promise<PreloadedCredentials> => {
+
+  return customFetch<PreloadedCredentials>(getGetPreloadedCredentialsUrl(),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getGetPreloadedCredentialsQueryKey = () => {
+    return [
+    `/api/credentials/preloaded`
+    ] as const;
+    }
+
+
+export const getGetPreloadedCredentialsQueryOptions = <TData = Awaited<ReturnType<typeof getPreloadedCredentials>>, TError = ErrorType<unknown>>( options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getPreloadedCredentials>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getGetPreloadedCredentialsQueryKey();
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof getPreloadedCredentials>>> = ({ signal }) => getPreloadedCredentials({ signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof getPreloadedCredentials>>, TError, TData> & { queryKey: QueryKey }
+}
+
+export type GetPreloadedCredentialsQueryResult = NonNullable<Awaited<ReturnType<typeof getPreloadedCredentials>>>
+export type GetPreloadedCredentialsQueryError = ErrorType<unknown>
+
+
+/**
+ * @summary Read API credentials from server environment variables (Replit Secrets)
+ */
+
+export function useGetPreloadedCredentials<TData = Awaited<ReturnType<typeof getPreloadedCredentials>>, TError = ErrorType<unknown>>(
+  options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getPreloadedCredentials>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+
+ ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+
+  const queryOptions = getGetPreloadedCredentialsQueryOptions(options)
+
+  const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
 
 export const getTestKrakenUrl = () => {
 

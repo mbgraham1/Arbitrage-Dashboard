@@ -91,6 +91,19 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
 
+  /credentials/preloaded:
+    get:
+      operationId: getPreloadedCredentials
+      tags: [exchange]
+      summary: Read API credentials from server environment variables (Replit Secrets)
+      responses:
+        "200":
+          description: Credentials loaded from env vars (empty string if not set)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PreloadedCredentials"
+
   /test-kraken:
     post:
       operationId: testKraken
@@ -309,6 +322,21 @@ components:
           type: number
         suggestedVolume:
           type: number
+
+    PreloadedCredentials:
+      type: object
+      required: [krakenKey, krakenSecret, coinbaseKey, coinbaseSecret, anyLoaded]
+      properties:
+        krakenKey:
+          type: string
+        krakenSecret:
+          type: string
+        coinbaseKey:
+          type: string
+        coinbaseSecret:
+          type: string
+        anyLoaded:
+          type: boolean
 
     ConnectionTestResult:
       type: object

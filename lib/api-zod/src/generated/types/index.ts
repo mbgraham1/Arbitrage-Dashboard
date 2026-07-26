@@ -15,6 +15,7 @@ export * from './exchangeCredentials';
 export * from './healthStatus';
 export * from './krakenCredentials';
 export * from './listTradesParams';
+export * from './preloadedCredentials';
 export * from './priceData';
 export * from './tradeRecord';
 export * from './tradeRequest';

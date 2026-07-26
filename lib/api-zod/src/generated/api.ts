@@ -66,6 +66,18 @@ export const FetchBalancesResponse = zod.object({
 
 
 /**
+ * @summary Read API credentials from server environment variables (Replit Secrets)
+ */
+export const GetPreloadedCredentialsResponse = zod.object({
+  "krakenKey": zod.string(),
+  "krakenSecret": zod.string(),
+  "coinbaseKey": zod.string(),
+  "coinbaseSecret": zod.string(),
+  "anyLoaded": zod.boolean()
+})
+
+
+/**
  * @summary Test Kraken connection
  */
 export const TestKrakenBody = zod.object({
