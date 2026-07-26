@@ -1,4 +1,6 @@
-import React, { createContext, useContext, useEffect, useState, useRef, useCallback } from "react";
+import React, {
+  createContext, useContext, useEffect, useState, useRef, useCallback,
+} from "react";
 import { useLocalStorage } from "@/hooks/use-local-storage";
 import {
   useFetchPrices,
@@ -74,25 +76,41 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
   const [secretsLoaded, setSecretsLoaded] = useState(false);
   const [isForcingTrade, setIsForcingTrade] = useState(false);
 
+  // ── Refs that give poll() always-current values without re-triggering effects ──
+  const credentialsRef = useRef(credentials);
+  const settingsRef = useRef(settings);
+  const liveModeRef = useRef(liveMode);
+  const latestPriceDataRef = useRef<PriceData | null>(null);
+
+  useEffect(() => { credentialsRef.current = credentials; }, [credentials]);
+  useEffect(() => { settingsRef.current = settings; }, [settings]);
+  useEffect(() => { liveModeRef.current = liveMode; }, [liveMode]);
+
   const lastTradeTimeRef = useRef<number>(0);
   const isExecutingRef = useRef<boolean>(false);
 
   const fetchPricesMutation = useFetchPrices();
   const executeTradeMutation = useExecuteTrade();
 
-  // Auto-load credentials from Replit Secrets on mount
+  // ── Preloaded credentials (run once) ─────────────────────────────────────────
+  const preloadAppliedRef = useRef(false);
   const { data: preloaded } = useGetPreloadedCredentials();
-  useEffect(() => {
-    if (!preloaded?.anyLoaded) return;
-    setSecretsLoaded(true);
-    setCredentials((prev: ExchangeCredentials) => ({
-      krakenKey: prev.krakenKey || preloaded.krakenKey,
-      krakenSecret: prev.krakenSecret || preloaded.krakenSecret,
-      coinbaseKey: prev.coinbaseKey || preloaded.coinbaseKey,
-      coinbaseSecret: prev.coinbaseSecret || preloaded.coinbaseSecret,
-    }));
-  }, [preloaded]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  useEffect(() => {
+    if (preloadAppliedRef.current || !preloaded?.anyLoaded) return;
+    preloadAppliedRef.current = true;
+    setSecretsLoaded(true);
+    // Only fill in fields that are currently blank
+    setCredentials({
+      krakenKey: credentials.krakenKey || preloaded.krakenKey,
+      krakenSecret: credentials.krakenSecret || preloaded.krakenSecret,
+      coinbaseKey: credentials.coinbaseKey || preloaded.coinbaseKey,
+      coinbaseSecret: credentials.coinbaseSecret || preloaded.coinbaseSecret,
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [preloaded]);
+
+  // ── Stable log helper ─────────────────────────────────────────────────────────
   const addLog = useCallback((type: LogEntry["type"], message: string) => {
     setActivityLog((prev) => {
       const entry: LogEntry = {
@@ -103,132 +121,153 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
       };
       return [entry, ...prev].slice(0, 200);
     });
-  }, []);
+  }, []); // no deps — setActivityLog is stable
 
   const clearLog = useCallback(() => setActivityLog([]), []);
 
-  // ── Shared execution helper ────────────────────────────────────────────────
-  const executeTrade = useCallback(async (data: PriceData, isForced = false) => {
-    const tag = isForced ? "[FORCE]" : liveMode ? "[LIVE]" : "[DRY RUN]";
-    const netEdge = data.grossSpreadPct - settings.totalFees - settings.slippage;
+  // ── Shared execution (reads from refs, not closure) ───────────────────────────
+  const runExecuteTrade = useCallback(
+    async (data: PriceData, forced: boolean) => {
+      const live = forced ? true : liveModeRef.current;
+      const s = settingsRef.current;
+      const creds = credentialsRef.current;
+      const tag = forced ? "[FORCE]" : live ? "[LIVE]" : "[DRY RUN]";
+      const netEdge = data.grossSpreadPct - s.totalFees - s.slippage;
 
-    addLog("trade", `${tag} Executing — Net edge: ${netEdge.toFixed(3)}% · Route: ${data.route}`);
-
-    try {
-      const res = await executeTradeMutation.mutateAsync({
-        data: {
-          krakenKey: credentials.krakenKey,
-          krakenSecret: credentials.krakenSecret,
-          coinbaseKey: credentials.coinbaseKey,
-          coinbaseSecret: credentials.coinbaseSecret,
-          buyExchange: data.bestBuyExchange,
-          sellExchange: data.bestSellExchange,
-          volume: 1.0,
-          krakenPrice: data.krakenPrice,
-          coinbasePrice: data.coinbasePrice,
-          liveMode: isForced ? true : liveMode,
-          netEdgePct: netEdge,
-        },
-      });
-      if (res.success) {
-        addLog("success", `${tag} Done — Est. profit: $${res.estimatedProfitUsd.toFixed(2)}`);
-        setSessionProfitUsd((p) => p + res.estimatedProfitUsd);
-        queryClient.invalidateQueries({ queryKey: getGetTradeSummaryQueryKey() });
-        queryClient.invalidateQueries({ queryKey: getListTradesQueryKey() });
-      } else {
-        addLog("error", `${tag} Failed: ${res.error}`);
+      addLog("trade", `${tag} Executing — net ${netEdge.toFixed(3)}% · ${data.route}`);
+      try {
+        const res = await executeTradeMutation.mutateAsync({
+          data: {
+            krakenKey: creds.krakenKey,
+            krakenSecret: creds.krakenSecret,
+            coinbaseKey: creds.coinbaseKey,
+            coinbaseSecret: creds.coinbaseSecret,
+            buyExchange: data.bestBuyExchange,
+            sellExchange: data.bestSellExchange,
+            volume: 1.0,
+            krakenPrice: data.krakenPrice,
+            coinbasePrice: data.coinbasePrice,
+            liveMode: live,
+            netEdgePct: netEdge,
+          },
+        });
+        if (res.success) {
+          addLog("success", `${tag} Done — est. profit $${res.estimatedProfitUsd.toFixed(2)}`);
+          setSessionProfitUsd((p) => p + res.estimatedProfitUsd);
+          queryClient.invalidateQueries({ queryKey: getGetTradeSummaryQueryKey() });
+          queryClient.invalidateQueries({ queryKey: getListTradesQueryKey() });
+        } else {
+          addLog("error", `${tag} Failed: ${res.error}`);
+        }
+      } catch (err) {
+        addLog("error", `${tag} Exception: ${err instanceof Error ? err.message : "Unknown"}`);
       }
-    } catch (err: unknown) {
-      addLog("error", `${tag} Exception: ${err instanceof Error ? err.message : "Unknown error"}`);
-    }
-  }, [credentials, liveMode, settings, addLog, executeTradeMutation, queryClient]);
+    },
+    // executeTradeMutation and queryClient are stable (React Query guarantees)
+    [addLog, executeTradeMutation, queryClient],
+  );
 
-  // ── Force Trade ────────────────────────────────────────────────────────────
+  // ── Force Trade ───────────────────────────────────────────────────────────────
   const forceTrade = useCallback(async () => {
-    if (isForcingTrade) return;
+    if (isExecutingRef.current) return;
     setIsForcingTrade(true);
     try {
-      let data = latestPriceData;
-      // Fetch fresh prices if we don't have any
+      let data = latestPriceDataRef.current;
       if (!data) {
-        addLog("info", "[FORCE] Fetching fresh prices...");
-        data = await fetchPricesMutation.mutateAsync({ data: credentials });
+        addLog("info", "[FORCE] Fetching prices...");
+        data = await fetchPricesMutation.mutateAsync({ data: credentialsRef.current });
+        latestPriceDataRef.current = data;
         setLatestPriceData(data);
       }
       if (!data.executable) {
-        addLog("warning", "[FORCE] Best route is not executable (signal on Binance/KuCoin only — no keys for those exchanges)");
+        addLog("warning", "[FORCE] Route not executable — best spread is on Binance/KuCoin (no keys)");
         return;
       }
-      await executeTrade(data, true);
-    } catch (err: unknown) {
-      addLog("error", `[FORCE] Price fetch failed: ${err instanceof Error ? err.message : "Unknown error"}`);
+      await runExecuteTrade(data, true);
+    } catch (err) {
+      addLog("error", `[FORCE] Error: ${err instanceof Error ? err.message : "Unknown"}`);
     } finally {
       setIsForcingTrade(false);
     }
-  }, [isForcingTrade, latestPriceData, credentials, addLog, fetchPricesMutation, executeTrade]);
+  }, [addLog, fetchPricesMutation, runExecuteTrade]);
 
-  // ── Bot polling loop ───────────────────────────────────────────────────────
+  // ── Polling loop — only re-runs when isRunning changes ───────────────────────
   useEffect(() => {
     if (!isRunning) return;
 
-    const hasCreds = credentials.krakenKey && credentials.coinbaseKey;
-    if (!hasCreds) {
-      addLog("error", "Cannot start bot: Missing API credentials.");
+    const creds = credentialsRef.current;
+    if (!creds.krakenKey || !creds.coinbaseKey) {
+      addLog("error", "Cannot start: missing API credentials.");
       setIsRunning(false);
       return;
     }
 
     addLog("info", "Bot engine started. Connecting to data streams...");
 
+    let cancelled = false;
+
     const poll = async () => {
-      if (isExecutingRef.current) return;
+      if (cancelled || isExecutingRef.current) return;
+
+      const c = credentialsRef.current;
+      const s = settingsRef.current;
+      const live = liveModeRef.current;
 
       try {
-        const data = await fetchPricesMutation.mutateAsync({ data: credentials });
+        const data = await fetchPricesMutation.mutateAsync({ data: c });
+        if (cancelled) return;
+
+        latestPriceDataRef.current = data;
         setLatestPriceData(data);
 
         const now = Date.now();
-        const cooldownMs = settings.cooldown * 1000;
-        const timeSinceLastTrade = now - lastTradeTimeRef.current;
-        const cooldownElapsed = timeSinceLastTrade >= cooldownMs;
-
-        const netEdge = data.grossSpreadPct - settings.totalFees - settings.slippage;
-
-        // Log WS status on first few polls
-        const wsInfo = `[Kraken WS: ${data.wsStatus.kraken ? "live" : "REST"} | Coinbase WS: ${data.wsStatus.coinbase ? "live" : "REST"}]`;
+        const netEdge = data.grossSpreadPct - s.totalFees - s.slippage;
+        const wsInfo = `[K:${data.wsStatus.kraken ? "WS" : "REST"} C:${data.wsStatus.coinbase ? "WS" : "REST"}]`;
 
         if (!data.executable) {
-          // Signal exists on a non-executable exchange pair
-          addLog("info", `Signal: ${data.route} (net ${netEdge.toFixed(3)}%) — not executable with current keys ${wsInfo}`);
+          addLog("info", `Signal: ${data.route} (net ${netEdge.toFixed(3)}%) — signal-only, not executable ${wsInfo}`);
           return;
         }
 
-        if (netEdge >= settings.minNetEdge) {
-          if (!cooldownElapsed) {
-            addLog("warning", `Opportunity (${netEdge.toFixed(3)}%) but in COOLDOWN (${Math.ceil((cooldownMs - timeSinceLastTrade) / 1000)}s remaining)`);
-            return;
-          }
-          isExecutingRef.current = true;
-          lastTradeTimeRef.current = Date.now();
-          try {
-            await executeTrade(data);
-          } finally {
-            isExecutingRef.current = false;
-          }
-        } else {
-          addLog("info", `No trade — net edge ${netEdge.toFixed(3)}% < threshold ${settings.minNetEdge.toFixed(2)}% ${wsInfo}`);
+        if (netEdge < s.minNetEdge) {
+          addLog("info", `No trade — net ${netEdge.toFixed(3)}% < ${s.minNetEdge.toFixed(2)}% ${wsInfo}`);
+          return;
         }
-      } catch (error: unknown) {
-        addLog("error", `Price fetch failed: ${error instanceof Error ? error.message : "Network error"}`);
+
+        const cooldownMs = s.cooldown * 1000;
+        const elapsed = now - lastTradeTimeRef.current;
+        if (elapsed < cooldownMs) {
+          const remaining = Math.ceil((cooldownMs - elapsed) / 1000);
+          addLog("warning", `Opportunity (${netEdge.toFixed(3)}%) — COOLDOWN ${remaining}s remaining`);
+          return;
+        }
+
+        isExecutingRef.current = true;
+        lastTradeTimeRef.current = now;
+        try {
+          await runExecuteTrade(data, false);
+        } finally {
+          isExecutingRef.current = false;
+        }
+      } catch (err) {
+        if (!cancelled) {
+          addLog("error", `Price fetch failed: ${err instanceof Error ? err.message : "Network error"}`);
+        }
       }
     };
 
-    poll();
-    const intervalMs = Math.max(2, settings.pollInterval) * 1000;
-    const intervalId = setInterval(poll, intervalMs);
+    // First poll immediately, then on interval
+    void poll();
+    const intervalMs = Math.max(2, settingsRef.current.pollInterval) * 1000;
+    const id = setInterval(() => { void poll(); }, intervalMs);
 
-    return () => clearInterval(intervalId);
-  }, [isRunning, credentials, settings, liveMode, addLog, executeTrade]); // eslint-disable-line react-hooks/exhaustive-deps
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+    // Intentionally only [isRunning] — refs give us live values without re-triggering
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isRunning]);
 
   const value: BotContextType = {
     credentials,
@@ -253,9 +292,7 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
 }
 
 export function useBotContext() {
-  const context = useContext(BotContext);
-  if (context === undefined) {
-    throw new Error("useBotContext must be used within a BotProvider");
-  }
-  return context;
+  const ctx = useContext(BotContext);
+  if (!ctx) throw new Error("useBotContext must be used within a BotProvider");
+  return ctx;
 }
