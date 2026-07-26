@@ -148,8 +148,8 @@ export default function Dashboard() {
               size="lg"
               className="border-2 border-destructive text-destructive hover:bg-destructive hover:text-destructive-foreground font-bold uppercase"
               onClick={forceTrade}
-              disabled={isForcingTrade || !latestPriceData?.executable}
-              title={!latestPriceData?.executable ? "Not executable with current keys" : "Execute immediately, ignoring edge threshold"}
+              disabled={isForcingTrade}
+              title="Execute immediately on Kraken/Coinbase, ignoring edge threshold"
             >
               <Siren className="h-4 w-4 mr-2" />
               {isForcingTrade ? "EXECUTING..." : "FORCE TRADE"}
