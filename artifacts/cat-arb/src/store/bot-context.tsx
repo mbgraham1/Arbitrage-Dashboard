@@ -163,8 +163,14 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
       const netEdge = data.grossSpreadPct - s.totalFees - s.slippage;
 
       const expectedProfit = Math.abs(data.sellPrice - data.buyPrice) * 1.0; // volume fixed at 1.0 SOL
-      addLog("trade", `${tag} Executing — net ${netEdge.toFixed(3)}% · ${data.route}`);
-      addLog("info",  `${tag} Expected spread: $${expectedProfit.toFixed(2)}`);
+      addLog("trade",
+        `${tag} ${data.bestBuyExchange} → ${data.bestSellExchange} | ` +
+        `1.0000 SOL | ` +
+        `Buy $${data.buyPrice.toFixed(4)} | ` +
+        `Sell $${data.sellPrice.toFixed(4)} | ` +
+        `Net ${netEdge.toFixed(3)}%`
+      );
+      addLog("info", `${tag} Expected spread: $${expectedProfit.toFixed(2)}`);
       try {
         const res = await executeTradeMutation.mutateAsync({
           data: {
