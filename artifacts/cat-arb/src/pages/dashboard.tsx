@@ -8,7 +8,7 @@ import {
 } from "lucide-react";
 import { format } from "date-fns";
 import { cn } from "@/lib/utils";
-import { useGetTradeSummary } from "@workspace/api-client-react";
+import { useGetTradeSummary, useListTrades, TradeRecord } from "@workspace/api-client-react";
 
 // ── Small helpers ──────────────────────────────────────────────────────────────
 
@@ -449,6 +449,63 @@ export default function Dashboard() {
           </Card>
         </div>
       </div>
+
+      {/* Trade History Table */}
+      <TradeHistoryTable />
     </div>
+  );
+}
+
+function TradeHistoryTable() {
+  const tradesQuery = useListTrades({ limit: 50 });
+  const trades: TradeRecord[] = tradesQuery.data ?? [];
+
+  return (
+    <Card className="mt-6">
+      <CardHeader className="py-3">
+        <CardTitle className="text-sm flex items-center gap-2">
+          <TrendingUp className="h-4 w-4" /> Trade History
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="p-0 overflow-x-auto">
+        {trades.length === 0 ? (
+          <div className="p-8 text-center text-sm font-mono text-muted-foreground">No trades recorded yet.</div>
+        ) : (
+          <table className="w-full text-xs font-mono border-collapse">
+            <thead>
+              <tr className="border-b-2 border-border bg-muted/50">
+                {["Time","Trade ID","Buy","Sell","Volume","Buy Price","Sell Price","Profit","Order IDs"].map((h) => (
+                  <th key={h} className="text-left px-3 py-2 text-[10px] uppercase font-bold text-muted-foreground whitespace-nowrap">{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {trades.map((t, i) => {
+                const profit = t.estimatedProfitUsd;
+                const buyPrice = t.buyExchange === "Kraken" ? t.krakenPrice : t.coinbasePrice;
+                const sellPrice = t.sellExchange === "Kraken" ? t.krakenPrice : t.coinbasePrice;
+                return (
+                  <tr key={t.id} className={cn("border-b border-border/50", i % 2 === 0 ? "" : "bg-muted/20")}>
+                    <td className="px-3 py-1.5 whitespace-nowrap text-muted-foreground">{format(new Date(t.createdAt), "MM/dd HH:mm:ss")}</td>
+                    <td className="px-3 py-1.5 font-bold">#{t.id}</td>
+                    <td className="px-3 py-1.5 text-success font-bold">{t.buyExchange}</td>
+                    <td className="px-3 py-1.5 text-primary font-bold">{t.sellExchange}</td>
+                    <td className="px-3 py-1.5">{Number(t.volumeSol).toFixed(4)} SOL</td>
+                    <td className="px-3 py-1.5">${Number(buyPrice).toFixed(4)}</td>
+                    <td className="px-3 py-1.5">${Number(sellPrice).toFixed(4)}</td>
+                    <td className={cn("px-3 py-1.5 font-bold", profit >= 0 ? "text-success" : "text-destructive")}>
+                      {profit >= 0 ? "+" : ""}${profit.toFixed(4)}
+                    </td>
+                    <td className="px-3 py-1.5 text-muted-foreground max-w-[160px] truncate">
+                      {[t.buyOrderId, t.sellOrderId].filter(Boolean).join(" / ") || "—"}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        )}
+      </CardContent>
+    </Card>
   );
 }

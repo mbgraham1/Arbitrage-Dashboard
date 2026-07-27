@@ -111,6 +111,20 @@ export async function krakenLimitOrder(
   }, creds);
 }
 
+interface KrakenOrderInfo { status?: string; price?: string; vol_exec?: string; }
+
+/** Returns true if the order is fully filled, false if open/partial/unknown. */
+export async function krakenOrderFilled(creds: KrakenCreds, txid: string): Promise<boolean> {
+  const result = await krakenPrivateRequest<Record<string, KrakenOrderInfo>>("/0/private/QueryOrders", { txid, trades: "false" }, creds);
+  return result[txid]?.status === "closed";
+}
+
+/** Returns the average fill price for a closed Kraken order (0 if unavailable). */
+export async function krakenFillPrice(creds: KrakenCreds, txid: string): Promise<number> {
+  const result = await krakenPrivateRequest<Record<string, KrakenOrderInfo>>("/0/private/QueryOrders", { txid, trades: "false" }, creds);
+  return parseFloat(result[txid]?.price ?? "0") || 0;
+}
+
 export async function krakenCancelOrder(creds: KrakenCreds, txid: string): Promise<void> {
   await krakenPrivateRequest<unknown>("/0/private/CancelOrder", { txid }, creds);
 }
@@ -213,6 +227,24 @@ export async function coinbaseMarketOrder(
     }
   );
   return { orderId: data.success_response?.order_id ?? data.order_id, success: data.success };
+}
+
+interface CoinbaseOrderInfo { status?: string; average_filled_price?: string; }
+
+/** Returns true if the order is fully filled. */
+export async function coinbaseOrderFilled(creds: CoinbaseCreds, orderId: string): Promise<boolean> {
+  const data = await coinbaseRequest<{ order?: CoinbaseOrderInfo }>(
+    creds, "GET", `/api/v3/brokerage/orders/historical/${orderId}`
+  );
+  return data.order?.status === "FILLED";
+}
+
+/** Returns the average fill price for a filled Coinbase order (0 if unavailable). */
+export async function coinbaseFillPrice(creds: CoinbaseCreds, orderId: string): Promise<number> {
+  const data = await coinbaseRequest<{ order?: CoinbaseOrderInfo }>(
+    creds, "GET", `/api/v3/brokerage/orders/historical/${orderId}`
+  );
+  return parseFloat(data.order?.average_filled_price ?? "0") || 0;
 }
 
 export async function coinbaseCancelOrder(creds: CoinbaseCreds, orderId: string): Promise<void> {
