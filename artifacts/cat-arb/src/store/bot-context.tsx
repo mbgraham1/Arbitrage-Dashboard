@@ -295,7 +295,7 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
         const cooldownMs = s.cooldown * 1000;
         const elapsed = now - lastTradeTimeRef.current;
         if (elapsed < cooldownMs) {
-          const remaining = Math.ceil((cooldownMs - elapsed) / 1000);
+          const remaining = Math.max(0, Math.ceil((cooldownMs - elapsed) / 1000));
           addLog("warning", `Opportunity (${netEdge.toFixed(3)}%) — COOLDOWN ${remaining}s remaining`);
           return;
         }
