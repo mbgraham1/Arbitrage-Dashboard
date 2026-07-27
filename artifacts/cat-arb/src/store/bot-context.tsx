@@ -63,7 +63,7 @@ const EMPTY_CREDS: ExchangeCredentials = {
 const DEFAULT_SETTINGS: BotSettings = {
   minNetEdge: 0.05,    // v8: limit orders catch smaller spreads
   minProfitUsd: 1.00,  // v11: minimum $1.00 estimated net profit to execute
-  maxDailyLoss: 10.00, // v11: halt if cumulative loss exceeds $10.00
+  maxDailyLoss: 25.00, // v11: halt if cumulative loss exceeds $25.00
   totalFees: 0.56,     // v8: Kraken maker 0.16% + Coinbase maker 0.40%
   slippage: 0.05,      // v8: limit orders have near-zero slippage
   cooldown: 30,
@@ -71,7 +71,7 @@ const DEFAULT_SETTINGS: BotSettings = {
 };
 
 // Bump this when defaults change meaningfully — forces a one-time reset for existing users
-const SETTINGS_VERSION = 4;
+const SETTINGS_VERSION = 5;
 
 export function BotProvider({ children }: { children: React.ReactNode }) {
   const queryClient = useQueryClient();
@@ -123,6 +123,7 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
 
   const lastTradeTimeRef = useRef<number>(0);
   const lastBalanceUpdateRef = useRef<number>(0);
+  const dailyLossRef = useRef<number>(0);
   const isExecutingRef = useRef<boolean>(false);
 
   const BALANCE_CACHE_TTL_MS = 30_000; // refresh balances at most once per 30 s (mirrors Python)
@@ -204,6 +205,11 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
         if (res.success) {
           addLog("success", `${tag} Done — est. profit $${res.estimatedProfitUsd.toFixed(2)}`);
           setSessionProfitUsd((p) => p + res.estimatedProfitUsd);
+          if (res.estimatedProfitUsd < 0) {
+            const loss = Math.abs(res.estimatedProfitUsd);
+            dailyLossRef.current += loss;
+            setDailyLoss((prev) => prev + loss);
+          }
           queryClient.invalidateQueries({ queryKey: getGetTradeSummaryQueryKey() });
           queryClient.invalidateQueries({ queryKey: getListTradesQueryKey() });
         } else if (res.skipped) {
@@ -315,6 +321,12 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
         const now = Date.now();
         const netEdge = data.grossSpreadPct - s.totalFees - s.slippage;
         const wsInfo = `[K:${data.wsStatus.kraken ? "WS" : "REST"} C:${data.wsStatus.coinbase ? "WS" : "REST"}]`;
+
+        if (dailyLossRef.current >= s.maxDailyLoss) {
+          addLog("error", `Daily loss limit reached ($${dailyLossRef.current.toFixed(2)} >= $${s.maxDailyLoss.toFixed(2)}). Bot halted.`);
+          setIsRunning(false);
+          return;
+        }
 
         if (netEdge < s.minNetEdge) {
           addLog("info", `No trade — net ${netEdge.toFixed(3)}% < ${s.minNetEdge.toFixed(2)}% ${wsInfo}`);
