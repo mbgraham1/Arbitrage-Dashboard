@@ -244,6 +244,21 @@ export default function Settings() {
 
             <div className="space-y-3">
               <div className="flex flex-col gap-1">
+                <Label>Min Net Profit (USD)</Label>
+                <span className="text-xs text-muted-foreground font-mono">Execute only when estimated net profit &gt;= this value</span>
+              </div>
+              <Input
+                type="number"
+                step="0.25"
+                min="0"
+                data-testid="input-min-profit-usd"
+                value={localSettings.minProfitUsd}
+                onChange={(e) => setLocalSettings({ ...localSettings, minProfitUsd: parseFloat(e.target.value) || 0 })}
+              />
+            </div>
+
+            <div className="space-y-3">
+              <div className="flex flex-col gap-1">
                 <Label>Combined Fees (%)</Label>
                 <span className="text-xs text-muted-foreground font-mono">Total taker fees across both exchanges (default 0.80%)</span>
               </div>

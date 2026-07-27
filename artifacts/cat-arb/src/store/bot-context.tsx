@@ -21,6 +21,7 @@ export interface LogEntry {
 
 export interface BotSettings {
   minNetEdge: number;
+  minProfitUsd: number; // v11: minimum estimated net profit in USD
   totalFees: number;
   slippage: number;
   cooldown: number;
@@ -57,6 +58,7 @@ const EMPTY_CREDS: ExchangeCredentials = {
 
 const DEFAULT_SETTINGS: BotSettings = {
   minNetEdge: 0.05,   // v8: limit orders catch smaller spreads
+  minProfitUsd: 1.00, // v11: minimum $1.00 estimated net profit to execute
   totalFees: 0.56,    // v8: Kraken maker 0.16% + Coinbase maker 0.40%
   slippage: 0.05,     // v8: limit orders have near-zero slippage
   cooldown: 30,
@@ -64,7 +66,7 @@ const DEFAULT_SETTINGS: BotSettings = {
 };
 
 // Bump this when defaults change meaningfully — forces a one-time reset for existing users
-const SETTINGS_VERSION = 3;
+const SETTINGS_VERSION = 4;
 
 export function BotProvider({ children }: { children: React.ReactNode }) {
   const queryClient = useQueryClient();
@@ -297,6 +299,12 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
 
         if (netEdge < s.minNetEdge) {
           addLog("info", `No trade — net ${netEdge.toFixed(3)}% < ${s.minNetEdge.toFixed(2)}% ${wsInfo}`);
+          return;
+        }
+
+        const estimatedNetProfit = (netEdge / 100) * (data.buyPrice ?? 0) * 1.0;
+        if (estimatedNetProfit < s.minProfitUsd) {
+          addLog("info", `No trade — est. profit $${estimatedNetProfit.toFixed(2)} < $${s.minProfitUsd.toFixed(2)} minimum ${wsInfo}`);
           return;
         }
 

@@ -316,6 +316,10 @@ export default function Dashboard() {
                   <span>{settings.minNetEdge}%</span>
                 </div>
                 <div className="flex flex-col border-2 border-border p-2">
+                  <span className="text-muted-foreground uppercase text-[10px]">Min Profit</span>
+                  <span>${settings.minProfitUsd.toFixed(2)}</span>
+                </div>
+                <div className="flex flex-col border-2 border-border p-2">
                   <span className="text-muted-foreground uppercase text-[10px]">Cooldown</span>
                   <span>{settings.cooldown}s</span>
                 </div>
