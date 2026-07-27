@@ -44,6 +44,10 @@ export interface BotContextType {
   activityLog: LogEntry[];
   sessionProfitUsd: number;
   dailyLoss: number;
+  failedTrades: number;
+  startTime: number | null;
+  emergencyStop: boolean;
+  setEmergencyStop: (v: boolean) => void;
   addLog: (type: LogEntry["type"], message: string) => void;
   clearLog: () => void;
   secretsLoaded: boolean;
@@ -108,6 +112,9 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
   const [activityLog, setActivityLog] = useState<LogEntry[]>([]);
   const [sessionProfitUsd, setSessionProfitUsd] = useState(0);
   const [dailyLoss, setDailyLoss] = useState(0);
+  const [failedTrades, setFailedTrades] = useState(0);
+  const [emergencyStop, setEmergencyStop] = useState(false);
+  const [startTime, setStartTime] = useState<number | null>(null);
   const [secretsLoaded, setSecretsLoaded] = useState(false);
   const [isForcingTrade, setIsForcingTrade] = useState(false);
 
@@ -120,10 +127,12 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => { credentialsRef.current = credentials; }, [credentials]);
   useEffect(() => { settingsRef.current = settings; }, [settings]);
   useEffect(() => { liveModeRef.current = liveMode; }, [liveMode]);
+  useEffect(() => { emergencyStopRef.current = emergencyStop; }, [emergencyStop]);
 
   const lastTradeTimeRef = useRef<number>(0);
   const lastBalanceUpdateRef = useRef<number>(0);
   const dailyLossRef = useRef<number>(0);
+  const emergencyStopRef = useRef<boolean>(false);
   const isExecutingRef = useRef<boolean>(false);
 
   const BALANCE_CACHE_TTL_MS = 30_000; // refresh balances at most once per 30 s (mirrors Python)
@@ -216,9 +225,11 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
           addLog("warning", `${tag} ${res.error ?? "Trade skipped: insufficient balance."}`);
         } else {
           addLog("error", `${tag} Failed: ${res.error}`);
+          setFailedTrades((n) => n + 1);
         }
       } catch (err) {
         addLog("error", `${tag} Exception: ${err instanceof Error ? err.message : "Unknown"}`);
+        setFailedTrades((n) => n + 1);
       }
     },
     // executeTradeMutation and queryClient are stable (React Query guarantees)
@@ -293,6 +304,7 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
     }
 
     addLog("info", "Bot engine started. Connecting to data streams...");
+    setStartTime(Date.now());
 
     let cancelled = false;
 
@@ -318,9 +330,18 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
         latestPriceDataRef.current = data;
         setLatestPriceData(data);
 
+        if (!data.wsStatus.kraken)   addLog("warning", "Kraken websocket disconnected.");
+        if (!data.wsStatus.coinbase) addLog("warning", "Coinbase websocket disconnected.");
+
         const now = Date.now();
         const netEdge = data.grossSpreadPct - s.totalFees - s.slippage;
         const wsInfo = `[K:${data.wsStatus.kraken ? "WS" : "REST"} C:${data.wsStatus.coinbase ? "WS" : "REST"}]`;
+
+        if (emergencyStopRef.current) {
+          addLog("error", "🛑 Emergency stop activated.");
+          setIsRunning(false);
+          return;
+        }
 
         if (dailyLossRef.current >= s.maxDailyLoss) {
           addLog("error", `Daily loss limit reached ($${dailyLossRef.current.toFixed(2)} >= $${s.maxDailyLoss.toFixed(2)}). Bot halted.`);
@@ -369,6 +390,7 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
     return () => {
       cancelled = true;
       clearInterval(id);
+      setStartTime(null);
     };
     // Intentionally only [isRunning] — refs give us live values without re-triggering
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -388,6 +410,10 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
     activityLog,
     sessionProfitUsd,
     dailyLoss,
+    failedTrades,
+    startTime,
+    emergencyStop,
+    setEmergencyStop,
     addLog,
     clearLog,
     secretsLoaded,

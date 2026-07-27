@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useState, useEffect } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { useBotContext } from "@/store/bot-context";
@@ -74,7 +74,27 @@ export default function Dashboard() {
     latestPriceData, cachedBalances, activityLog, sessionProfitUsd,
     settings, credentials, addLog,
     forceTrade, isForcingTrade,
+    emergencyStop, setEmergencyStop,
+    startTime, failedTrades,
   } = useBotContext();
+
+  const [uptimeStr, setUptimeStr] = useState("0h 0m");
+  useEffect(() => {
+    if (!startTime) { setUptimeStr("0h 0m"); return; }
+    const tick = () => {
+      const s = Math.floor((Date.now() - startTime) / 1000);
+      setUptimeStr(`${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`);
+    };
+    tick();
+    const id = setInterval(tick, 1000);
+    return () => clearInterval(id);
+  }, [startTime]);
+
+  const handleEmergencyStop = () => {
+    setEmergencyStop(true);
+    setIsRunning(false);
+    addLog("error", "Emergency stop pressed.");
+  };
 
   const summaryQuery = useGetTradeSummary();
 
@@ -122,6 +142,20 @@ export default function Dashboard() {
         </div>
 
         <div className="flex items-center gap-3 w-full md:w-auto flex-wrap">
+          {isRunning && (
+            <div className="bg-muted px-3 py-2 border-2 border-border flex flex-col items-center justify-center">
+              <span className="text-[10px] uppercase font-bold text-muted-foreground">Uptime</span>
+              <span className="text-sm font-mono font-bold leading-none">{uptimeStr}</span>
+            </div>
+          )}
+
+          <div className="bg-muted px-3 py-2 border-2 border-border flex flex-col items-center justify-center">
+            <span className="text-[10px] uppercase font-bold text-muted-foreground">Failed Trades</span>
+            <span className={cn("text-sm font-mono font-bold leading-none", failedTrades > 0 ? "text-destructive" : "")}>
+              {failedTrades}
+            </span>
+          </div>
+
           <div className="bg-muted px-4 py-2 border-2 border-border flex flex-col items-end flex-1 md:flex-none">
             <span className="text-[10px] uppercase font-bold text-muted-foreground">
               Total P&L (Persistent) · {summaryQuery.data?.totalTrades ?? 0} trades
@@ -167,6 +201,17 @@ export default function Dashboard() {
             ) : (
               <><Play className="h-4 w-4 mr-2" /> START BOT</>
             )}
+          </Button>
+
+          <Button
+            size="lg"
+            variant="destructive"
+            className="w-full md:w-auto border-2 border-red-400 font-bold"
+            onClick={handleEmergencyStop}
+            disabled={emergencyStop}
+            title={emergencyStop ? "Emergency stop is active — reset in Settings" : "Immediately halt bot and cancel any open orders"}
+          >
+            🛑 {emergencyStop ? "EMERGENCY STOPPED" : "EMERGENCY STOP"}
           </Button>
         </div>
       </div>
