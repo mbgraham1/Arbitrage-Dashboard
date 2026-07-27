@@ -49,32 +49,24 @@ router.post("/prices", async (req, res): Promise<void> => {
       return;
     }
 
-    // Build a map of all available prices to find global best buy / sell
-    const available: Record<string, number> = { Kraken: krakenPrice, Coinbase: coinbasePrice };
-    if (binancePrice) available["Binance"] = binancePrice;
-    if (kuCoinPrice) available["KuCoin"] = kuCoinPrice;
-
-    const bestBuyExchange = Object.entries(available).reduce((a, b) => b[1] < a[1] ? b : a)[0];
-    const bestSellExchange = Object.entries(available).reduce((a, b) => b[1] > a[1] ? b : a)[0];
-    const buyPrice = available[bestBuyExchange]!;
-    const sellPrice = available[bestSellExchange]!;
+    // v9: pure Kraken ↔ Coinbase — direction determined by direct comparison only
+    const bestBuyExchange = krakenPrice < coinbasePrice ? "Kraken" : "Coinbase";
+    const bestSellExchange = krakenPrice < coinbasePrice ? "Coinbase" : "Kraken";
+    const buyPrice = Math.min(krakenPrice, coinbasePrice);
+    const sellPrice = Math.max(krakenPrice, coinbasePrice);
 
     const grossSpreadPct = ((sellPrice - buyPrice) / buyPrice) * 100;
     const route = `Buy ${bestBuyExchange} → Sell ${bestSellExchange}`;
 
-    // Only executable when both sides are Kraken or Coinbase (where we hold keys)
-    const executableExchanges = new Set(["Kraken", "Coinbase"]);
-    const executable = executableExchanges.has(bestBuyExchange) && executableExchanges.has(bestSellExchange) && bestBuyExchange !== bestSellExchange;
-
-    req.log.info({ krakenPrice, coinbasePrice, binancePrice, kuCoinPrice, grossSpreadPct, bestBuyExchange, bestSellExchange }, "Prices fetched");
+    req.log.info({ krakenPrice, coinbasePrice, grossSpreadPct, bestBuyExchange, bestSellExchange }, "Prices fetched");
 
     res.json({
       krakenPrice,
       coinbasePrice,
-      binancePrice: binancePrice ?? null,
-      kuCoinPrice: kuCoinPrice ?? null,
+      binancePrice: binancePrice ?? null,   // reference only — not used for trading
+      kuCoinPrice: kuCoinPrice ?? null,      // reference only — not used for trading
       grossSpreadPct,
-      netEdgePct: grossSpreadPct, // caller applies fees/slippage
+      netEdgePct: grossSpreadPct,
       route,
       buyExchange: bestBuyExchange,
       sellExchange: bestSellExchange,
@@ -82,7 +74,7 @@ router.post("/prices", async (req, res): Promise<void> => {
       bestSellExchange,
       buyPrice,
       sellPrice,
-      executable,
+      executable: true,                      // always executable — both sides are Kraken/Coinbase
       wsStatus: { kraken: wsKraken, coinbase: wsCoinbase },
       timestamp: new Date().toISOString(),
     });

@@ -285,11 +285,6 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
         const netEdge = data.grossSpreadPct - s.totalFees - s.slippage;
         const wsInfo = `[K:${data.wsStatus.kraken ? "WS" : "REST"} C:${data.wsStatus.coinbase ? "WS" : "REST"}]`;
 
-        if (!data.executable) {
-          addLog("info", `Signal: ${data.route} (net ${netEdge.toFixed(3)}%) — signal-only, not executable ${wsInfo}`);
-          return;
-        }
-
         if (netEdge < s.minNetEdge) {
           addLog("info", `No trade — net ${netEdge.toFixed(3)}% < ${s.minNetEdge.toFixed(2)}% ${wsInfo}`);
           return;

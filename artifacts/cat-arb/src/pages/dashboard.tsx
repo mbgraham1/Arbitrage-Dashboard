@@ -180,15 +180,10 @@ export default function Dashboard() {
           <Card>
             <CardHeader className="py-3">
               <CardTitle className="text-sm flex items-center gap-2">
-                <Radio className="h-4 w-4" /> Market Scan
+                <Radio className="h-4 w-4" /> Kraken ↔ Coinbase
                 {latestPriceData && (
-                  <span className={cn(
-                    "ml-auto text-[10px] font-mono font-bold px-2 py-0.5 border",
-                    latestPriceData.executable
-                      ? "border-success text-success"
-                      : "border-yellow-500 text-yellow-500"
-                  )}>
-                    {latestPriceData.executable ? "EXECUTABLE" : "SIGNAL ONLY"}
+                  <span className="ml-auto text-[10px] font-mono font-bold px-2 py-0.5 border border-success text-success">
+                    LIVE
                   </span>
                 )}
               </CardTitle>
@@ -209,18 +204,6 @@ export default function Dashboard() {
                 wsLive={latestPriceData?.wsStatus.coinbase}
                 highlight={highlightFor("Coinbase")}
                 tag={tagFor("Coinbase")}
-              />
-              <PriceTile
-                label="Binance"
-                price={latestPriceData?.binancePrice}
-                highlight={highlightFor("Binance")}
-                tag={tagFor("Binance")}
-              />
-              <PriceTile
-                label="KuCoin"
-                price={latestPriceData?.kuCoinPrice}
-                highlight={highlightFor("KuCoin")}
-                tag={tagFor("KuCoin")}
               />
             </CardContent>
           </Card>
