@@ -94,7 +94,7 @@ function startKrakenWs(): void {
             cache.kraken = { price: last, updatedAt: Date.now(), source: "ws" };
           }
         }
-      } catch { /* ignore parse errors */ }
+      } catch (e) { console.error(`[price-cache] Kraken WS message error: ${e}`); }
     },
     "Kraken"
   );
@@ -121,7 +121,7 @@ function startCoinbaseWs(): void {
             cache.coinbase = { price: p, updatedAt: Date.now(), source: "ws" };
           }
         }
-      } catch { /* ignore */ }
+      } catch (e) { console.error(`[price-cache] Coinbase WS message error: ${e}`); }
     },
     "Coinbase"
   );
