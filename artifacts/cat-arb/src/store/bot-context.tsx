@@ -43,6 +43,8 @@ export interface BotContextType {
   cachedBalances: BalanceData | null;
   activityLog: LogEntry[];
   sessionProfitUsd: number;
+  sessionTradeCount: number;
+  apiLatencyMs: number | null;
   dailyLoss: number;
   failedTrades: number;
   startTime: number | null;
@@ -111,6 +113,8 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
   const [cachedBalances, setCachedBalances] = useState<BalanceData | null>(null);
   const [activityLog, setActivityLog] = useState<LogEntry[]>([]);
   const [sessionProfitUsd, setSessionProfitUsd] = useState(0);
+  const [sessionTradeCount, setSessionTradeCount] = useState(0);
+  const [apiLatencyMs, setApiLatencyMs] = useState<number | null>(null);
   const [dailyLoss, setDailyLoss] = useState(0);
   const [failedTrades, setFailedTrades] = useState(0);
   const [emergencyStop, setEmergencyStop] = useState(false);
@@ -214,6 +218,7 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
         if (res.success) {
           addLog("success", `${tag} Done — est. profit $${res.estimatedProfitUsd.toFixed(2)}`);
           setSessionProfitUsd((p) => p + res.estimatedProfitUsd);
+          setSessionTradeCount((n) => n + 1);
           if (res.estimatedProfitUsd < 0) {
             const loss = Math.abs(res.estimatedProfitUsd);
             dailyLossRef.current += loss;
@@ -324,14 +329,20 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
       }
 
       try {
+        const fetchStart = Date.now();
         const data = await fetchPricesMutation.mutateAsync({ data: c });
         if (cancelled) return;
+        setApiLatencyMs(Date.now() - fetchStart);
 
         latestPriceDataRef.current = data;
         setLatestPriceData(data);
 
         if (!data.wsStatus.kraken)   addLog("warning", "Kraken websocket disconnected.");
         if (!data.wsStatus.coinbase) addLog("warning", "Coinbase websocket disconnected.");
+        if (!data.wsStatus.kraken || !data.wsStatus.coinbase) {
+          addLog("warning", "Waiting for WebSocket reconnect...");
+          return;
+        }
 
         const now = Date.now();
         const netEdge = data.grossSpreadPct - s.totalFees - s.slippage;
@@ -409,6 +420,8 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
     cachedBalances,
     activityLog,
     sessionProfitUsd,
+    sessionTradeCount,
+    apiLatencyMs,
     dailyLoss,
     failedTrades,
     startTime,

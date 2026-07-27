@@ -77,7 +77,7 @@ export default function Dashboard() {
     settings, credentials, addLog,
     forceTrade, isForcingTrade,
     emergencyStop, setEmergencyStop,
-    startTime, failedTrades,
+    startTime, failedTrades, sessionTradeCount, apiLatencyMs,
   } = useBotContext();
 
   const [uptimeStr, setUptimeStr] = useState("0h 0m");
@@ -148,6 +148,21 @@ export default function Dashboard() {
             <div className="bg-muted px-3 py-2 border-2 border-border flex flex-col items-center justify-center">
               <span className="text-[10px] uppercase font-bold text-muted-foreground">Uptime</span>
               <span className="text-sm font-mono font-bold leading-none">{uptimeStr}</span>
+            </div>
+          )}
+
+          <div className="bg-muted px-3 py-2 border-2 border-border flex flex-col items-center justify-center">
+            <span className="text-[10px] uppercase font-bold text-muted-foreground">Trades Today</span>
+            <span className="text-sm font-mono font-bold leading-none">{sessionTradeCount}</span>
+          </div>
+
+          {apiLatencyMs != null && (
+            <div className="bg-muted px-3 py-2 border-2 border-border flex flex-col items-center justify-center">
+              <span className="text-[10px] uppercase font-bold text-muted-foreground">API Latency</span>
+              <span className={cn(
+                "text-sm font-mono font-bold leading-none",
+                apiLatencyMs > 500 ? "text-destructive" : apiLatencyMs > 200 ? "text-yellow-500" : "text-success"
+              )}>{apiLatencyMs.toFixed(0)} ms</span>
             </div>
           )}
 
@@ -288,16 +303,37 @@ export default function Dashboard() {
                   <span>{latestPriceData?.grossSpreadPct.toFixed(3) ?? "—"}%</span>
                 </div>
                 <div className="flex flex-col gap-0.5">
+                  <span className="text-muted-foreground uppercase text-[10px]">Spread $</span>
+                  <span className="font-bold">
+                    {latestPriceData
+                      ? `$${(latestPriceData.sellPrice - latestPriceData.buyPrice).toFixed(4)}`
+                      : "—"}
+                  </span>
+                </div>
+                <div className="flex flex-col gap-0.5">
                   <span className="text-muted-foreground uppercase text-[10px]">Fees + Slip</span>
                   <span>{(settings.totalFees + settings.slippage).toFixed(2)}%</span>
                 </div>
                 <div className="flex flex-col gap-0.5">
+                  <span className="text-muted-foreground uppercase text-[10px]">Expected Profit</span>
+                  {(() => {
+                    const ep = netEdge != null && latestPriceData
+                      ? (netEdge / 100) * latestPriceData.buyPrice * 1.0
+                      : null;
+                    return (
+                      <span className={cn("font-bold", ep != null && ep >= settings.minProfitUsd ? "text-success" : "")}>
+                        {ep != null ? `$${ep.toFixed(2)}` : "—"}
+                      </span>
+                    );
+                  })()}
+                </div>
+                <div className="flex flex-col gap-0.5">
                   <span className="text-muted-foreground uppercase text-[10px]">Buy At</span>
-                  <span className="text-success">${latestPriceData?.buyPrice.toFixed(2) ?? "—"}</span>
+                  <span className="text-success">${latestPriceData?.buyPrice.toFixed(4) ?? "—"}</span>
                 </div>
                 <div className="flex flex-col gap-0.5">
                   <span className="text-muted-foreground uppercase text-[10px]">Sell At</span>
-                  <span className="text-primary">${latestPriceData?.sellPrice.toFixed(2) ?? "—"}</span>
+                  <span className="text-primary">${latestPriceData?.sellPrice.toFixed(4) ?? "—"}</span>
                 </div>
               </div>
             </CardContent>
