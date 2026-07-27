@@ -138,6 +138,8 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
   const dailyLossRef = useRef<number>(0);
   const emergencyStopRef = useRef<boolean>(false);
   const isExecutingRef = useRef<boolean>(false);
+  // Track previous WS state so degradation is logged only on transition, not every poll
+  const prevWsRef = useRef<{ kraken: boolean; coinbase: boolean }>({ kraken: true, coinbase: true });
 
   const BALANCE_CACHE_TTL_MS = 30_000; // refresh balances at most once per 30 s (mirrors Python)
 
@@ -337,9 +339,13 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
         latestPriceDataRef.current = data;
         setLatestPriceData(data);
 
-        // Log WS degradation but keep scanning — REST prices are fresh enough
-        if (!data.wsStatus.kraken)   addLog("warning", "Kraken price feed degraded (REST fallback).");
-        if (!data.wsStatus.coinbase) addLog("warning", "Coinbase price feed degraded (REST fallback).");
+        // Log only on transition into degraded/recovered state, not every poll
+        const prev = prevWsRef.current;
+        if (!data.wsStatus.kraken  && prev.kraken)   addLog("warning", "Kraken price feed degraded (REST fallback).");
+        if ( data.wsStatus.kraken  && !prev.kraken)  addLog("info",    "Kraken price feed restored (WS live).");
+        if (!data.wsStatus.coinbase && prev.coinbase) addLog("warning", "Coinbase price feed degraded (REST fallback).");
+        if ( data.wsStatus.coinbase && !prev.coinbase) addLog("info",   "Coinbase price feed restored (WS live).");
+        prevWsRef.current = { kraken: data.wsStatus.kraken, coinbase: data.wsStatus.coinbase };
 
         const now = Date.now();
         const netEdge = data.grossSpreadPct - s.totalFees - s.slippage;
