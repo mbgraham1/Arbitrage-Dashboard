@@ -8,7 +8,7 @@ import {
 } from "lucide-react";
 import { format } from "date-fns";
 import { cn } from "@/lib/utils";
-import { useFetchBalances } from "@workspace/api-client-react";
+import { useFetchBalances, useGetTradeSummary } from "@workspace/api-client-react";
 
 // ── Small helpers ──────────────────────────────────────────────────────────────
 
@@ -77,6 +77,7 @@ export default function Dashboard() {
   } = useBotContext();
 
   const fetchBalancesMutation = useFetchBalances();
+  const summaryQuery = useGetTradeSummary();
   const [balances, setBalances] = React.useState<{
     solOnKraken?: number; solOnCoinbase?: number; usdOnCoinbase?: number;
   } | null>(null);
@@ -129,16 +130,28 @@ export default function Dashboard() {
             Control Deck
           </h1>
           <p className="text-muted-foreground font-mono text-sm">
-            4-Exchange Scanner · WebSocket + REST
+            Kraken ↔ Coinbase · Persistent Ledger
           </p>
         </div>
 
         <div className="flex items-center gap-3 w-full md:w-auto flex-wrap">
           <div className="bg-muted px-4 py-2 border-2 border-border flex flex-col items-end flex-1 md:flex-none">
-            <span className="text-[10px] uppercase font-bold text-muted-foreground">Session P&L</span>
-            <span className={cn("text-xl font-mono font-bold leading-none", sessionProfitUsd > 0 ? "text-success" : sessionProfitUsd < 0 ? "text-destructive" : "")}>
-              {sessionProfitUsd >= 0 ? "+" : "-"}${Math.abs(sessionProfitUsd).toFixed(2)}
+            <span className="text-[10px] uppercase font-bold text-muted-foreground">
+              Total P&L (Persistent) · {summaryQuery.data?.totalTrades ?? 0} trades
             </span>
+            <span className={cn(
+              "text-xl font-mono font-bold leading-none",
+              (summaryQuery.data?.totalProfitUsd ?? 0) > 0 ? "text-success" :
+              (summaryQuery.data?.totalProfitUsd ?? 0) < 0 ? "text-destructive" : ""
+            )}>
+              {(summaryQuery.data?.totalProfitUsd ?? 0) >= 0 ? "+" : "-"}$
+              {Math.abs(summaryQuery.data?.totalProfitUsd ?? 0).toFixed(2)}
+            </span>
+            {sessionProfitUsd !== 0 && (
+              <span className="text-[10px] font-mono text-muted-foreground">
+                session: {sessionProfitUsd >= 0 ? "+" : "-"}${Math.abs(sessionProfitUsd).toFixed(2)}
+              </span>
+            )}
           </div>
 
           {/* Force Trade — live mode only */}
