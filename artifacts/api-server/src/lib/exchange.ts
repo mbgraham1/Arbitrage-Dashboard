@@ -95,6 +95,22 @@ export async function krakenMarketOrder(
   }, creds);
 }
 
+export async function krakenLimitOrder(
+  creds: KrakenCreds,
+  side: "buy" | "sell",
+  volume: number,
+  price: number
+): Promise<{ txid: string[] }> {
+  return krakenPrivateRequest<{ txid: string[] }>("/0/private/AddOrder", {
+    pair: KRAKEN_PAIR,
+    type: side,
+    ordertype: "limit",
+    post_only: "true",
+    volume: volume.toFixed(8),
+    price: price.toFixed(2),
+  }, creds);
+}
+
 // ---------------------------------------------------------------------------
 // Coinbase Advanced Trade API helpers (JWT auth, ES256)
 // ---------------------------------------------------------------------------
@@ -181,6 +197,34 @@ export async function coinbaseMarketOrder(
   } else {
     orderConfig = { market_market_ioc: { base_size: volume.toFixed(8) } };
   }
+  const data = await coinbaseRequest<{ order_id?: string; success?: boolean; success_response?: { order_id: string } }>(
+    creds,
+    "POST",
+    "/api/v3/brokerage/orders",
+    {
+      client_order_id: clientOrderId,
+      product_id: COINBASE_PRODUCT,
+      side,
+      order_configuration: orderConfig,
+    }
+  );
+  return { orderId: data.success_response?.order_id ?? data.order_id, success: data.success };
+}
+
+export async function coinbaseLimitOrder(
+  creds: CoinbaseCreds,
+  side: "BUY" | "SELL",
+  volume: number,
+  price: number
+): Promise<{ orderId?: string; success?: boolean }> {
+  const clientOrderId = crypto.randomUUID();
+  const orderConfig = {
+    limit_limit_gtc: {
+      base_size: volume.toFixed(4),
+      limit_price: price.toFixed(2),
+      post_only: true,
+    },
+  };
   const data = await coinbaseRequest<{ order_id?: string; success?: boolean; success_response?: { order_id: string } }>(
     creds,
     "POST",

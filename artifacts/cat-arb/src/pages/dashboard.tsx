@@ -152,7 +152,7 @@ export default function Dashboard() {
               title="Execute immediately on Kraken/Coinbase, ignoring edge threshold"
             >
               <Siren className="h-4 w-4 mr-2" />
-              {isForcingTrade ? "EXECUTING..." : "FORCE TRADE"}
+              {isForcingTrade ? "EXECUTING..." : "FORCE MARKET TRADE"}
             </Button>
           )}
 

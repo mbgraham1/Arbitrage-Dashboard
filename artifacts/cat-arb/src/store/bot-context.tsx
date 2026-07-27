@@ -56,15 +56,15 @@ const EMPTY_CREDS: ExchangeCredentials = {
 };
 
 const DEFAULT_SETTINGS: BotSettings = {
-  minNetEdge: 0.10,
-  totalFees: 0.80,
-  slippage: 0.20,
+  minNetEdge: 0.05,   // v8: limit orders catch smaller spreads
+  totalFees: 0.56,    // v8: Kraken maker 0.16% + Coinbase maker 0.40%
+  slippage: 0.05,     // v8: limit orders have near-zero slippage
   cooldown: 30,
   pollInterval: 5,
 };
 
 // Bump this when defaults change meaningfully — forces a one-time reset for existing users
-const SETTINGS_VERSION = 2;
+const SETTINGS_VERSION = 3;
 
 export function BotProvider({ children }: { children: React.ReactNode }) {
   const queryClient = useQueryClient();
@@ -157,7 +157,9 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
       const live = forced ? true : liveModeRef.current;
       const s = settingsRef.current;
       const creds = credentialsRef.current;
-      const tag = forced ? "[FORCE]" : live ? "[LIVE]" : "[DRY RUN]";
+      // Force Trade always uses market orders; auto-loop uses limit (post-only, lower fees)
+      const orderType = forced ? "market" : "limit";
+      const tag = forced ? "[FORCE·MKT]" : live ? "[LIVE·LMT]" : "[DRY RUN]";
       const netEdge = data.grossSpreadPct - s.totalFees - s.slippage;
 
       addLog("trade", `${tag} Executing — net ${netEdge.toFixed(3)}% · ${data.route}`);
@@ -175,6 +177,7 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
             coinbasePrice: data.coinbasePrice,
             liveMode: live,
             netEdgePct: netEdge,
+            orderType,
           },
         });
         if (res.success) {

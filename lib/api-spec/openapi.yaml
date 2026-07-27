@@ -404,6 +404,10 @@ components:
           type: boolean
         netEdgePct:
           type: number
+        orderType:
+          type: string
+          enum: [market, limit]
+          default: market
 
     TradeResult:
       type: object

@@ -1,0 +1,435 @@
+#!/usr/bin/env python3
+"""
+BUTTER PROTOCOL v8.0 – LIMIT ORDER STRATEGY (Kraken + Coinbase only)
+- Uses Post-Only Limit Orders to capture the spread.
+- Lower fees = more frequent profitable trades.
+- Auto-loop only triggers when Limit Order math is positive.
+"""
+
+import base64
+import hashlib
+import hmac
+import json
+import os
+import threading
+import time
+import uuid
+from decimal import Decimal, ROUND_DOWN
+from urllib.parse import urlencode
+
+import requests
+import streamlit as st
+from coinbase.rest import RESTClient
+import websocket
+
+# ---------- WebSocket price store ----------
+latest_prices = {"kraken": None, "coinbase": None}
+price_lock = threading.Lock()
+
+def on_kraken_message(ws, message):
+    global latest_prices
+    try:
+        data = json.loads(message)
+        if isinstance(data, list) and len(data) > 1 and data[2] == "ticker":
+            tick = data[1]
+            if "c" in tick:
+                with price_lock:
+                    latest_prices["kraken"] = Decimal(tick["c"][0])
+    except:
+        pass
+
+def start_kraken_ws():
+    ws = websocket.WebSocketApp("wss://ws.kraken.com/v2", on_message=on_kraken_message)
+    def on_open(ws):
+        ws.send(json.dumps({"method": "subscribe", "params": {"channel": "ticker", "symbol": ["SOL/USD"]}}))
+    ws.on_open = on_open
+    ws.run_forever()
+
+def on_coinbase_message(ws, message):
+    global latest_prices
+    try:
+        data = json.loads(message)
+        if data.get("type") == "ticker" and data.get("product_id") == "SOL-USD":
+            with price_lock:
+                latest_prices["coinbase"] = Decimal(data["price"])
+    except:
+        pass
+
+def start_coinbase_ws():
+    ws = websocket.WebSocketApp("wss://ws-feed.exchange.coinbase.com", on_message=on_coinbase_message)
+    def on_open(ws):
+        ws.send(json.dumps({"type": "subscribe", "product_ids": ["SOL-USD"], "channels": ["ticker"]}))
+    ws.on_open = on_open
+    ws.run_forever()
+
+# ---------- REST helpers ----------
+def D(v): return Decimal(str(v))
+
+def fetch_binance():
+    try:
+        r = requests.get("https://api.binance.com/api/v3/ticker/price?symbol=SOLUSDT", timeout=3)
+        return D(r.json()["price"])
+    except: return None
+
+def fetch_kucoin():
+    try:
+        r = requests.get("https://api.kucoin.com/api/v1/market/orderbook/level1?symbol=SOL-USDT", timeout=3)
+        return D(r.json()["data"]["price"])
+    except: return None
+
+def kraken_rest():
+    try:
+        r = requests.get("https://api.kraken.com/0/public/Ticker", params={"pair": "SOLUSD"}, timeout=3)
+        return D(list(r.json()["result"].values())[0]["c"][0])
+    except: return None
+
+def coinbase_rest():
+    try:
+        r = requests.get("https://api.coinbase.com/v2/prices/SOL-USD/spot", timeout=3)
+        return D(r.json()["data"]["amount"])
+    except: return None
+
+# ---------- Kraken/Coinbase API wrappers ----------
+KRAKEN_BASE_URL = "https://api.kraken.com"
+KRAKEN_PAIR = "SOLUSD"
+COINBASE_PRODUCT = "SOL-USD"
+REQUEST_TIMEOUT = 10
+session = requests.Session()
+
+def kraken_private_request(api_key, api_secret, path, data):
+    nonce = str(time.time_ns())
+    payload = {"nonce": nonce, **data}
+    postdata = urlencode(payload)
+    encoded = (nonce + postdata).encode()
+    message = path.encode() + hashlib.sha256(encoded).digest()
+    decoded_secret = base64.b64decode(api_secret)
+    api_sign = base64.b64encode(hmac.new(decoded_secret, message, hashlib.sha512).digest()).decode()
+    resp = session.post(KRAKEN_BASE_URL + path, data=payload, headers={"API-Key": api_key, "API-Sign": api_sign}, timeout=REQUEST_TIMEOUT)
+    resp.raise_for_status()
+    result = resp.json()
+    if result.get("error"):
+        raise RuntimeError("Kraken: " + "; ".join(result["error"]))
+    return result
+
+def make_coinbase_client(api_key, api_secret):
+    return RESTClient(api_key=api_key.strip(), api_secret=api_secret.replace("\\n", "\n").strip(), timeout=REQUEST_TIMEOUT)
+
+def get_kraken_balance(api_key, api_secret):
+    res = kraken_private_request(api_key, api_secret, "/0/private/Balance", {})
+    return {k: D(v) for k, v in res["result"].items() if D(v) > 0}
+
+def get_coinbase_balance(client):
+    accounts = client.get_accounts()
+    bal = {}
+    for acc in accounts.accounts:
+        if float(acc.balance) > 0:
+            bal[acc.currency] = D(acc.balance)
+    return bal
+
+# ---------- LIMIT ORDER FUNCTIONS (Post-Only) ----------
+def kraken_limit_order(api_key, api_secret, side, volume, price):
+    """Places a post-only limit order on Kraken"""
+    return kraken_private_request(api_key, api_secret, "/0/private/AddOrder", {
+        "pair": KRAKEN_PAIR,
+        "type": side.lower(),
+        "ordertype": "limit",
+        "post_only": "true",   # Ensures you get maker fees
+        "volume": format(volume, "f"),
+        "price": format(price, "f"),
+    })
+
+def coinbase_limit_order(client, side, volume, price):
+    """Places a limit order on Coinbase (post-only)"""
+    cid = str(uuid.uuid4())
+    # Format price to 2 decimals
+    price_str = format(price.quantize(D("0.01")), "f")
+    size_str = format(volume.quantize(D("0.0001")), "f")
+    if side.upper() == "BUY":
+        return client.limit_order_buy(
+            client_order_id=cid,
+            product_id=COINBASE_PRODUCT,
+            base_size=size_str,
+            limit_price=price_str,
+            post_only=True,
+        )
+    else:
+        return client.limit_order_sell(
+            client_order_id=cid,
+            product_id=COINBASE_PRODUCT,
+            base_size=size_str,
+            limit_price=price_str,
+            post_only=True,
+        )
+
+# ---------- Market Order (for Force Trade only) ----------
+def kraken_market_order(api_key, api_secret, side, volume):
+    return kraken_private_request(api_key, api_secret, "/0/private/AddOrder", {
+        "pair": KRAKEN_PAIR,
+        "type": side.lower(),
+        "ordertype": "market",
+        "volume": format(volume, "f"),
+    })
+
+def coinbase_market_order(client, side, volume, price):
+    cid = str(uuid.uuid4())
+    if side.upper() == "BUY":
+        quote = (volume * price).quantize(D("0.01"))
+        return client.market_order_buy(client_order_id=cid, product_id=COINBASE_PRODUCT, quote_size=format(quote, "f"))
+    else:
+        return client.market_order_sell(client_order_id=cid, product_id=COINBASE_PRODUCT, base_size=format(volume, "f"))
+
+def response_to_dict(r):
+    return r.to_dict() if hasattr(r, "to_dict") else r
+
+# ---------- Streamlit UI ----------
+st.set_page_config(page_title="🐱 BUTTER ARB v8.0", layout="wide")
+st.title("🐱 BUTTER PROTOCOL v8.0 – Limit Order Strategy")
+
+# Session state
+if "running" not in st.session_state: st.session_state.running = False
+if "live_mode" not in st.session_state: st.session_state.live_mode = False
+if "logs" not in st.session_state: st.session_state.logs = []
+if "trade_count" not in st.session_state: st.session_state.trade_count = 0
+if "total_profit_usd" not in st.session_state: st.session_state.total_profit_usd = D("0.00")
+if "last_trade_time" not in st.session_state: st.session_state.last_trade_time = 0.0
+if "ws_started" not in st.session_state: st.session_state.ws_started = False
+
+def add_log(msg):
+    ts = time.strftime("%H:%M:%S")
+    st.session_state.logs.insert(0, f"[{ts}] {msg}")
+    st.session_state.logs = st.session_state.logs[:200]
+
+# Sidebar
+st.sidebar.header("🔐 API Keys")
+kraken_key = st.sidebar.text_input("Kraken API Key", type="password", key="kraken_key")
+kraken_secret = st.sidebar.text_area("Kraken Private Key", type="password", key="kraken_secret", height=80)
+coinbase_key = st.sidebar.text_input("Coinbase API Key Name", type="password", key="coinbase_key")
+coinbase_secret = st.sidebar.text_area("Coinbase Private Key", type="password", key="coinbase_secret", height=120)
+
+st.sidebar.divider()
+st.sidebar.header("⚙️ Parameters (LIMIT ORDER MODE)")
+min_net_edge = D(st.sidebar.number_input("Min Net Edge (%)", value=0.05, step=0.01, format="%.2f", help="Lowered to catch micro-spreads"))
+total_fees = D(st.sidebar.number_input("Combined Maker Fees (%)", value=0.56, step=0.01, format="%.2f", help="Kraken 0.16% + Coinbase 0.40%"))
+slippage = D(st.sidebar.number_input("Slippage (%)", value=0.05, step=0.01, format="%.2f", help="Limit orders have almost zero slippage"))
+cooldown = st.sidebar.number_input("Cooldown (sec)", value=30, step=5)
+poll = st.sidebar.slider("Refresh (sec)", 2, 15, 5)
+
+st.sidebar.divider()
+st.sidebar.header("🔴 Live Trading")
+st.session_state.live_mode = st.sidebar.toggle("Enable live orders", value=st.session_state.live_mode)
+if st.session_state.live_mode:
+    st.sidebar.error("⚠️ LIVE ACTIVE (Limit Orders)")
+else:
+    st.sidebar.info("🧪 DRY RUN")
+
+if st.sidebar.button("⏹ STOP BOT", use_container_width=True):
+    st.session_state.running = False
+    add_log("⏹ Stopped by user.")
+
+creds_ok = all([kraken_key.strip(), kraken_secret.strip(), coinbase_key.strip(), coinbase_secret.strip()])
+
+# Start WebSocket threads
+if creds_ok and not st.session_state.ws_started:
+    threading.Thread(target=start_kraken_ws, daemon=True).start()
+    threading.Thread(target=start_coinbase_ws, daemon=True).start()
+    st.session_state.ws_started = True
+    add_log("🌐 WebSockets started.")
+
+# Main controls
+col1, col2, col3 = st.columns(3)
+with col1:
+    if st.button("▶ START", use_container_width=True, disabled=not creds_ok or st.session_state.running):
+        st.session_state.running = True
+        add_log("🚀 Started.")
+with col2:
+    if st.button("Test Connections", use_container_width=True, disabled=not creds_ok):
+        try:
+            k_bal = get_kraken_balance(kraken_key, kraken_secret)
+            client = make_coinbase_client(coinbase_key, coinbase_secret)
+            c_bal = get_coinbase_balance(client)
+            st.success("✅ Both connected.")
+            st.json({"Kraken": {k: f"{v:.4f}" for k,v in k_bal.items()}, "Coinbase": {k: f"{v:.4f}" for k,v in c_bal.items()}})
+            add_log("Tests passed.")
+        except Exception as e:
+            st.error(f"❌ {e}")
+            add_log(f"Test failed: {e}")
+with col3:
+    if st.button("💣 FORCE MARKET TRADE", use_container_width=True, disabled=not creds_ok):
+        if not st.session_state.live_mode:
+            st.warning("Enable Live Trading first!")
+        else:
+            try:
+                client = make_coinbase_client(coinbase_key, coinbase_secret)
+                k_price = latest_prices.get("kraken") or kraken_rest()
+                c_price = latest_prices.get("coinbase") or coinbase_rest()
+                if not k_price or not c_price:
+                    st.error("No price data.")
+                else:
+                    k_bal = get_kraken_balance(kraken_key, kraken_secret)
+                    c_bal = get_coinbase_balance(client)
+                    sol_k = k_bal.get("SOL", D("0"))
+                    sol_c = c_bal.get("SOL", D("0"))
+                    usd_c = c_bal.get("USD", D("0"))
+                    max_sol = min(sol_k, sol_c, usd_c / k_price) * D("0.8")
+                    trade_vol = max_sol if max_sol > D("0.01") else D("0.01")
+                    if k_price < c_price:
+                        buy_ex, sell_ex = "Kraken", "Coinbase"
+                        buy_price, sell_price = k_price, c_price
+                    else:
+                        buy_ex, sell_ex = "Coinbase", "Kraken"
+                        buy_price, sell_price = c_price, k_price
+                    st.info(f"Executing MARKET test: Buy {trade_vol:.4f} SOL on {buy_ex}, Sell on {sell_ex}")
+                    if sell_ex == "Coinbase":
+                        sell_res = coinbase_market_order(client, "SELL", trade_vol, sell_price)
+                    else:
+                        sell_res = kraken_market_order(kraken_key, kraken_secret, "sell", trade_vol)
+                    if buy_ex == "Coinbase":
+                        buy_res = coinbase_market_order(client, "BUY", trade_vol, buy_price)
+                    else:
+                        buy_res = kraken_market_order(kraken_key, kraken_secret, "buy", trade_vol)
+                    profit = (abs(k_price - c_price) * trade_vol).quantize(D("0.01"))
+                    st.session_state.total_profit_usd += profit
+                    st.session_state.trade_count += 1
+                    add_log(f"💥 FORCE MARKET #{st.session_state.trade_count} | profit ~${profit}")
+                    st.success(f"✅ Market trade done! Est. profit: ${profit}")
+                    with st.expander("Order responses"):
+                        st.write("Sell:", sell_res)
+                        st.write("Buy:", buy_res)
+            except Exception as e:
+                st.error(f"Force error: {e}")
+                add_log(f"Force error: {e}")
+
+# ---------- THE IMMORTAL LOOP (LIMIT ORDER AUTO-TRADE) ----------
+placeholder = st.empty()
+
+if st.session_state.running and creds_ok:
+    try:
+        client = make_coinbase_client(coinbase_key, coinbase_secret)
+        while st.session_state.running:
+            # 1. Fetch all prices
+            with price_lock:
+                k_ws = latest_prices.get("kraken")
+                c_ws = latest_prices.get("coinbase")
+            k_price = k_ws or kraken_rest()
+            c_price = c_ws or coinbase_rest()
+            b_price = fetch_binance()
+            ku_price = fetch_kucoin()
+
+            all_prices = {
+                "Kraken": k_price,
+                "Coinbase": c_price,
+                "Binance": b_price,
+                "KuCoin": ku_price,
+            }
+            valid = {k: v for k, v in all_prices.items() if v is not None}
+            if len(valid) >= 2:
+                best_buy_ex = min(valid, key=valid.get)
+                best_sell_ex = max(valid, key=valid.get)
+                buy_price = valid[best_buy_ex]
+                sell_price = valid[best_sell_ex]
+                gross_pct = (sell_price - buy_price) / buy_price * D("100")
+                net_pct = gross_pct - total_fees - slippage
+                executable = (best_buy_ex in ("Kraken","Coinbase") and best_sell_ex in ("Kraken","Coinbase") and best_buy_ex != best_sell_ex)
+            else:
+                best_buy_ex = best_sell_ex = "—"
+                buy_price = sell_price = None
+                gross_pct = net_pct = D("0")
+                executable = False
+
+            # 2. Fetch balances
+            try:
+                k_bal = get_kraken_balance(kraken_key, kraken_secret)
+                c_bal = get_coinbase_balance(client)
+                sol_k = k_bal.get("SOL", D("0"))
+                sol_c = c_bal.get("SOL", D("0"))
+                usd_c = c_bal.get("USD", D("0"))
+                max_sol = min(sol_k, sol_c, usd_c / k_price) * D("0.8") if k_price else D("0")
+                trade_vol = max_sol if max_sol > D("0.01") else D("0.01")
+            except Exception as e:
+                sol_k = sol_c = usd_c = D("0")
+                trade_vol = D("0.01")
+                if "balance_error" not in st.session_state:
+                    add_log(f"Balance fetch error: {e}")
+                    st.session_state.balance_error = True
+
+            # 3. Trade logic (LIMIT ORDERS)
+            now = time.time()
+            cooldown_ok = now - st.session_state.last_trade_time >= cooldown
+            trade_triggered = False
+
+            if executable and net_pct >= min_net_edge and cooldown_ok:
+                if not st.session_state.live_mode:
+                    add_log(f"DRY RUN: {best_buy_ex}→{best_sell_ex} | net {net_pct:.3f}%")
+                    st.session_state.last_trade_time = now
+                else:
+                    try:
+                        vol = trade_vol
+                        # Place LIMIT orders (Post-Only)
+                        if best_buy_ex == "Kraken":
+                            buy_res = kraken_limit_order(kraken_key, kraken_secret, "buy", vol, buy_price)
+                        else:
+                            buy_res = coinbase_limit_order(client, "BUY", vol, buy_price)
+                        if best_sell_ex == "Kraken":
+                            sell_res = kraken_limit_order(kraken_key, kraken_secret, "sell", vol, sell_price)
+                        else:
+                            sell_res = coinbase_limit_order(client, "SELL", vol, sell_price)
+                        
+                        # Estimate profit (will be realized when orders fill)
+                        profit = (sell_price - buy_price) * vol
+                        profit = profit.quantize(D("0.01"))
+                        st.session_state.total_profit_usd += profit
+                        st.session_state.trade_count += 1
+                        st.session_state.last_trade_time = now
+                        add_log(f"✅ LIMIT TRADE #{st.session_state.trade_count} | expected profit ~${profit}")
+                        trade_triggered = True
+                        with st.expander("Limit Order Details", expanded=False):
+                            st.write("Buy Limit Order:", buy_res)
+                            st.write("Sell Limit Order:", sell_res)
+                    except Exception as e:
+                        add_log(f"❌ Trade error: {e}")
+
+            # 4. Render the UI
+            with placeholder.container():
+                st.subheader("📊 Live Spread & Signals (Limit Orders)")
+                col_a, col_b, col_c, col_d = st.columns(4)
+                col_a.metric("Kraken", f"${k_price:.4f}" if k_price else "—")
+                col_b.metric("Coinbase", f"${c_price:.4f}" if c_price else "—")
+                col_c.metric("Binance", f"${b_price:.4f}" if b_price else "—")
+                col_d.metric("KuCoin", f"${ku_price:.4f}" if ku_price else "—")
+
+                st.markdown(f"**Best Spread:** {best_buy_ex} → {best_sell_ex} | Gross: {gross_pct:.2f}% | Net: {net_pct:.2f}%")
+                st.write(f"**Balances:** Kraken SOL: {sol_k:.4f} | Coinbase SOL: {sol_c:.4f} | Coinbase USD: ${usd_c:.2f}")
+
+                if executable and net_pct >= min_net_edge and cooldown_ok:
+                    if not st.session_state.live_mode:
+                        st.warning("🔍 DRY RUN – would place Limit Orders")
+                    else:
+                        st.success("✅ Limit Orders placed!" if trade_triggered else "⏳ Placing...")
+                elif executable and net_pct >= min_net_edge and not cooldown_ok:
+                    st.warning(f"⏳ Cooldown: {int(cooldown - (now - st.session_state.last_trade_time))}s")
+                else:
+                    if not executable and len(valid) >= 2:
+                        st.info(f"📡 Signal on {best_buy_ex}→{best_sell_ex} (only Kraken/Coinbase executable)")
+                    else:
+                        st.info(f"No trade – net {net_pct:.2f}% < {min_net_edge:.2f}%")
+
+                st.metric("💰 Total P&L", f"${st.session_state.total_profit_usd:.2f}", delta=f"Trades: {st.session_state.trade_count}")
+                st.subheader("📋 Activity Log")
+                st.code("\n".join(st.session_state.logs[:50]) or "No activity.")
+
+            time.sleep(poll)
+
+    except Exception as e:
+        with placeholder.container():
+            st.error(f"🚨 Loop crashed: {e}")
+        add_log(f"Loop crash: {e}")
+        st.session_state.running = False
+
+else:
+    if not creds_ok:
+        placeholder.warning("Paste all API keys and test connections.")
+    else:
+        placeholder.info("Bot idle. Press START to begin monitoring.")
+
+st.divider()
+st.caption("🐱 v8.0 – Limit Orders slash fees. Min Edge now 0.05% to catch small spreads.")

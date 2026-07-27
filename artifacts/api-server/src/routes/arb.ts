@@ -13,8 +13,10 @@ import {
   getKrakenPrice,
   getKrakenBalances,
   krakenMarketOrder,
+  krakenLimitOrder,
   getCoinbaseBalances,
   coinbaseMarketOrder,
+  coinbaseLimitOrder,
 } from "../lib/exchange";
 import { getAllPrices } from "../lib/price-cache";
 
@@ -160,8 +162,10 @@ router.post("/execute-trade", async (req, res): Promise<void> => {
   const {
     krakenKey, krakenSecret, coinbaseKey, coinbaseSecret,
     buyExchange, sellExchange, volume, krakenPrice, coinbasePrice, liveMode, netEdgePct,
+    orderType,
   } = parsed.data;
 
+  const useLimit = orderType === "limit";
   const estimatedProfitUsd = Math.abs(krakenPrice - coinbasePrice) * volume;
 
   // Count trades to get trade number
@@ -180,7 +184,7 @@ router.post("/execute-trade", async (req, res): Promise<void> => {
       krakenPrice: String(krakenPrice),
       coinbasePrice: String(coinbasePrice),
     });
-    req.log.info({ tradeNumber, volume, estimatedProfitUsd }, "Dry run trade logged");
+    req.log.info({ tradeNumber, volume, estimatedProfitUsd, orderType: orderType ?? "market" }, "Dry run trade logged");
     res.json({ success: true, isDryRun: true, estimatedProfitUsd, tradeNumber, buyOrderId: null, sellOrderId: null, error: null });
     return;
   }
@@ -191,14 +195,24 @@ router.post("/execute-trade", async (req, res): Promise<void> => {
     let sellOrderId: string | null = null;
 
     if (sellExchange === "Coinbase") {
-      const sellResult = await coinbaseMarketOrder({ coinbaseKey, coinbaseSecret }, "SELL", volume, coinbasePrice);
+      // Sell on Coinbase, buy on Kraken
+      const sellResult = useLimit
+        ? await coinbaseLimitOrder({ coinbaseKey, coinbaseSecret }, "SELL", volume, coinbasePrice)
+        : await coinbaseMarketOrder({ coinbaseKey, coinbaseSecret }, "SELL", volume, coinbasePrice);
       sellOrderId = sellResult.orderId ?? null;
-      const buyResult = await krakenMarketOrder({ krakenKey, krakenSecret }, "buy", volume);
+      const buyResult = useLimit
+        ? await krakenLimitOrder({ krakenKey, krakenSecret }, "buy", volume, krakenPrice)
+        : await krakenMarketOrder({ krakenKey, krakenSecret }, "buy", volume);
       buyOrderId = buyResult.txid?.[0] ?? null;
     } else {
-      const sellResult = await krakenMarketOrder({ krakenKey, krakenSecret }, "sell", volume);
+      // Sell on Kraken, buy on Coinbase
+      const sellResult = useLimit
+        ? await krakenLimitOrder({ krakenKey, krakenSecret }, "sell", volume, krakenPrice)
+        : await krakenMarketOrder({ krakenKey, krakenSecret }, "sell", volume);
       sellOrderId = sellResult.txid?.[0] ?? null;
-      const buyResult = await coinbaseMarketOrder({ coinbaseKey, coinbaseSecret }, "BUY", volume, coinbasePrice);
+      const buyResult = useLimit
+        ? await coinbaseLimitOrder({ coinbaseKey, coinbaseSecret }, "BUY", volume, coinbasePrice)
+        : await coinbaseMarketOrder({ coinbaseKey, coinbaseSecret }, "BUY", volume, coinbasePrice);
       buyOrderId = buyResult.orderId ?? null;
     }
 
@@ -215,7 +229,7 @@ router.post("/execute-trade", async (req, res): Promise<void> => {
       sellOrderId,
     });
 
-    req.log.info({ tradeNumber, buyOrderId, sellOrderId, estimatedProfitUsd }, "Live trade executed");
+    req.log.info({ tradeNumber, buyOrderId, sellOrderId, estimatedProfitUsd, orderType: orderType ?? "market" }, "Live trade executed");
     res.json({ success: true, isDryRun: false, estimatedProfitUsd, tradeNumber, buyOrderId, sellOrderId, error: null });
   } catch (err) {
     req.log.error({ err }, "Trade execution failed");

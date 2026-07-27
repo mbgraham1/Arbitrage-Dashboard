@@ -127,6 +127,8 @@ export const TestCoinbaseResponse = zod.object({
 /**
  * @summary Execute an arbitrage trade
  */
+export const executeTradeBodyOrderTypeDefault = `market`;
+
 export const ExecuteTradeBody = zod.object({
   "krakenKey": zod.string(),
   "krakenSecret": zod.string(),
@@ -138,7 +140,8 @@ export const ExecuteTradeBody = zod.object({
   "krakenPrice": zod.number(),
   "coinbasePrice": zod.number(),
   "liveMode": zod.boolean(),
-  "netEdgePct": zod.number().optional()
+  "netEdgePct": zod.number().optional(),
+  "orderType": zod.enum(['market', 'limit']).default(executeTradeBodyOrderTypeDefault)
 })
 
 export const ExecuteTradeResponse = zod.object({

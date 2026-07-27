@@ -82,6 +82,14 @@ export interface ConnectionTestResult {
   balances?: BalanceEntry[];
 }
 
+export type TradeRequestOrderType = typeof TradeRequestOrderType[keyof typeof TradeRequestOrderType];
+
+
+export const TradeRequestOrderType = {
+  market: 'market',
+  limit: 'limit',
+} as const;
+
 export interface TradeRequest {
   krakenKey: string;
   krakenSecret: string;
@@ -94,6 +102,7 @@ export interface TradeRequest {
   coinbasePrice: number;
   liveMode: boolean;
   netEdgePct?: number;
+  orderType?: TradeRequestOrderType;
 }
 
 export interface TradeResult {

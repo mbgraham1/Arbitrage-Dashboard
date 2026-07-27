@@ -19,6 +19,7 @@ export * from './preloadedCredentials';
 export * from './priceData';
 export * from './tradeRecord';
 export * from './tradeRequest';
+export * from './tradeRequestOrderType';
 export * from './tradeResult';
 export * from './tradeSummary';
 export * from './wsStatus';

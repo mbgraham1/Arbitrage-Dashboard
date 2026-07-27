@@ -5,6 +5,7 @@
  * CAT Arbitrage Dashboard API
  * OpenAPI spec version: 0.1.0
  */
+import type { TradeRequestOrderType } from './tradeRequestOrderType';
 
 export interface TradeRequest {
   krakenKey: string;
@@ -18,4 +19,5 @@ export interface TradeRequest {
   coinbasePrice: number;
   liveMode: boolean;
   netEdgePct?: number;
+  orderType?: TradeRequestOrderType;
 }
