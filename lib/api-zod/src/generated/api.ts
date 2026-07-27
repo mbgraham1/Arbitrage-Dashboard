@@ -147,6 +147,7 @@ export const ExecuteTradeBody = zod.object({
 export const ExecuteTradeResponse = zod.object({
   "success": zod.boolean(),
   "isDryRun": zod.boolean(),
+  "skipped": zod.boolean().optional().describe('True when the trade was skipped (e.g. insufficient balance) rather than executed or failed'),
   "estimatedProfitUsd": zod.number(),
   "tradeNumber": zod.number(),
   "buyOrderId": zod.string().nullish(),

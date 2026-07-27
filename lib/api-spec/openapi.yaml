@@ -417,6 +417,9 @@ components:
           type: boolean
         isDryRun:
           type: boolean
+        skipped:
+          type: boolean
+          description: "True when the trade was skipped (e.g. insufficient balance) rather than executed or failed"
         estimatedProfitUsd:
           type: number
         tradeNumber:

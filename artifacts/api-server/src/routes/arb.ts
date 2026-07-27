@@ -181,7 +181,26 @@ router.post("/execute-trade", async (req, res): Promise<void> => {
     return;
   }
 
-  // Live trade
+  // Live trade — pre-check balances before placing any orders
+  try {
+    const [krakenBalances, coinbaseBalances] = await Promise.all([
+      getKrakenBalances({ krakenKey, krakenSecret }),
+      getCoinbaseBalances({ coinbaseKey, coinbaseSecret }),
+    ]);
+    const solOnKraken  = krakenBalances.find(b => b.currency === "SOL" || b.currency === "SOL.S")?.amount ?? 0;
+    const solOnCoinbase = coinbaseBalances.find(b => b.currency === "SOL")?.amount ?? 0;
+    const usdOnCoinbase = coinbaseBalances.find(b => b.currency === "USD" || b.currency === "USDC")?.amount ?? 0;
+    const maxSol = Math.min(solOnKraken, solOnCoinbase, krakenPrice > 0 ? usdOnCoinbase / krakenPrice : 0) * 0.8;
+
+    if (maxSol <= 0.01) {
+      req.log.warn({ solOnKraken, solOnCoinbase, usdOnCoinbase, maxSol }, "Trade skipped: insufficient balance");
+      res.json({ success: false, skipped: true, isDryRun: false, estimatedProfitUsd: 0, tradeNumber, buyOrderId: null, sellOrderId: null, error: "Trade skipped: insufficient balance." });
+      return;
+    }
+  } catch (balErr) {
+    req.log.warn({ err: balErr }, "Balance pre-check failed — proceeding with requested volume");
+  }
+
   try {
     let buyOrderId: string | null = null;
     let sellOrderId: string | null = null;

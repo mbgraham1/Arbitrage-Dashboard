@@ -187,6 +187,8 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
           setSessionProfitUsd((p) => p + res.estimatedProfitUsd);
           queryClient.invalidateQueries({ queryKey: getGetTradeSummaryQueryKey() });
           queryClient.invalidateQueries({ queryKey: getListTradesQueryKey() });
+        } else if (res.skipped) {
+          addLog("warning", `${tag} ${res.error ?? "Trade skipped: insufficient balance."}`);
         } else {
           addLog("error", `${tag} Failed: ${res.error}`);
         }

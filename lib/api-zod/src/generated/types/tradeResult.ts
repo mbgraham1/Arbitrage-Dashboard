@@ -9,6 +9,8 @@
 export interface TradeResult {
   success: boolean;
   isDryRun: boolean;
+  /** True when the trade was skipped (e.g. insufficient balance) rather than executed or failed */
+  skipped?: boolean;
   estimatedProfitUsd: number;
   tradeNumber: number;
   /** @nullable */
