@@ -337,12 +337,9 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
         latestPriceDataRef.current = data;
         setLatestPriceData(data);
 
-        if (!data.wsStatus.kraken)   addLog("warning", "Kraken websocket disconnected.");
-        if (!data.wsStatus.coinbase) addLog("warning", "Coinbase websocket disconnected.");
-        if (!data.wsStatus.kraken || !data.wsStatus.coinbase) {
-          addLog("warning", "Waiting for WebSocket reconnect...");
-          return;
-        }
+        // Log WS degradation but keep scanning — REST prices are fresh enough
+        if (!data.wsStatus.kraken)   addLog("warning", "Kraken price feed degraded (REST fallback).");
+        if (!data.wsStatus.coinbase) addLog("warning", "Coinbase price feed degraded (REST fallback).");
 
         const now = Date.now();
         const netEdge = data.grossSpreadPct - s.totalFees - s.slippage;
