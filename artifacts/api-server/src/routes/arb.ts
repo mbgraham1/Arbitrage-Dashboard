@@ -158,7 +158,16 @@ router.post("/execute-trade", async (req, res): Promise<void> => {
   } = parsed.data;
 
   const useLimit = orderType === "limit";
-  const estimatedProfitUsd = Math.abs(krakenPrice - coinbasePrice) * volume;
+
+  // Estimated net profit after fees + slippage, mirroring Python:
+  //   gross_profit = (sell - buy) * vol
+  //   estimated_fees  = buy * vol * (fees/100) + sell * vol * (fees/100)
+  //   estimated_slippage = buy * vol * (slippage/100)
+  //   estimated_net_profit = gross_profit - estimated_fees - estimated_slippage
+  // netEdgePct = grossSpread% - totalFees% - slippage%, so:
+  //   net_profit ≈ (netEdgePct / 100) * buyPrice * volume
+  const buyPrice = Math.min(krakenPrice, coinbasePrice);
+  const estimatedProfitUsd = Math.max(0, ((netEdgePct ?? 0) / 100) * buyPrice * volume);
 
   // Count trades to get trade number
   const [countRow] = await db.select({ n: count() }).from(tradesTable);
