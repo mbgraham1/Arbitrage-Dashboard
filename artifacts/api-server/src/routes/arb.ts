@@ -14,9 +14,11 @@ import {
   getKrakenBalances,
   krakenMarketOrder,
   krakenLimitOrder,
+  krakenCancelOrder,
   getCoinbaseBalances,
   coinbaseMarketOrder,
   coinbaseLimitOrder,
+  coinbaseCancelOrder,
 } from "../lib/exchange";
 import { getAllPrices } from "../lib/price-cache";
 
@@ -212,29 +214,52 @@ router.post("/execute-trade", async (req, res): Promise<void> => {
     req.log.warn({ err: balErr }, "Balance pre-check failed — proceeding with requested volume");
   }
 
+  const ORDER_TIMEOUT_MS = 10_000; // 10 s — matches Python ORDER_TIMEOUT
+  const withOrderTimeout = <T>(promise: Promise<T>, label: string): Promise<T> => {
+    const timeout = new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error(`Order timed out after ${ORDER_TIMEOUT_MS / 1000}s: ${label}`)), ORDER_TIMEOUT_MS)
+    );
+    return Promise.race([promise, timeout]);
+  };
+
+  // Hoisted so the catch block can cancel any partially-placed leg on timeout
+  let buyOrderId: string | null = null;
+  let sellOrderId: string | null = null;
+
   try {
-    let buyOrderId: string | null = null;
-    let sellOrderId: string | null = null;
+    const orderTime = Date.now(); // mirrors Python's order_time = time.time()
 
     if (sellExchange === "Coinbase") {
       // Sell on Coinbase, buy on Kraken
-      const sellResult = useLimit
-        ? await coinbaseLimitOrder({ coinbaseKey, coinbaseSecret }, "SELL", volume, coinbasePrice)
-        : await coinbaseMarketOrder({ coinbaseKey, coinbaseSecret }, "SELL", volume, coinbasePrice);
+      const sellResult = await withOrderTimeout(
+        useLimit
+          ? coinbaseLimitOrder({ coinbaseKey, coinbaseSecret }, "SELL", volume, coinbasePrice)
+          : coinbaseMarketOrder({ coinbaseKey, coinbaseSecret }, "SELL", volume, coinbasePrice),
+        "Coinbase SELL"
+      );
       sellOrderId = sellResult.orderId ?? null;
-      const buyResult = useLimit
-        ? await krakenLimitOrder({ krakenKey, krakenSecret }, "buy", volume, krakenPrice)
-        : await krakenMarketOrder({ krakenKey, krakenSecret }, "buy", volume);
+      const buyResult = await withOrderTimeout(
+        useLimit
+          ? krakenLimitOrder({ krakenKey, krakenSecret }, "buy", volume, krakenPrice)
+          : krakenMarketOrder({ krakenKey, krakenSecret }, "buy", volume),
+        "Kraken buy"
+      );
       buyOrderId = buyResult.txid?.[0] ?? null;
     } else {
       // Sell on Kraken, buy on Coinbase
-      const sellResult = useLimit
-        ? await krakenLimitOrder({ krakenKey, krakenSecret }, "sell", volume, krakenPrice)
-        : await krakenMarketOrder({ krakenKey, krakenSecret }, "sell", volume);
+      const sellResult = await withOrderTimeout(
+        useLimit
+          ? krakenLimitOrder({ krakenKey, krakenSecret }, "sell", volume, krakenPrice)
+          : krakenMarketOrder({ krakenKey, krakenSecret }, "sell", volume),
+        "Kraken sell"
+      );
       sellOrderId = sellResult.txid?.[0] ?? null;
-      const buyResult = useLimit
-        ? await coinbaseLimitOrder({ coinbaseKey, coinbaseSecret }, "BUY", volume, coinbasePrice)
-        : await coinbaseMarketOrder({ coinbaseKey, coinbaseSecret }, "BUY", volume, coinbasePrice);
+      const buyResult = await withOrderTimeout(
+        useLimit
+          ? coinbaseLimitOrder({ coinbaseKey, coinbaseSecret }, "BUY", volume, coinbasePrice)
+          : coinbaseMarketOrder({ coinbaseKey, coinbaseSecret }, "BUY", volume, coinbasePrice),
+        "Coinbase BUY"
+      );
       buyOrderId = buyResult.orderId ?? null;
     }
 
@@ -251,11 +276,25 @@ router.post("/execute-trade", async (req, res): Promise<void> => {
       sellOrderId,
     });
 
-    req.log.info({ tradeNumber, buyOrderId, sellOrderId, estimatedProfitUsd, orderType: orderType ?? "market" }, "Live trade executed");
+    const orderElapsedMs = Date.now() - orderTime;
+    req.log.info({ tradeNumber, buyOrderId, sellOrderId, estimatedProfitUsd, orderType: orderType ?? "market", orderElapsedMs }, "Live trade executed");
     res.json({ success: true, isDryRun: false, estimatedProfitUsd, tradeNumber, buyOrderId, sellOrderId, error: null });
   } catch (err) {
-    req.log.error({ err }, "Trade execution failed");
-    res.status(500).json({ success: false, isDryRun: false, estimatedProfitUsd: 0, tradeNumber, buyOrderId: null, sellOrderId: null, error: (err as Error).message });
+    const msg = err instanceof Error ? err.message : "Unknown error";
+    const isTimeout = msg.startsWith("Order timed out after");
+    if (isTimeout) {
+      req.log.warn({ err, tradeNumber, buyOrderId, sellOrderId }, "Limit order timed out — cancelling any placed legs");
+      const cancelOps: Promise<void>[] = [];
+      if (buyExchange === "Kraken"  && buyOrderId)  cancelOps.push(krakenCancelOrder({ krakenKey, krakenSecret }, buyOrderId).catch((e) => req.log.error({ e }, "Kraken cancel failed")));
+      if (buyExchange === "Coinbase" && buyOrderId)  cancelOps.push(coinbaseCancelOrder({ coinbaseKey, coinbaseSecret }, buyOrderId).catch((e) => req.log.error({ e }, "Coinbase cancel failed")));
+      if (sellExchange === "Kraken"  && sellOrderId) cancelOps.push(krakenCancelOrder({ krakenKey, krakenSecret }, sellOrderId).catch((e) => req.log.error({ e }, "Kraken cancel failed")));
+      if (sellExchange === "Coinbase" && sellOrderId) cancelOps.push(coinbaseCancelOrder({ coinbaseKey, coinbaseSecret }, sellOrderId).catch((e) => req.log.error({ e }, "Coinbase cancel failed")));
+      await Promise.allSettled(cancelOps);
+      res.status(500).json({ success: false, isDryRun: false, estimatedProfitUsd: 0, tradeNumber, buyOrderId: null, sellOrderId: null, error: "Limit order timed out." });
+    } else {
+      req.log.error({ err }, "Trade execution failed");
+      res.status(500).json({ success: false, isDryRun: false, estimatedProfitUsd: 0, tradeNumber, buyOrderId: null, sellOrderId: null, error: msg });
+    }
   }
 });
 

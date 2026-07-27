@@ -182,7 +182,7 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
         `1.0000 SOL | ` +
         `Buy $${data.buyPrice.toFixed(4)} | ` +
         `Sell $${data.sellPrice.toFixed(4)} | ` +
-        `Net ${netEdge.toFixed(3)}%`
+        `Net Edge ${netEdge.toFixed(3)}%`
       );
       addLog("info", `${tag} Estimated Net Profit: $${expectedProfit.toFixed(2)}`);
       try {

@@ -111,6 +111,10 @@ export async function krakenLimitOrder(
   }, creds);
 }
 
+export async function krakenCancelOrder(creds: KrakenCreds, txid: string): Promise<void> {
+  await krakenPrivateRequest<unknown>("/0/private/CancelOrder", { txid }, creds);
+}
+
 // ---------------------------------------------------------------------------
 // Coinbase Advanced Trade API helpers (JWT auth, ES256)
 // ---------------------------------------------------------------------------
@@ -209,6 +213,10 @@ export async function coinbaseMarketOrder(
     }
   );
   return { orderId: data.success_response?.order_id ?? data.order_id, success: data.success };
+}
+
+export async function coinbaseCancelOrder(creds: CoinbaseCreds, orderId: string): Promise<void> {
+  await coinbaseRequest<unknown>(creds, "POST", "/api/v3/brokerage/orders/batch_cancel", { order_ids: [orderId] });
 }
 
 export async function coinbaseLimitOrder(
