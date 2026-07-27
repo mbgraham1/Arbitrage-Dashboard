@@ -59,8 +59,9 @@ function reconnectingWs(
       if (!stopped) setTimeout(connect, 3_000);
     };
 
-    ws.onerror = () => {
-      // onclose fires after onerror, so just close
+    ws.onerror = (ev) => {
+      const msg = (ev as ErrorEvent).message ?? "unknown error";
+      console.error(`[price-cache] ${label} WS error: ${msg}`);
       try { ws.close(); } catch { /* ignore */ }
     };
   }
