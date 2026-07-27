@@ -8,7 +8,7 @@ import {
 } from "lucide-react";
 import { format } from "date-fns";
 import { cn } from "@/lib/utils";
-import { useFetchBalances, useGetTradeSummary } from "@workspace/api-client-react";
+import { useGetTradeSummary } from "@workspace/api-client-react";
 
 // ── Small helpers ──────────────────────────────────────────────────────────────
 
@@ -71,25 +71,12 @@ function PriceTile({
 export default function Dashboard() {
   const {
     isRunning, setIsRunning, liveMode,
-    latestPriceData, activityLog, sessionProfitUsd,
+    latestPriceData, cachedBalances, activityLog, sessionProfitUsd,
     settings, credentials, addLog,
     forceTrade, isForcingTrade,
   } = useBotContext();
 
-  const fetchBalancesMutation = useFetchBalances();
   const summaryQuery = useGetTradeSummary();
-  const [balances, setBalances] = React.useState<{
-    solOnKraken?: number; solOnCoinbase?: number; usdOnCoinbase?: number;
-  } | null>(null);
-
-  React.useEffect(() => {
-    if (credentials.krakenKey && credentials.coinbaseKey) {
-      fetchBalancesMutation.mutateAsync({ data: credentials })
-        .then(res => setBalances(res))
-        .catch(err => console.error("Failed to fetch balances", err));
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [credentials.krakenKey, credentials.coinbaseKey]);
 
   const toggleBot = () => {
     if (!credentials.krakenKey && !isRunning) {
@@ -277,25 +264,25 @@ export default function Dashboard() {
               </CardTitle>
             </CardHeader>
             <CardContent className="p-0">
-              {fetchBalancesMutation.isPending && !balances ? (
-                <div className="p-8 text-center text-sm font-mono text-muted-foreground animate-pulse">Loading...</div>
-              ) : balances ? (
+              {cachedBalances ? (
                 <div className="flex flex-col">
                   <div className="p-4 border-b-2 border-border flex justify-between items-center">
                     <span className="font-bold text-sm">Kraken SOL</span>
-                    <span className="font-mono">{balances.solOnKraken?.toFixed(4) ?? "0.0000"}</span>
+                    <span className="font-mono">{cachedBalances.solOnKraken?.toFixed(4) ?? "0.0000"}</span>
                   </div>
                   <div className="p-4 border-b-2 border-border flex justify-between items-center bg-muted/20">
                     <span className="font-bold text-sm">Coinbase SOL</span>
-                    <span className="font-mono">{balances.solOnCoinbase?.toFixed(4) ?? "0.0000"}</span>
+                    <span className="font-mono">{cachedBalances.solOnCoinbase?.toFixed(4) ?? "0.0000"}</span>
                   </div>
                   <div className="p-4 flex justify-between items-center bg-primary/5">
                     <span className="font-bold text-sm text-primary">Coinbase USD</span>
-                    <span className="font-mono text-primary font-bold">${balances.usdOnCoinbase?.toFixed(2) ?? "0.00"}</span>
+                    <span className="font-mono text-primary font-bold">${cachedBalances.usdOnCoinbase?.toFixed(2) ?? "0.00"}</span>
                   </div>
                 </div>
               ) : (
-                <div className="p-8 text-center text-sm font-mono text-muted-foreground">Credentials not configured</div>
+                <div className="p-8 text-center text-sm font-mono text-muted-foreground">
+                  {isRunning ? "Fetching balances…" : "Start bot to load balances"}
+                </div>
               )}
             </CardContent>
           </Card>

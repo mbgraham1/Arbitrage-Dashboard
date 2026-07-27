@@ -4,12 +4,13 @@ import React, {
 import { useLocalStorage } from "@/hooks/use-local-storage";
 import {
   useFetchPrices,
+  useFetchBalances,
   useExecuteTrade,
   useGetPreloadedCredentials,
   getListTradesQueryKey,
   getGetTradeSummaryQueryKey,
 } from "@workspace/api-client-react";
-import type { ExchangeCredentials, PriceData } from "@workspace/api-client-react";
+import type { ExchangeCredentials, PriceData, BalanceData } from "@workspace/api-client-react";
 import { useQueryClient } from "@tanstack/react-query";
 
 export interface LogEntry {
@@ -38,6 +39,7 @@ export interface BotContextType {
   liveMode: boolean;
   setLiveMode: (live: boolean) => void;
   latestPriceData: PriceData | null;
+  cachedBalances: BalanceData | null;
   activityLog: LogEntry[];
   sessionProfitUsd: number;
   addLog: (type: LogEntry["type"], message: string) => void;
@@ -99,6 +101,7 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
   const [isRunning, setIsRunning] = useState(false);
   const [liveMode, setLiveMode] = useLocalStorage("cat_arb_live_mode", false);
   const [latestPriceData, setLatestPriceData] = useState<PriceData | null>(null);
+  const [cachedBalances, setCachedBalances] = useState<BalanceData | null>(null);
   const [activityLog, setActivityLog] = useState<LogEntry[]>([]);
   const [sessionProfitUsd, setSessionProfitUsd] = useState(0);
   const [secretsLoaded, setSecretsLoaded] = useState(false);
@@ -115,9 +118,13 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => { liveModeRef.current = liveMode; }, [liveMode]);
 
   const lastTradeTimeRef = useRef<number>(0);
+  const lastBalanceUpdateRef = useRef<number>(0);
   const isExecutingRef = useRef<boolean>(false);
 
+  const BALANCE_CACHE_TTL_MS = 30_000; // refresh balances at most once per 30 s (mirrors Python)
+
   const fetchPricesMutation = useFetchPrices();
+  const fetchBalancesMutation = useFetchBalances();
   const executeTradeMutation = useExecuteTrade();
 
   // ── Preloaded credentials (run once) ─────────────────────────────────────────
@@ -286,6 +293,14 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
       const s = settingsRef.current;
       const live = liveModeRef.current;
 
+      // Refresh balances if cache is stale — fire-and-forget, never blocks price/trade logic
+      if (Date.now() - lastBalanceUpdateRef.current > BALANCE_CACHE_TTL_MS) {
+        lastBalanceUpdateRef.current = Date.now(); // optimistic — prevents concurrent fetches
+        fetchBalancesMutation.mutateAsync({ data: c })
+          .then((bal) => { if (!cancelled) setCachedBalances(bal); })
+          .catch(() => { /* keep stale cache */ });
+      }
+
       try {
         const data = await fetchPricesMutation.mutateAsync({ data: c });
         if (cancelled) return;
@@ -353,6 +368,7 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
     liveMode,
     setLiveMode,
     latestPriceData,
+    cachedBalances,
     activityLog,
     sessionProfitUsd,
     addLog,
