@@ -62,21 +62,30 @@ router.post("/prices", async (req, res): Promise<void> => {
     const cAsk = coinbaseAsk ?? coinbaseMid;
     const cBid = coinbaseBid ?? coinbaseMid;
 
-    // Direction: cheaper ask = better buy side
-    const krakenCheaperToBuy = kAsk < cAsk;
-    const bestBuyExchange    = krakenCheaperToBuy ? "Kraken"   : "Coinbase";
-    const bestSellExchange   = krakenCheaperToBuy ? "Coinbase" : "Kraken";
-    const buyPrice  = krakenCheaperToBuy ? kAsk : cAsk;
-    const sellPrice = krakenCheaperToBuy ? cBid : kBid;
+    // Route 1: buy at Kraken ask, sell at Coinbase bid
+    const kToCPct = ((cBid - kAsk) / kAsk) * 100;
+    // Route 2: buy at Coinbase ask, sell at Kraken bid
+    const cToKPct = ((kBid - cAsk) / cAsk) * 100;
 
-    const grossSpreadPct = ((sellPrice - buyPrice) / buyPrice) * 100;
+    // Pick the route with the higher gross spread — mirrors Python's comparison
+    const useKraken = kToCPct >= cToKPct;
+    const bestBuyExchange  = useKraken ? "Kraken"   : "Coinbase";
+    const bestSellExchange = useKraken ? "Coinbase" : "Kraken";
+    const buyPrice         = useKraken ? kAsk       : cAsk;
+    const sellPrice        = useKraken ? cBid       : kBid;
+
+    const grossSpreadPct = useKraken ? kToCPct : cToKPct;
     const route = `Buy ${bestBuyExchange} → Sell ${bestSellExchange}`;
 
     req.log.info({ krakenPrice, coinbasePrice, grossSpreadPct, bestBuyExchange, bestSellExchange }, "Prices fetched");
 
     res.json({
       krakenPrice,
+      krakenBid:   kBid,
+      krakenAsk:   kAsk,
       coinbasePrice,
+      coinbaseBid:  cBid,
+      coinbaseAsk:  cAsk,
       binancePrice: binancePrice ?? null,   // reference only — not used for trading
       kuCoinPrice: kuCoinPrice ?? null,      // reference only — not used for trading
       grossSpreadPct,

@@ -283,11 +283,19 @@ components:
 
     PriceData:
       type: object
-      required: [krakenPrice, coinbasePrice, grossSpreadPct, netEdgePct, route, timestamp, bestBuyExchange, bestSellExchange, buyPrice, sellPrice, executable, wsStatus]
+      required: [krakenPrice, krakenBid, krakenAsk, coinbasePrice, coinbaseBid, coinbaseAsk, grossSpreadPct, netEdgePct, route, timestamp, bestBuyExchange, bestSellExchange, buyPrice, sellPrice, executable, wsStatus]
       properties:
         krakenPrice:
           type: number
+        krakenBid:
+          type: number
+        krakenAsk:
+          type: number
         coinbasePrice:
+          type: number
+        coinbaseBid:
+          type: number
+        coinbaseAsk:
           type: number
         binancePrice:
           type: number

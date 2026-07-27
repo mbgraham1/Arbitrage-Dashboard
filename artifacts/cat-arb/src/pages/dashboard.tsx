@@ -14,15 +14,15 @@ import { useGetTradeSummary } from "@workspace/api-client-react";
 
 function PriceTile({
   label,
-  price,
-  isWs,
+  bid,
+  ask,
   wsLive,
   highlight,
   tag,
 }: {
   label: string;
-  price: number | null | undefined;
-  isWs?: boolean;
+  bid: number | null | undefined;
+  ask: number | null | undefined;
   wsLive?: boolean;
   highlight?: "buy" | "sell" | null;
   tag?: string;
@@ -45,23 +45,25 @@ function PriceTile({
               "text-muted-foreground border-border"
             )}>{tag}</span>
           )}
-          {isWs ? (
+          {wsLive != null ? (
             wsLive
               ? <Wifi className="h-3 w-3 text-success" />
               : <WifiOff className="h-3 w-3 text-yellow-500" />
-          ) : (
-            <span className="text-[9px] font-mono text-muted-foreground">REST</span>
-          )}
+          ) : null}
         </div>
       </div>
-      <span className={cn(
-        "font-mono text-lg font-bold leading-none",
-        highlight === "buy" && "text-success",
-        highlight === "sell" && "text-primary",
-        !highlight && "text-foreground",
-      )}>
-        {price != null ? `$${price.toFixed(2)}` : "—"}
-      </span>
+      <div className="flex flex-col gap-0.5">
+        <span className="font-mono text-[10px] text-muted-foreground">
+          Bid <span className={cn("font-bold", highlight === "sell" && "text-primary")}>
+            {bid != null ? `$${bid.toFixed(4)}` : "—"}
+          </span>
+        </span>
+        <span className="font-mono text-[10px] text-muted-foreground">
+          Ask <span className={cn("font-bold", highlight === "buy" && "text-success")}>
+            {ask != null ? `$${ask.toFixed(4)}` : "—"}
+          </span>
+        </span>
+      </div>
     </div>
   );
 }
@@ -236,16 +238,16 @@ export default function Dashboard() {
             <CardContent className="p-3 grid grid-cols-2 gap-2">
               <PriceTile
                 label="Kraken"
-                price={latestPriceData?.krakenPrice}
-                isWs
+                bid={latestPriceData?.krakenBid}
+                ask={latestPriceData?.krakenAsk}
                 wsLive={latestPriceData?.wsStatus.kraken}
                 highlight={highlightFor("Kraken")}
                 tag={tagFor("Kraken")}
               />
               <PriceTile
                 label="Coinbase"
-                price={latestPriceData?.coinbasePrice}
-                isWs
+                bid={latestPriceData?.coinbaseBid}
+                ask={latestPriceData?.coinbaseAsk}
                 wsLive={latestPriceData?.wsStatus.coinbase}
                 highlight={highlightFor("Coinbase")}
                 tag={tagFor("Coinbase")}

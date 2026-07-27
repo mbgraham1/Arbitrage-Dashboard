@@ -9,7 +9,7 @@
 
 import { getKrakenPrice, getCoinbasePrice } from "./exchange";
 
-const WS_STALE_MS = 10_000; // treat WS price as stale after 10 s
+const WS_STALE_MS = 15_000; // treat WS price as stale after 15 s (matches Python prices_fresh check)
 const BINANCE_KU_POLL_MS = 5_000; // REST poll interval for Binance + KuCoin
 
 interface CacheEntry {
@@ -106,7 +106,40 @@ function startKrakenWs(): void {
   );
 }
 
-// ── Coinbase Exchange WebSocket ────────────────────────────────────────────────
+// ── Coinbase Exchange WebSocket — level2 order book ───────────────────────────
+
+// In-memory order book: price (as string key) → size
+const coinbaseBook = {
+  bids: new Map<string, number>(), // buy side — best = max key
+  asks: new Map<string, number>(), // sell side — best = min key
+};
+
+function applyL2Changes(changes: Array<[string, string, string]>): void {
+  for (const [side, priceStr, sizeStr] of changes) {
+    const size = parseFloat(sizeStr);
+    if (side === "buy") {
+      if (size > 0) coinbaseBook.bids.set(priceStr, size);
+      else          coinbaseBook.bids.delete(priceStr);
+    } else if (side === "sell") {
+      if (size > 0) coinbaseBook.asks.set(priceStr, size);
+      else          coinbaseBook.asks.delete(priceStr);
+    }
+  }
+}
+
+function bestBidAsk(): { bid: number | undefined; ask: number | undefined; mid: number | undefined } {
+  const bid = coinbaseBook.bids.size > 0 ? Math.max(...Array.from(coinbaseBook.bids.keys()).map(Number)) : undefined;
+  const ask = coinbaseBook.asks.size > 0 ? Math.min(...Array.from(coinbaseBook.asks.keys()).map(Number)) : undefined;
+  const mid = bid != null && ask != null ? (bid + ask) / 2 : (bid ?? ask);
+  return { bid, ask, mid };
+}
+
+function commitCoinbaseBook(): void {
+  const { bid, ask, mid } = bestBidAsk();
+  if (mid != null && mid > 0) {
+    cache.coinbase = { price: mid, bid, ask, updatedAt: Date.now(), source: "ws" };
+  }
+}
 
 function startCoinbaseWs(): void {
   reconnectingWs(
@@ -115,19 +148,31 @@ function startCoinbaseWs(): void {
       ws.send(JSON.stringify({
         type: "subscribe",
         product_ids: ["SOL-USD"],
-        channels: ["ticker"],
+        channels: ["level2"],
       }));
     },
     (raw) => {
       try {
-        const msg = JSON.parse(raw) as { type?: string; product_id?: string; price?: string; best_bid?: string; best_ask?: string };
-        if (msg.type === "ticker" && msg.product_id === "SOL-USD" && msg.price) {
-          const price = parseFloat(msg.price);
-          const bid   = msg.best_bid ? parseFloat(msg.best_bid) : undefined;
-          const ask   = msg.best_ask ? parseFloat(msg.best_ask) : undefined;
-          if (price > 0) {
-            cache.coinbase = { price, bid, ask, updatedAt: Date.now(), source: "ws" };
-          }
+        const msg = JSON.parse(raw) as {
+          type?: string;
+          product_id?: string;
+          bids?: Array<[string, string]>;
+          asks?: Array<[string, string]>;
+          changes?: Array<[string, string, string]>;
+        };
+        if (msg.product_id !== "SOL-USD") return;
+
+        if (msg.type === "snapshot") {
+          // Full order book — initialise from scratch
+          coinbaseBook.bids.clear();
+          coinbaseBook.asks.clear();
+          for (const [p, s] of msg.bids ?? []) { const sz = parseFloat(s); if (sz > 0) coinbaseBook.bids.set(p, sz); }
+          for (const [p, s] of msg.asks ?? []) { const sz = parseFloat(s); if (sz > 0) coinbaseBook.asks.set(p, sz); }
+          commitCoinbaseBook();
+        } else if (msg.type === "l2update") {
+          // Incremental update
+          applyL2Changes(msg.changes ?? []);
+          commitCoinbaseBook();
         }
       } catch (e) { console.error(`[price-cache] Coinbase WS message error: ${e}`); }
     },

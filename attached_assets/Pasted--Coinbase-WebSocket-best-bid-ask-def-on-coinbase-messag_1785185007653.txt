@@ -1,0 +1,110 @@
+# ---------- Coinbase WebSocket: best bid / ask ----------
+
+def on_coinbase_message(ws, message):
+    global latest_prices
+
+    try:
+        data = json.loads(message)
+
+        # Ignore subscription confirmations and heartbeat-style messages
+        if data.get("type") != "l2update":
+            return
+
+        changes = data.get("changes", [])
+
+        with price_lock:
+            book = latest_prices["coinbase"]
+
+            for side, price, size in changes:
+                price = D(price)
+                size = D(size)
+
+                if side == "buy":
+                    if size > 0:
+                        book["bids"][price] = size
+                    else:
+                        book["bids"].pop(price, None)
+
+                elif side == "sell":
+                    if size > 0:
+                        book["asks"][price] = size
+                    else:
+                        book["asks"].pop(price, None)
+
+            book["bid"] = max(book["bids"]) if book["bids"] else None
+            book["ask"] = min(book["asks"]) if book["asks"] else None
+            book["updated"] = time.time()
+
+    except Exception as e:
+        print(f"Coinbase WS message error: {e}")
+
+
+def on_coinbase_snapshot(ws, message):
+    global latest_prices
+
+    try:
+        data = json.loads(message)
+
+        if data.get("type") == "snapshot":
+            bids = {
+                D(price): D(size)
+                for price, size in data.get("bids", [])
+                if D(size) > 0
+            }
+
+            asks = {
+                D(price): D(size)
+                for price, size in data.get("asks", [])
+                if D(size) > 0
+            }
+
+            with price_lock:
+                latest_prices["coinbase"]["bids"] = bids
+                latest_prices["coinbase"]["asks"] = asks
+                latest_prices["coinbase"]["bid"] = max(bids) if bids else None
+                latest_prices["coinbase"]["ask"] = min(asks) if asks else None
+                latest_prices["coinbase"]["updated"] = time.time()
+
+        else:
+            on_coinbase_message(ws, message)
+
+    except Exception as e:
+        print(f"Coinbase snapshot error: {e}")
+
+
+def start_coinbase_ws():
+    while True:
+        try:
+            def on_open(ws):
+                ws.send(json.dumps({
+                    "type": "subscribe",
+                    "product_ids": [COINBASE_PRODUCT],
+                    "channels": ["level2"]
+                }))
+
+            def on_close(ws, status_code, close_message):
+                print(
+                    f"Coinbase WS closed: "
+                    f"{status_code} {close_message or ''}"
+                )
+
+            def on_error(ws, error):
+                print(f"Coinbase WS error: {error}")
+
+            ws = websocket.WebSocketApp(
+                "wss://ws-feed.exchange.coinbase.com",
+                on_open=on_open,
+                on_message=on_coinbase_snapshot,
+                on_close=on_close,
+                on_error=on_error,
+            )
+
+            ws.run_forever(
+                ping_interval=20,
+                ping_timeout=10,
+            )
+
+        except Exception as e:
+            print(f"Coinbase WS reconnect error: {e}")
+
+        time.sleep(5)

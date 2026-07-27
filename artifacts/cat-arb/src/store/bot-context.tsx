@@ -377,7 +377,7 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
         }
       } catch (err) {
         if (!cancelled) {
-          addLog("error", `Price fetch failed: ${err instanceof Error ? err.message : "Network error"}`);
+          addLog("warning", "Waiting for fresh Kraken and Coinbase bid/ask data.");
         }
       }
     };
