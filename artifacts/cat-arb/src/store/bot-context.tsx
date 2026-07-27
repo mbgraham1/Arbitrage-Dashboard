@@ -164,7 +164,7 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
       const tag = forced ? "[FORCE·MKT]" : live ? "[LIVE·LMT]" : "[DRY RUN]";
       const netEdge = data.grossSpreadPct - s.totalFees - s.slippage;
 
-      const expectedProfit = Math.abs(data.sellPrice - data.buyPrice) * 1.0; // volume fixed at 1.0 SOL
+      const expectedProfit = (netEdge / 100) * data.buyPrice * 1.0; // net after fees+slippage, volume fixed at 1.0 SOL
       addLog("trade",
         `${tag} ${data.bestBuyExchange} → ${data.bestSellExchange} | ` +
         `1.0000 SOL | ` +
@@ -172,7 +172,7 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
         `Sell $${data.sellPrice.toFixed(4)} | ` +
         `Net ${netEdge.toFixed(3)}%`
       );
-      addLog("info", `${tag} Expected spread: $${expectedProfit.toFixed(2)}`);
+      addLog("info", `${tag} Estimated Net Profit: $${expectedProfit.toFixed(2)}`);
       try {
         const res = await executeTradeMutation.mutateAsync({
           data: {
