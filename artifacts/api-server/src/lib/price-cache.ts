@@ -90,14 +90,15 @@ function startKrakenWs(): void {
           type?: string;
           data?: Array<{ symbol?: string; last?: number; bid?: number; ask?: number }>;
         };
-        if (msg.channel === "ticker" && msg.type === "update" && msg.data?.[0] != null) {
+        // Accept both snapshot (initial) and update messages
+        if (msg.channel === "ticker" && (msg.type === "update" || msg.type === "snapshot") && msg.data?.[0] != null) {
           const d = msg.data[0];
           const bid = d.bid;
           const ask = d.ask;
           const last = d.last;
           const mid = (bid != null && ask != null) ? (bid + ask) / 2 : (last ?? 0);
           if (mid > 0) {
-            cache.kraken = { price: mid, bid, ask, updatedAt: Date.now(), source: "ws" };
+            cache.kraken = { price: mid, bid: bid ?? mid, ask: ask ?? mid, updatedAt: Date.now(), source: "ws" };
           }
         }
       } catch (e) { console.error(`[price-cache] Kraken WS message error: ${e}`); }
@@ -254,8 +255,8 @@ export async function getAllPrices(): Promise<AllPrices> {
   const coinbaseFresh = cache.coinbase && now - cache.coinbase.updatedAt < WS_STALE_MS;
 
   const fallbacks: Promise<void>[] = [];
-  if (!krakenFresh) fallbacks.push(getKrakenPrice().then(p => { cache.kraken = { price: p, updatedAt: Date.now(), source: "rest" }; }).catch(() => {}));
-  if (!coinbaseFresh) fallbacks.push(getCoinbasePrice().then(p => { cache.coinbase = { price: p, updatedAt: Date.now(), source: "rest" }; }).catch(() => {}));
+  if (!krakenFresh) fallbacks.push(getKrakenPrice().then(p => { cache.kraken = { price: p, bid: p, ask: p, updatedAt: Date.now(), source: "rest" }; }).catch(() => {}));
+  if (!coinbaseFresh) fallbacks.push(getCoinbasePrice().then(p => { cache.coinbase = { price: p, bid: p, ask: p, updatedAt: Date.now(), source: "rest" }; }).catch(() => {}));
   if (fallbacks.length) await Promise.all(fallbacks);
 
   return {
