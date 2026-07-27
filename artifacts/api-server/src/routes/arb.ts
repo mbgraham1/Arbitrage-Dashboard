@@ -44,18 +44,30 @@ router.post("/prices", async (req, res): Promise<void> => {
 
   try {
     const prices = await getAllPrices();
-    const { kraken: krakenPrice, coinbase: coinbasePrice, binance: binancePrice, kucoin: kuCoinPrice, wsKraken, wsCoinbase } = prices;
+    const { kraken: krakenMid, krakenBid, krakenAsk, coinbase: coinbaseMid, coinbaseBid, coinbaseAsk, binance: binancePrice, kucoin: kuCoinPrice, wsKraken, wsCoinbase } = prices;
+    const krakenPrice   = krakenMid;   // alias for balance checks / order placement
+    const coinbasePrice = coinbaseMid; // alias for balance checks / order placement
 
-    if (!krakenPrice || !coinbasePrice) {
+    if (!krakenMid || !coinbaseMid) {
       res.status(500).json({ error: "Could not fetch prices from Kraken or Coinbase" });
       return;
     }
 
-    // v9: pure Kraken ↔ Coinbase — direction determined by direct comparison only
-    const bestBuyExchange = krakenPrice < coinbasePrice ? "Kraken" : "Coinbase";
-    const bestSellExchange = krakenPrice < coinbasePrice ? "Coinbase" : "Kraken";
-    const buyPrice = Math.min(krakenPrice, coinbasePrice);
-    const sellPrice = Math.max(krakenPrice, coinbasePrice);
+    // Buy Kraken  = k_ask  (pay the ask to buy)
+    // Sell Kraken = k_bid  (receive the bid when selling)
+    // Buy Coinbase  = c_ask
+    // Sell Coinbase = c_bid
+    const kAsk = krakenAsk   ?? krakenMid;
+    const kBid = krakenBid   ?? krakenMid;
+    const cAsk = coinbaseAsk ?? coinbaseMid;
+    const cBid = coinbaseBid ?? coinbaseMid;
+
+    // Direction: cheaper ask = better buy side
+    const krakenCheaperToBuy = kAsk < cAsk;
+    const bestBuyExchange    = krakenCheaperToBuy ? "Kraken"   : "Coinbase";
+    const bestSellExchange   = krakenCheaperToBuy ? "Coinbase" : "Kraken";
+    const buyPrice  = krakenCheaperToBuy ? kAsk : cAsk;
+    const sellPrice = krakenCheaperToBuy ? cBid : kBid;
 
     const grossSpreadPct = ((sellPrice - buyPrice) / buyPrice) * 100;
     const route = `Buy ${bestBuyExchange} → Sell ${bestSellExchange}`;

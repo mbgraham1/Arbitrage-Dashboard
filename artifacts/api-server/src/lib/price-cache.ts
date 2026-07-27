@@ -13,7 +13,9 @@ const WS_STALE_MS = 10_000; // treat WS price as stale after 10 s
 const BINANCE_KU_POLL_MS = 5_000; // REST poll interval for Binance + KuCoin
 
 interface CacheEntry {
-  price: number;
+  price: number;   // mid/last — used for REST fallback and reference prices
+  bid?: number;    // best bid (sell here)
+  ask?: number;    // best ask (buy here)
   updatedAt: number;
   source: "ws" | "rest";
 }
@@ -86,12 +88,16 @@ function startKrakenWs(): void {
         const msg = JSON.parse(raw) as {
           channel?: string;
           type?: string;
-          data?: Array<{ symbol?: string; last?: number }>;
+          data?: Array<{ symbol?: string; last?: number; bid?: number; ask?: number }>;
         };
-        if (msg.channel === "ticker" && msg.type === "update" && msg.data?.[0]?.last != null) {
-          const last = msg.data[0].last;
-          if (last && last > 0) {
-            cache.kraken = { price: last, updatedAt: Date.now(), source: "ws" };
+        if (msg.channel === "ticker" && msg.type === "update" && msg.data?.[0] != null) {
+          const d = msg.data[0];
+          const bid = d.bid;
+          const ask = d.ask;
+          const last = d.last;
+          const mid = (bid != null && ask != null) ? (bid + ask) / 2 : (last ?? 0);
+          if (mid > 0) {
+            cache.kraken = { price: mid, bid, ask, updatedAt: Date.now(), source: "ws" };
           }
         }
       } catch (e) { console.error(`[price-cache] Kraken WS message error: ${e}`); }
@@ -114,11 +120,13 @@ function startCoinbaseWs(): void {
     },
     (raw) => {
       try {
-        const msg = JSON.parse(raw) as { type?: string; product_id?: string; price?: string };
+        const msg = JSON.parse(raw) as { type?: string; product_id?: string; price?: string; best_bid?: string; best_ask?: string };
         if (msg.type === "ticker" && msg.product_id === "SOL-USD" && msg.price) {
-          const p = parseFloat(msg.price);
-          if (p > 0) {
-            cache.coinbase = { price: p, updatedAt: Date.now(), source: "ws" };
+          const price = parseFloat(msg.price);
+          const bid   = msg.best_bid ? parseFloat(msg.best_bid) : undefined;
+          const ask   = msg.best_ask ? parseFloat(msg.best_ask) : undefined;
+          if (price > 0) {
+            cache.coinbase = { price, bid, ask, updatedAt: Date.now(), source: "ws" };
           }
         }
       } catch (e) { console.error(`[price-cache] Coinbase WS message error: ${e}`); }
@@ -178,7 +186,11 @@ export function initPriceFeeds(): void {
 
 export interface AllPrices {
   kraken: number | null;
+  krakenBid: number | null;
+  krakenAsk: number | null;
   coinbase: number | null;
+  coinbaseBid: number | null;
+  coinbaseAsk: number | null;
   binance: number | null;
   kucoin: number | null;
   wsKraken: boolean;
@@ -202,11 +214,15 @@ export async function getAllPrices(): Promise<AllPrices> {
   if (fallbacks.length) await Promise.all(fallbacks);
 
   return {
-    kraken: cache.kraken?.price ?? null,
-    coinbase: cache.coinbase?.price ?? null,
-    binance: cache.binance?.price ?? null,
-    kucoin: cache.kucoin?.price ?? null,
-    wsKraken: !!(cache.kraken?.source === "ws" && krakenFresh),
+    kraken:      cache.kraken?.price   ?? null,
+    krakenBid:   cache.kraken?.bid     ?? cache.kraken?.price   ?? null,
+    krakenAsk:   cache.kraken?.ask     ?? cache.kraken?.price   ?? null,
+    coinbase:    cache.coinbase?.price ?? null,
+    coinbaseBid: cache.coinbase?.bid   ?? cache.coinbase?.price ?? null,
+    coinbaseAsk: cache.coinbase?.ask   ?? cache.coinbase?.price ?? null,
+    binance:     cache.binance?.price  ?? null,
+    kucoin:      cache.kucoin?.price   ?? null,
+    wsKraken:   !!(cache.kraken?.source   === "ws" && krakenFresh),
     wsCoinbase: !!(cache.coinbase?.source === "ws" && coinbaseFresh),
   };
 }
