@@ -22,7 +22,8 @@ export interface LogEntry {
 
 export interface BotSettings {
   minNetEdge: number;
-  minProfitUsd: number; // v11: minimum estimated net profit in USD
+  minProfitUsd: number;   // v11: minimum estimated net profit in USD
+  maxDailyLoss: number;   // v11: stop bot when cumulative loss exceeds this (USD)
   totalFees: number;
   slippage: number;
   cooldown: number;
@@ -42,6 +43,7 @@ export interface BotContextType {
   cachedBalances: BalanceData | null;
   activityLog: LogEntry[];
   sessionProfitUsd: number;
+  dailyLoss: number;
   addLog: (type: LogEntry["type"], message: string) => void;
   clearLog: () => void;
   secretsLoaded: boolean;
@@ -59,10 +61,11 @@ const EMPTY_CREDS: ExchangeCredentials = {
 };
 
 const DEFAULT_SETTINGS: BotSettings = {
-  minNetEdge: 0.05,   // v8: limit orders catch smaller spreads
-  minProfitUsd: 1.00, // v11: minimum $1.00 estimated net profit to execute
-  totalFees: 0.56,    // v8: Kraken maker 0.16% + Coinbase maker 0.40%
-  slippage: 0.05,     // v8: limit orders have near-zero slippage
+  minNetEdge: 0.05,    // v8: limit orders catch smaller spreads
+  minProfitUsd: 1.00,  // v11: minimum $1.00 estimated net profit to execute
+  maxDailyLoss: 10.00, // v11: halt if cumulative loss exceeds $10.00
+  totalFees: 0.56,     // v8: Kraken maker 0.16% + Coinbase maker 0.40%
+  slippage: 0.05,      // v8: limit orders have near-zero slippage
   cooldown: 30,
   pollInterval: 5,
 };
@@ -104,6 +107,7 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
   const [cachedBalances, setCachedBalances] = useState<BalanceData | null>(null);
   const [activityLog, setActivityLog] = useState<LogEntry[]>([]);
   const [sessionProfitUsd, setSessionProfitUsd] = useState(0);
+  const [dailyLoss, setDailyLoss] = useState(0);
   const [secretsLoaded, setSecretsLoaded] = useState(false);
   const [isForcingTrade, setIsForcingTrade] = useState(false);
 
@@ -371,6 +375,7 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
     cachedBalances,
     activityLog,
     sessionProfitUsd,
+    dailyLoss,
     addLog,
     clearLog,
     secretsLoaded,
