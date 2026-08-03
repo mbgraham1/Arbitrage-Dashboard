@@ -329,6 +329,69 @@ export default function Settings() {
             </Button>
           </CardContent>
         </Card>
+
+        {/* Kelly Criterion */}
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2">
+              <SlidersHorizontal className="h-5 w-5" /> Kelly Criterion Sizing
+            </CardTitle>
+            <CardDescription>
+              Dynamic position sizing: f* = (b·p − q) / b · bankroll. Quarter-Kelly by default.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="flex flex-col gap-6">
+
+            <div className="space-y-3">
+              <div className="flex flex-col gap-1">
+                <Label>Win Rate (0–1)</Label>
+                <span className="text-xs text-muted-foreground font-mono">Estimated fraction of profitable trades (default 0.55)</span>
+              </div>
+              <Input
+                type="number"
+                step="0.01"
+                min="0.01"
+                max="0.99"
+                value={localSettings.winRate}
+                onChange={(e) => setLocalSettings({ ...localSettings, winRate: parseFloat(e.target.value) || 0.55 })}
+              />
+            </div>
+
+            <div className="space-y-3">
+              <div className="flex flex-col gap-1">
+                <Label>Kelly Fraction (0–1)</Label>
+                <span className="text-xs text-muted-foreground font-mono">Cap on full Kelly — 0.25 = quarter-Kelly (recommended)</span>
+              </div>
+              <Input
+                type="number"
+                step="0.05"
+                min="0.01"
+                max="1"
+                value={localSettings.kellyFraction}
+                onChange={(e) => setLocalSettings({ ...localSettings, kellyFraction: parseFloat(e.target.value) || 0.25 })}
+              />
+            </div>
+
+            <div className="space-y-3">
+              <div className="flex flex-col gap-1">
+                <Label>Max Position (SOL)</Label>
+                <span className="text-xs text-muted-foreground font-mono">Hard cap per trade regardless of Kelly output</span>
+              </div>
+              <Input
+                type="number"
+                step="0.1"
+                min="0.1"
+                max="10"
+                value={localSettings.maxPositionSol}
+                onChange={(e) => setLocalSettings({ ...localSettings, maxPositionSol: parseFloat(e.target.value) || 1.0 })}
+              />
+            </div>
+
+            <Button className="w-full mt-2" onClick={handleSaveSettings}>
+              SAVE KELLY PARAMETERS
+            </Button>
+          </CardContent>
+        </Card>
       </div>
     </div>
   );

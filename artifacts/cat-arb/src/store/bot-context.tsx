@@ -28,6 +28,10 @@ export interface BotSettings {
   slippage: number;
   cooldown: number;
   pollInterval: number; // seconds
+  // Kelly Criterion position sizing
+  winRate: number;       // estimated win rate (default 0.55)
+  kellyFraction: number; // fractional Kelly cap (default 0.25 = quarter-Kelly)
+  maxPositionSol: number; // hard cap in SOL (default 1.0)
 }
 
 export interface BotContextType {
@@ -74,10 +78,36 @@ const DEFAULT_SETTINGS: BotSettings = {
   slippage: 0.05,      // v8: limit orders have near-zero slippage
   cooldown: 30,
   pollInterval: 5,
+  winRate: 0.55,        // Kelly: estimated historical win rate
+  kellyFraction: 0.25,  // Kelly: quarter-Kelly for conservative sizing
+  maxPositionSol: 1.0,  // Kelly: hard cap per trade (SOL)
 };
 
 // Bump this when defaults change meaningfully — forces a one-time reset for existing users
-const SETTINGS_VERSION = 5;
+const SETTINGS_VERSION = 6;
+
+// ── Kelly Criterion position sizer ────────────────────────────────────────────
+// Direct port of Python KellySizer.calculate()
+// f* = (b·p − q) / b   where b = edge fraction, p = win rate, q = 1−p
+// Size = bankroll × min(f*, kellyFraction), converted to SOL and capped at maxPositionSol
+function kellySize(
+  edgePct: number,
+  bankrollUsd: number,
+  winRate: number,
+  kellyFraction: number,
+  buyPrice: number,
+  maxPositionSol: number,
+): number {
+  if (edgePct <= 0 || bankrollUsd <= 0 || buyPrice <= 0) return 0;
+  const b = edgePct / 100;
+  const p = winRate;
+  const q = 1 - p;
+  const fStar = b > 0 ? (b * p - q) / b : 0;
+  const f = Math.max(0, Math.min(fStar, kellyFraction));
+  const sizeUsd = bankrollUsd * f;
+  const sizeSol = sizeUsd / buyPrice;
+  return Math.min(Math.max(sizeSol, 0), maxPositionSol);
+}
 
 export function BotProvider({ children }: { children: React.ReactNode }) {
   const queryClient = useQueryClient();
@@ -132,6 +162,7 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => { settingsRef.current = settings; }, [settings]);
   useEffect(() => { liveModeRef.current = liveMode; }, [liveMode]);
   useEffect(() => { emergencyStopRef.current = emergencyStop; }, [emergencyStop]);
+  useEffect(() => { cachedBalancesRef.current = cachedBalances; }, [cachedBalances]);
 
   const lastTradeTimeRef = useRef<number>(0);
   const lastBalanceUpdateRef = useRef<number>(0);
@@ -140,6 +171,8 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
   const isExecutingRef = useRef<boolean>(false);
   // Track previous WS state so degradation is logged only on transition, not every poll
   const prevWsRef = useRef<{ kraken: boolean; coinbase: boolean }>({ kraken: true, coinbase: true });
+  // Always-current balances for Kelly sizing inside poll()
+  const cachedBalancesRef = useRef<BalanceData | null>(null);
 
   const BALANCE_CACHE_TTL_MS = 30_000; // refresh balances at most once per 30 s (mirrors Python)
 
@@ -191,15 +224,23 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
       const tag = forced ? "[FORCE·MKT]" : live ? "[LIVE·LMT]" : "[DRY RUN]";
       const netEdge = data.grossSpreadPct - s.totalFees - s.slippage;
 
-      const expectedProfit = (netEdge / 100) * data.buyPrice * 1.0; // net after fees+slippage, volume fixed at 1.0 SOL
+      const volume = kellySize(
+        netEdge,
+        cachedBalancesRef.current?.usdOnCoinbase ?? 0,
+        s.winRate,
+        s.kellyFraction,
+        data.buyPrice,
+        s.maxPositionSol,
+      );
+      const expectedProfit = (netEdge / 100) * data.buyPrice * volume;
       addLog("trade",
         `${tag} ${data.bestBuyExchange} → ${data.bestSellExchange} | ` +
-        `1.0000 SOL | ` +
+        `${volume.toFixed(4)} SOL | ` +
         `Buy $${data.buyPrice.toFixed(4)} | ` +
         `Sell $${data.sellPrice.toFixed(4)} | ` +
         `Net Edge ${netEdge.toFixed(3)}%`
       );
-      addLog("info", `${tag} Estimated Net Profit: $${expectedProfit.toFixed(2)}`);
+      addLog("info", `${tag} Kelly size: ${volume.toFixed(4)} SOL | Est. profit: $${expectedProfit.toFixed(2)}`);
       try {
         const res = await executeTradeMutation.mutateAsync({
           data: {
@@ -209,7 +250,7 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
             coinbaseSecret: creds.coinbaseSecret,
             buyExchange: data.bestBuyExchange,
             sellExchange: data.bestSellExchange,
-            volume: 1.0,
+            volume,
             krakenPrice: data.krakenPrice,
             coinbasePrice: data.coinbasePrice,
             liveMode: live,
@@ -371,7 +412,8 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
           return;
         }
 
-        const estimatedNetProfit = (netEdge / 100) * (data.buyPrice ?? 0) * 1.0;
+        const kellyVol = kellySize(netEdge, cachedBalancesRef.current?.usdOnCoinbase ?? 0, s.winRate, s.kellyFraction, data.buyPrice ?? 0, s.maxPositionSol);
+        const estimatedNetProfit = (netEdge / 100) * (data.buyPrice ?? 0) * kellyVol;
         if (estimatedNetProfit < s.minProfitUsd) {
           addLog("info", `No trade — est. profit $${estimatedNetProfit.toFixed(2)} < $${s.minProfitUsd.toFixed(2)} minimum ${wsInfo}`);
           return;
