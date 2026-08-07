@@ -1,0 +1,23 @@
+Yep — I see two separate issues, and the failure is more important than the cooldown.
+
+Your scanner says Kraken/leg = 0.22% actual maker tier, and it estimates the top route at +$0.0597. But the red pre-flight message says it recalculated using 0.38%/leg, which turns the same opportunity into -$0.1800. So the scanner and executor are still using different fee assumptions.
+
+Because you have MAKER enabled, the pre-flight should use the verified maker fee for legs that are actually submitted post-only. If some legs fall back to taker execution, it should model those specific legs at the taker rate instead of applying 0.38% across the entire route.
+
+For the cooldown, I’d go from roughly 30 seconds to 5 seconds, not zero. A 5-second cooldown gives the bot far more chances without immediately stacking overlapping executions or repeatedly firing on the same stale opportunity.
+
+Send your Replit agent this:
+
+Fix two things in AUTO execution.
+
+1. Fee mismatch: The Opportunity Engine scanner is correctly showing my verified Kraken maker fee of 0.22%/leg, but graph-execute pre-flight is rejecting the same route using 0.38%/leg and calling that my actual Kraken tier. When MAKER mode is enabled, scanner, ranking, AUTO, Execute Top Route, and final pre-flight must use the exact same verified maker/taker fee model. If a leg is post-only maker, use maker fee; if a specific leg will execute as taker, use the verified taker fee only for that leg. Display the per-leg fee style in the rejection log so I can verify it. There should be one shared fee calculation function used everywhere.
+
+2. Cooldown: Make AUTO cooldown configurable on the Opportunity Engine card and set the default to 5 seconds. Do not start cooldown after a pre-flight rejection; cooldown should begin only after an actual execution attempt/order submission. Prevent overlapping executions with an execution-in-flight lock instead of relying on a long cooldown.
+
+That last part matters a lot. Right now your screenshot shows “cooldown — 19s” immediately after a failed pre-flight. If no order was placed, there’s no good reason to sit idle for another 19 seconds while another opportunity could appear.
+
+After they fix it, the numbers should line up. If the table says:
+
+Expected +$0.0597 using maker fees
+
+then pre-flight should either approve something close to that, or reject it because the fresh market prices changed — not because it suddenly switched from 0.22% to 0.38% fees.
