@@ -82,7 +82,8 @@ function reconnectingWs(
   url: string,
   onOpen: (ws: WebSocket) => void,
   onMessage: (raw: string) => void,
-  label: string
+  label: string,
+  onClose?: () => void,
 ): void {
   let stopped = false;
 
@@ -107,6 +108,7 @@ function reconnectingWs(
 
     ws.onclose = () => {
       console.log(`[price-cache] ${label} WS closed — reconnecting in 3 s`);
+      onClose?.();
       if (!stopped) setTimeout(connect, 3_000);
     };
 
@@ -124,19 +126,70 @@ function reconnectingWs(
 // Subscribes to all 10 pairs + ETH/SOL in a single connection.
 // Kraken v2 WS uses the same "PAIR/USD" notation as our canonical PAIRS.
 
+// Whether ETH/SOL is currently included in the Kraken WS subscription.
+// Updated dynamically by the periodic re-check when the pair becomes available.
+let ethSolSubscribed = false;
+
+// Reference to the currently open Kraken WS, so the re-check can send a
+// dynamic subscribe message without waiting for a reconnect.
+let activeKrakenWs: WebSocket | null = null;
+
+/**
+ * Send an ETH/SOL subscribe message on the live Kraken WS.
+ * Safe to call at any time — no-ops when already subscribed or WS is not open.
+ */
+function subscribeEthSolOnKrakenWs(): void {
+  if (ethSolSubscribed) return;
+  ethSolSubscribed = true;
+  if (activeKrakenWs && activeKrakenWs.readyState === WebSocket.OPEN) {
+    console.log("[price-cache] Kraken WS: dynamically subscribing to ETH/SOL (pair is now live)");
+    try {
+      activeKrakenWs.send(JSON.stringify({
+        method: "subscribe",
+        params: { channel: "ticker", symbol: ["ETH/SOL"] },
+      }));
+    } catch (e) {
+      console.warn(`[price-cache] Kraken WS: dynamic ETH/SOL subscribe failed (${(e as Error).message}) — will be included on next reconnect`);
+    }
+  } else {
+    console.log("[price-cache] Kraken WS: ETH/SOL confirmed available — will subscribe on next (re)connect");
+  }
+}
+
+/**
+ * Periodic re-check every 15 minutes: calls the Kraken REST Ticker endpoint for ETH/SOL.
+ * When the pair becomes available (and wasn't before), upgrades the WS subscription
+ * dynamically so the scanner switches from synthetic cross rates to direct prices
+ * without requiring a server restart.
+ */
+function scheduleEthSolRecheck(): void {
+  const RECHECK_MS = 15 * 60_000; // 15 minutes
+  setInterval(async () => {
+    if (ethSolSubscribed) return; // already on direct prices — nothing to do
+    const available = await checkKrakenEthSolAvailability();
+    if (available) {
+      console.log("[price-cache] Kraken ETH/SOL periodic check: pair is now available — upgrading from synthetic to direct prices");
+      subscribeEthSolOnKrakenWs();
+    }
+  }, RECHECK_MS);
+}
+
 function startKrakenWs(includeEthSol: boolean): void {
-  // All 10 pairs + SOL/BTC for triangular arb; ETH/SOL only when confirmed live by REST check
-  const crossPairs: string[] = ["SOL/BTC"];
-  if (includeEthSol) crossPairs.push("ETH/SOL");
-  const symbols = [...PAIRS as readonly string[], ...crossPairs];
-  console.log(
-    `[price-cache] Kraken WS subscribing to ${PAIRS.length} main pairs + cross-pairs: ${crossPairs.join(", ") || "(none)"}` +
-    (!includeEthSol ? " (ETH/SOL skipped — pair not listed on Kraken)" : "")
-  );
+  ethSolSubscribed = includeEthSol;
 
   reconnectingWs(
     "wss://ws.kraken.com/v2",
     (ws) => {
+      activeKrakenWs = ws;
+      // Read ethSolSubscribed at connection time so reconnects automatically
+      // include ETH/SOL after the periodic re-check upgrades the flag.
+      const crossPairs: string[] = ["SOL/BTC"];
+      if (ethSolSubscribed) crossPairs.push("ETH/SOL");
+      const symbols = [...PAIRS as readonly string[], ...crossPairs];
+      console.log(
+        `[price-cache] Kraken WS subscribing to ${PAIRS.length} main pairs + cross-pairs: ${crossPairs.join(", ") || "(none)"}` +
+        (!ethSolSubscribed ? " (ETH/SOL skipped — pair not yet listed on Kraken)" : "")
+      );
       ws.send(JSON.stringify({
         method: "subscribe",
         params: { channel: "ticker", symbol: symbols },
@@ -178,7 +231,8 @@ function startKrakenWs(includeEthSol: boolean): void {
         }
       } catch (e) { console.error(`[price-cache] Kraken WS parse error: ${e}`); }
     },
-    "Kraken"
+    "Kraken",
+    () => { activeKrakenWs = null; }, // onClose: clear ref so subscribeEthSolOnKrakenWs waits for reconnect
   );
 }
 
@@ -279,9 +333,11 @@ export function initPriceFeeds(): void {
   startCoinbasePoll();
   startRestPollers();
   console.log("[price-cache] Price feeds initialised for 10 pairs (BTC, ETH, SOL, AVAX, DOT, POL, LINK, UNI, ATOM, ADA)");
-  // Check ETH/SOL availability before opening the WS so we only subscribe to confirmed pairs
+  // Check ETH/SOL availability before opening the WS so we only subscribe to confirmed pairs;
+  // then schedule periodic re-checks so the system upgrades automatically if Kraken lists the pair.
   void checkKrakenEthSolAvailability().then(ethSolAvailable => {
     startKrakenWs(ethSolAvailable);
+    scheduleEthSolRecheck();
   });
   void verifyPairAvailability();
 }
