@@ -2,7 +2,8 @@ import * as React from "react"
 import { Link, useLocation } from "wouter"
 import { Activity, Settings, LayoutDashboard, Terminal } from "lucide-react"
 import { cn } from "@/lib/utils"
-import { BotProvider, useBotContext } from "@/store/bot-context"
+import { BotProvider, useBotContext, ALL_PAIRS } from "@/store/bot-context"
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 
 function NavItem({ href, icon: Icon, label }: { href: string; icon: any; label: string }) {
   const [location] = useLocation()
@@ -22,8 +23,9 @@ function NavItem({ href, icon: Icon, label }: { href: string; icon: any; label: 
 }
 
 function StatusIndicator() {
-  const { isRunning, liveMode } = useBotContext();
-  
+  const { isRunning, liveMode, settings } = useBotContext();
+  const filtered = settings.enabledPairs.length < ALL_PAIRS.length;
+
   return (
     <div className="flex items-center gap-4 px-4 py-2 border-2 border-border bg-card">
       <div className="flex items-center gap-2">
@@ -39,6 +41,27 @@ function StatusIndicator() {
           {liveMode ? "MODE: LIVE" : "MODE: DRY RUN"}
         </span>
       </div>
+      <div className="h-4 w-px bg-border" />
+      <TooltipProvider>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <span className={cn(
+              "text-xs font-mono font-bold uppercase cursor-default",
+              filtered ? "text-yellow-600" : "text-muted-foreground",
+            )}>
+              {settings.enabledPairs.length}/{ALL_PAIRS.length} pairs
+            </span>
+          </TooltipTrigger>
+          <TooltipContent side="bottom" className="max-w-[180px]">
+            <p className="font-bold mb-1 text-[10px] uppercase tracking-wide">Watching pairs</p>
+            <ul className="flex flex-col gap-0.5">
+              {settings.enabledPairs.map((p) => (
+                <li key={p} className="font-mono text-[11px]">{p}</li>
+              ))}
+            </ul>
+          </TooltipContent>
+        </Tooltip>
+      </TooltipProvider>
     </div>
   )
 }

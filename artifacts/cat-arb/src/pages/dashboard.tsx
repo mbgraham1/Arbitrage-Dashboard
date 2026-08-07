@@ -1,7 +1,8 @@
 import React, { useState, useEffect, useRef } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { useBotContext } from "@/store/bot-context";
+import { useBotContext, ALL_PAIRS } from "@/store/bot-context";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import {
   Activity, Play, Square, DollarSign, TrendingUp, Zap, ShieldAlert,
   FileText, ArrowRight, Radio, Wifi, WifiOff, Siren, RefreshCw, BookOpen,
@@ -427,6 +428,38 @@ export default function Dashboard() {
                   <><ShieldAlert className="h-4 w-4 text-primary" /> DRY RUN MODE ACTIVE</>
                 )}
               </div>
+              {(() => {
+                const filtered = settings.enabledPairs.length < ALL_PAIRS.length;
+                return (
+                  <TooltipProvider>
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <div className={cn(
+                          "flex items-center gap-1.5 cursor-default mb-1 px-2 py-1 border-2 w-fit",
+                          filtered
+                            ? "border-yellow-500/60 bg-yellow-500/5"
+                            : "border-border bg-muted/20",
+                        )}>
+                          <span className={cn(
+                            "text-[10px] font-mono font-bold uppercase",
+                            filtered ? "text-yellow-600" : "text-muted-foreground",
+                          )}>
+                            Watching {settings.enabledPairs.length}/{ALL_PAIRS.length} pairs
+                          </span>
+                        </div>
+                      </TooltipTrigger>
+                      <TooltipContent side="right" className="max-w-[180px]">
+                        <p className="font-bold mb-1 text-[10px] uppercase tracking-wide">Active pairs</p>
+                        <ul className="flex flex-col gap-0.5">
+                          {settings.enabledPairs.map((p) => (
+                            <li key={p} className="font-mono text-[11px]">{p}</li>
+                          ))}
+                        </ul>
+                      </TooltipContent>
+                    </Tooltip>
+                  </TooltipProvider>
+                );
+              })()}
               <div className="grid grid-cols-2 gap-2 text-xs font-mono">
                 <div className="flex flex-col border-2 border-border p-2">
                   <span className="text-muted-foreground uppercase text-[10px]">Min Edge</span>
