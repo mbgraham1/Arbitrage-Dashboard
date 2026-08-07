@@ -50,6 +50,9 @@ export interface BotSettings {
   maxPositionSol: number; // hard cap in SOL (default 1.0)
   // Pair selection — which of the 10 pairs the scanner watches
   enabledPairs: string[];
+  // Order Book Hunter parameters
+  obTradeSize: number;  // v8: trade size in USD for OB scans (default $10)
+  obFeesPct: number;    // v8: estimated fee per leg in % for OB scans (default 0.40%)
 }
 
 export interface BotContextType {
@@ -121,10 +124,12 @@ const DEFAULT_SETTINGS: BotSettings = {
   kellyFraction: 0.25,  // Kelly: quarter-Kelly for conservative sizing
   maxPositionSol: 1.0,  // Kelly: hard cap per trade (SOL)
   enabledPairs: [...ALL_PAIRS], // all 10 pairs enabled by default
+  obTradeSize: 10,      // v8: OB Hunter default $10 trade size
+  obFeesPct: 0.40,      // v8: OB Hunter default 0.40% fee per leg (Kraken base taker)
 };
 
 // Bump this when defaults change meaningfully — forces a one-time reset for existing users
-const SETTINGS_VERSION = 7;
+const SETTINGS_VERSION = 8;
 
 // ── Kelly Criterion position sizer ────────────────────────────────────────────
 // Direct port of Python KellySizer.calculate()
@@ -346,7 +351,7 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
   // and its net profit exceeds settings.minProfitUsd and the cooldown has elapsed,
   // fires the three Kraken market orders automatically. Dry-run mode records to
   // the trade ledger without placing real orders.
-  const obScanParams = { tradeSizeUsd: 10, feesPct: 0.4, minProfitUsd: 0.02, maxSlippagePct: 0.5, volatilityFilter: true };
+  const obScanParams = { tradeSizeUsd: settingsRef.current.obTradeSize, feesPct: settingsRef.current.obFeesPct, minProfitUsd: 0.02, maxSlippagePct: 0.5, volatilityFilter: true };
   const obScan = useGetObScan(obScanParams, {
     query: {
       queryKey: getGetObScanQueryKey(obScanParams),
@@ -404,8 +409,8 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
           krakenSecret: creds.krakenSecret,
           assetA: top.assetA,
           assetB: top.assetB,
-          tradeSizeUsd: 10,
-          feesPct: 0.4,
+          tradeSizeUsd: s.obTradeSize,
+          feesPct: s.obFeesPct,
           minProfitUsd: s.minProfitUsd,
           isDryRun,
         },

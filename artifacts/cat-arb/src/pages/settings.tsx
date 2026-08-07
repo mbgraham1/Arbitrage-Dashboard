@@ -5,7 +5,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { useBotContext, ALL_PAIRS } from "@/store/bot-context";
-import { Settings2, KeySquare, SlidersHorizontal, ShieldAlert, CheckCircle2, XCircle, Lock, Layers } from "lucide-react";
+import { Settings2, KeySquare, SlidersHorizontal, ShieldAlert, CheckCircle2, XCircle, Lock, Layers, BookOpen } from "lucide-react";
 import { useTestKraken, useTestCoinbase } from "@workspace/api-client-react";
 
 export default function Settings() {
@@ -389,6 +389,55 @@ export default function Settings() {
 
             <Button className="w-full mt-2" onClick={handleSaveSettings}>
               SAVE KELLY PARAMETERS
+            </Button>
+          </CardContent>
+        </Card>
+
+        {/* Order Book Hunter */}
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2">
+              <BookOpen className="h-5 w-5" /> Order Book Hunter
+            </CardTitle>
+            <CardDescription>
+              Parameters for the OB triangular scanner. Trade size controls how deep into the book each simulation walks — larger sizes reveal real slippage. Fees estimate Kraken's per-leg taker rate for profit calculations.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="flex flex-col gap-6">
+
+            <div className="space-y-3">
+              <div className="flex flex-col gap-1">
+                <Label>Trade Size (USD)</Label>
+                <span className="text-xs text-muted-foreground font-mono">Dollar amount per OB scan simulation (default $10)</span>
+              </div>
+              <Input
+                type="number"
+                step="5"
+                min="1"
+                data-testid="input-ob-trade-size"
+                value={localSettings.obTradeSize}
+                onChange={(e) => setLocalSettings({ ...localSettings, obTradeSize: parseFloat(e.target.value) || 10 })}
+              />
+            </div>
+
+            <div className="space-y-3">
+              <div className="flex flex-col gap-1">
+                <Label>Estimated Fees per Leg (%)</Label>
+                <span className="text-xs text-muted-foreground font-mono">Kraken taker fee per leg — used for profit estimates (default 0.40%)</span>
+              </div>
+              <Input
+                type="number"
+                step="0.01"
+                min="0"
+                max="2"
+                data-testid="input-ob-fees-pct"
+                value={localSettings.obFeesPct}
+                onChange={(e) => setLocalSettings({ ...localSettings, obFeesPct: parseFloat(e.target.value) || 0.4 })}
+              />
+            </div>
+
+            <Button className="w-full mt-2" onClick={handleSaveSettings} data-testid="button-save-ob-settings">
+              SAVE OB HUNTER SETTINGS
             </Button>
           </CardContent>
         </Card>

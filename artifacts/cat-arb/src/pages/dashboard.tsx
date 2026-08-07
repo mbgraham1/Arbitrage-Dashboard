@@ -697,23 +697,23 @@ const OB_SCALING_META: Record<string, { label: string; className: string }> = {
 };
 
 function OrderBookHunterCard() {
-  const { credentials, liveMode, addLog } = useBotContext();
+  const { credentials, liveMode, addLog, settings } = useBotContext();
   const executeMutation = useObExecute();
   const [execResult, setExecResult] = useState<string | null>(null);
-  const [tradeSizeInput, setTradeSizeInput] = useState("10");
+  const [tradeSizeInput, setTradeSizeInput] = useState(String(settings.obTradeSize));
   // Debounce so we don't fire a Kraken scan on every keystroke (e.g. 10→1→100)
-  const [debouncedSize, setDebouncedSize] = useState("10");
+  const [debouncedSize, setDebouncedSize] = useState(String(settings.obTradeSize));
   useEffect(() => {
     const t = setTimeout(() => setDebouncedSize(tradeSizeInput), 500);
     return () => clearTimeout(t);
   }, [tradeSizeInput]);
-  const tradeSize = Math.max(1, parseFloat(debouncedSize) || 10);
+  const tradeSize = Math.max(1, parseFloat(debouncedSize) || settings.obTradeSize);
   // Min-profit floor: skip few-cent edges (advisor rec). Default $0.10.
   const [minProfitInput, setMinProfitInput] = useState("0.10");
   const minProfit = Math.max(0, parseFloat(minProfitInput) || 0);
-  // 0.40%/leg = Kraken base taker tier; the executor overrides with the
-  // account's ACTUAL fee tier during pre-flight.
-  const obParams = { tradeSizeUsd: tradeSize, feesPct: 0.4, minProfitUsd: 0.02, maxSlippagePct: 0.5, volatilityFilter: true };
+  // Fee per leg comes from settings (OB Hunter fees %) — server overrides with
+  // the account's ACTUAL fee tier during pre-flight, but this controls the scan estimate.
+  const obParams = { tradeSizeUsd: tradeSize, feesPct: settings.obFeesPct, minProfitUsd: 0.02, maxSlippagePct: 0.5, volatilityFilter: true };
   const { data, isLoading } = useGetObScan(obParams, {
     query: { queryKey: getGetObScanQueryKey(obParams), refetchInterval: 5_000, staleTime: 4_000 },
   });
@@ -743,7 +743,7 @@ function OrderBookHunterCard() {
           assetA: topCycle.assetA,
           assetB: topCycle.assetB,
           tradeSizeUsd: tradeSize,
-          feesPct: 0.4, // fallback only — server uses your actual Kraken fee tier
+          feesPct: settings.obFeesPct, // fallback only — server uses your actual Kraken fee tier
           minProfitUsd: minProfit,
           isDryRun: !liveMode,
         },
