@@ -64,7 +64,8 @@ export const FetchBalancesBody = zod.object({
   "krakenSecret": zod.string(),
   "coinbaseKey": zod.string(),
   "coinbaseSecret": zod.string(),
-  "enabledPairs": zod.array(zod.string()).optional().describe('Optional allow-list of pair symbols to scan (e.g. [\'SOL\/USD\', \'BTC\/USD\']). Scans all pairs when omitted.')
+  "enabledPairs": zod.array(zod.string()).optional().describe('Optional allow-list of pair symbols to scan (e.g. [\'SOL\/USD\', \'BTC\/USD\']). Scans all pairs when omitted.'),
+  "pair": zod.string().optional().describe('Active trading pair (e.g. BTC/USD). When provided, base-asset balances for that pair are included in the response.')
 })
 
 export const FetchBalancesResponse = zod.object({
@@ -79,7 +80,10 @@ export const FetchBalancesResponse = zod.object({
   "solOnKraken": zod.number().optional(),
   "solOnCoinbase": zod.number().optional(),
   "usdOnCoinbase": zod.number().optional(),
-  "suggestedVolume": zod.number().optional()
+  "suggestedVolume": zod.number().optional(),
+  "baseAsset": zod.string().optional(),
+  "baseAssetOnKraken": zod.number().optional(),
+  "baseAssetOnCoinbase": zod.number().optional()
 })
 
 

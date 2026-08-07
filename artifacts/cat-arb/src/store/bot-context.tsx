@@ -775,7 +775,10 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
       // Refresh balances if cache is stale — fire-and-forget, never blocks price/trade logic
       if (Date.now() - lastBalanceUpdateRef.current > BALANCE_CACHE_TTL_MS) {
         lastBalanceUpdateRef.current = Date.now(); // optimistic — prevents concurrent fetches
-        fetchBalancesMutation.mutateAsync({ data: c })
+        // Pass the active pair so the backend returns the correct base-asset balance.
+        // latestPriceDataRef holds the most recently fetched pair; null before the first tick.
+        const activePair = latestPriceDataRef.current?.pair;
+        fetchBalancesMutation.mutateAsync({ data: { ...c, ...(activePair ? { pair: activePair } : {}) } })
           .then((bal) => { if (!cancelled) setCachedBalances(bal); })
           .catch(() => { /* keep stale cache */ });
       }

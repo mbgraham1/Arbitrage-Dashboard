@@ -14,4 +14,10 @@ export interface BalanceData {
   solOnCoinbase?: number;
   usdOnCoinbase?: number;
   suggestedVolume?: number;
+  /** Base asset symbol for the active pair (e.g. "BTC" when pair is BTC/USD). Defaults to "SOL". */
+  baseAsset?: string;
+  /** Balance of the base asset on Kraken (e.g. BTC balance when pair is BTC/USD). */
+  baseAssetOnKraken?: number;
+  /** Balance of the base asset on Coinbase (e.g. BTC balance when pair is BTC/USD). */
+  baseAssetOnCoinbase?: number;
 }

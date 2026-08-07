@@ -1485,13 +1485,33 @@ router.post("/prices", async (req, res): Promise<void> => {
 });
 
 // ── POST /balances ────────────────────────────────────────────────────────────
+// Kraken uses non-standard currency codes for some assets in balance responses.
+// This helper maps a canonical symbol (e.g. "BTC") to the set of codes Kraken
+// may return, so we can find the right balance entry regardless of representation.
+function krakenCurrencyCodes(asset: string): string[] {
+  const u = asset.toUpperCase();
+  const aliases: Record<string, string[]> = {
+    BTC:  ["XBT", "XXBT"],
+    ETH:  ["ETH", "XETH"],
+    SOL:  ["SOL", "SOL.S"],
+    AVAX: ["AVAX"],
+    DOT:  ["DOT"],
+    POL:  ["POL"],
+    LINK: ["LINK"],
+    UNI:  ["UNI"],
+    ATOM: ["ATOM"],
+    ADA:  ["ADA"],
+  };
+  return aliases[u] ?? [u];
+}
+
 router.post("/balances", async (req, res): Promise<void> => {
   const parsed = FetchBalancesBody.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: parsed.error.message });
     return;
   }
-  const { krakenKey, krakenSecret, coinbaseKey, coinbaseSecret } = parsed.data;
+  const { krakenKey, krakenSecret, coinbaseKey, coinbaseSecret, pair } = parsed.data;
   try {
     const [krakenBalances, coinbaseBalances, krakenPrice] = await Promise.all([
       getKrakenBalances({ krakenKey, krakenSecret }),
@@ -1506,7 +1526,27 @@ router.post("/balances", async (req, res): Promise<void> => {
     const maxSol = Math.min(solOnKraken, solOnCoinbase, krakenPrice > 0 ? usdOnCoinbase / krakenPrice : 0);
     const suggestedVolume = Math.max(maxSol * 0.8, 0.01);
 
-    res.json({ kraken: krakenBalances, coinbase: coinbaseBalances, solOnKraken, solOnCoinbase, usdOnCoinbase, suggestedVolume });
+    // Base-asset balances for the active pair (falls back to SOL when no pair given)
+    const baseAsset = pair ? (pair.split("/")[0] ?? "SOL").toUpperCase() : "SOL";
+    const krakenCodes = new Set(krakenCurrencyCodes(baseAsset).map(c => c.toUpperCase()));
+    const baseAssetOnKraken = krakenBalances
+      .filter(b => krakenCodes.has(b.currency.toUpperCase()))
+      .reduce((sum, b) => sum + b.amount, 0);
+    const baseAssetOnCoinbase = coinbaseBalances
+      .filter(b => b.currency.toUpperCase() === baseAsset)
+      .reduce((sum, b) => sum + b.amount, 0);
+
+    res.json({
+      kraken: krakenBalances,
+      coinbase: coinbaseBalances,
+      solOnKraken,
+      solOnCoinbase,
+      usdOnCoinbase,
+      suggestedVolume,
+      baseAsset,
+      baseAssetOnKraken,
+      baseAssetOnCoinbase,
+    });
   } catch (err) {
     req.log.error({ err }, "Failed to fetch balances");
     res.status(500).json({ error: (err as Error).message });

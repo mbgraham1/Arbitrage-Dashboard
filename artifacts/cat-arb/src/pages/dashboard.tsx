@@ -369,14 +369,41 @@ export default function Dashboard() {
             <CardContent className="p-0">
               {cachedBalances ? (
                 <div className="flex flex-col">
-                  <div className="p-4 border-b-2 border-border flex justify-between items-center">
-                    <span className="font-bold text-sm">Kraken SOL</span>
-                    <span className="font-mono">{cachedBalances.solOnKraken?.toFixed(4) ?? "0.0000"}</span>
-                  </div>
-                  <div className="p-4 border-b-2 border-border flex justify-between items-center bg-muted/20">
-                    <span className="font-bold text-sm">Coinbase SOL</span>
-                    <span className="font-mono">{cachedBalances.solOnCoinbase?.toFixed(4) ?? "0.0000"}</span>
-                  </div>
+                  {(() => {
+                    // Show base-asset balance when the active pair differs from SOL/USD.
+                    // Falls back to SOL fields when no pair-specific data is available.
+                    const baseAsset = cachedBalances.baseAsset ?? "SOL";
+                    const isNonSol = baseAsset !== "SOL";
+                    const krakenAmt = isNonSol
+                      ? (cachedBalances.baseAssetOnKraken ?? 0)
+                      : (cachedBalances.solOnKraken ?? 0);
+                    const coinbaseAmt = isNonSol
+                      ? (cachedBalances.baseAssetOnCoinbase ?? 0)
+                      : (cachedBalances.solOnCoinbase ?? 0);
+                    const precision = baseAsset === "BTC" ? 6 : 4;
+                    return (
+                      <>
+                        <div className="p-4 border-b-2 border-border flex justify-between items-center">
+                          <div className="flex flex-col">
+                            <span className="font-bold text-sm">Kraken {baseAsset}</span>
+                            {isNonSol && cachedBalances.solOnKraken != null && (
+                              <span className="text-[10px] font-mono text-muted-foreground">SOL: {cachedBalances.solOnKraken.toFixed(4)}</span>
+                            )}
+                          </div>
+                          <span className="font-mono">{krakenAmt.toFixed(precision)}</span>
+                        </div>
+                        <div className="p-4 border-b-2 border-border flex justify-between items-center bg-muted/20">
+                          <div className="flex flex-col">
+                            <span className="font-bold text-sm">Coinbase {baseAsset}</span>
+                            {isNonSol && cachedBalances.solOnCoinbase != null && (
+                              <span className="text-[10px] font-mono text-muted-foreground">SOL: {cachedBalances.solOnCoinbase.toFixed(4)}</span>
+                            )}
+                          </div>
+                          <span className="font-mono">{coinbaseAmt.toFixed(precision)}</span>
+                        </div>
+                      </>
+                    );
+                  })()}
                   <div className="p-4 flex justify-between items-center bg-primary/5">
                     <span className="font-bold text-sm text-primary">Coinbase USD</span>
                     <span className="font-mono text-primary font-bold">${cachedBalances.usdOnCoinbase?.toFixed(2) ?? "0.00"}</span>
