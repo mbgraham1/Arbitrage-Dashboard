@@ -228,6 +228,23 @@ export async function krakenOrderInfo(
   };
 }
 
+/**
+ * Actual taker fee (percent) for the given raw pairs from the account's real
+ * fee tier (/0/private/TradeVolume). Returns the MAX across pairs, or null if
+ * the query fails or returns nothing.
+ */
+export async function krakenTakerFeePct(creds: KrakenCreds, rawPairs: string[]): Promise<number | null> {
+  try {
+    const result = await krakenPrivateRequest<{ fees?: Record<string, { fee?: string }> }>(
+      "/0/private/TradeVolume", { pair: rawPairs.join(",") }, creds);
+    const fees = Object.values(result.fees ?? {})
+      .map(f => parseFloat(f.fee ?? "")).filter(f => Number.isFinite(f) && f > 0);
+    return fees.length > 0 ? Math.max(...fees) : null;
+  } catch {
+    return null;
+  }
+}
+
 export async function krakenCancelOrder(creds: KrakenCreds, txid: string): Promise<void> {
   await krakenPrivateRequest<unknown>("/0/private/CancelOrder", { txid }, creds);
 }

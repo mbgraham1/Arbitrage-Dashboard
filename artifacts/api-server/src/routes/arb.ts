@@ -20,6 +20,7 @@ import {
   krakenRawLimitOrder,
   krakenOrderFilled,
   krakenOrderInfo,
+  krakenTakerFeePct,
   krakenFillPrice,
   krakenCancelOrder,
   getCoinbaseBalances,
@@ -189,14 +190,14 @@ router.get("/arb/scan", async (_req, res): Promise<void> => {
 // Fetches L2 depth from Kraken, walks the book for all simulatable cycles,
 // classifies each READY / HIGH_SLIPPAGE / LOW_PROFIT and scores liquidity
 // confidence. Optional volatility filter scans only assets moving >1.5%/24h.
-// Query params: tradeSizeUsd (default 10), feesPct (default 0.5),
+// Query params: tradeSizeUsd (default 10), feesPct (default 0.4, per-leg taker),
 //               minProfitUsd (default 0.02, scaled by size/10), maxSlippagePct (default 0.5),
 //               volatilityFilter (default true)
 router.get("/arb/ob-scan", async (req, res): Promise<void> => {
   const tradeSizeUsd   = Math.max(1, parseFloat(String(req.query["tradeSizeUsd"]   ?? "10"))   || 10);
-  const feesPct        = Math.max(0, parseFloat(String(req.query["feesPct"]        ?? "0.5"))  || 0.5);
+  const feesPct        = Math.max(0, parseFloat(String(req.query["feesPct"]        ?? "0.4"))  || 0.4);
   const minProfitUsd   = Math.max(0, parseFloat(String(req.query["minProfitUsd"]   ?? "0.02")) || 0.02);
-  const maxSlippagePct = Math.max(0, parseFloat(String(req.query["maxSlippagePct"] ?? "0.5"))  || 0.5);
+  const maxSlippagePct = Math.max(0, parseFloat(String(req.query["maxSlippagePct"] ?? "0.4"))  || 0.4);
   const volatilityFilter = String(req.query["volatilityFilter"] ?? "true") !== "false";
   try {
     const result = await scanOrderBookCycles(tradeSizeUsd, feesPct, minProfitUsd, maxSlippagePct, volatilityFilter);
@@ -232,19 +233,25 @@ router.post("/arb/ob-execute", async (req, res): Promise<void> => {
   }
 
   try {
+    // 0. Use the account's ACTUAL taker fee tier when possible (advisor
+    //    recommendation) instead of the caller's assumption. Falls back to the
+    //    request's feesPct if the fee query fails (e.g. dry run with bad keys).
+    const crossPair = CROSS_LOOKUP.get(`${assetA}-${assetB}`)?.pair;
+    const feePairs = [OB_USD_PAIRS[assetA as ObAsset], OB_USD_PAIRS[assetB as ObAsset], crossPair].filter((p): p is string => !!p);
+    const actualFeePct = await krakenTakerFeePct(creds, feePairs);
+    const effectiveFeesPct = actualFeePct ?? feesPct;
+
     // 1. Fresh pre-flight (cache bypassed, depth 10)
-    const pf = await preflightObCycle(assetA as ObAsset, assetB as ObAsset, tradeSizeUsd, feesPct);
+    const pf = await preflightObCycle(assetA as ObAsset, assetB as ObAsset, tradeSizeUsd, effectiveFeesPct);
     if (!pf) {
       res.json({ success: false, isDryRun, executed: false, route, preflightProfitUsd: null, error: "Could not fetch fresh order books (or depth can't absorb the size)." });
       return;
     }
-    // Execution gate: fresh profit AFTER FEES must be positive (plus the
-    // caller's optional minProfitUsd floor, NOT scaled by trade size — the
-    // scanner's ×size/10 scaling rule made the executor reject profitable
-    // routes the scanner ranked green).
+    // Execution gate: fresh profit AFTER FEES must clear the caller's
+    // minProfitUsd floor (flat USD, not scaled by trade size).
     const threshold = minProfitUsd;
     if (pf.profitUsd <= threshold) {
-      res.json({ success: false, isDryRun, executed: false, route, preflightProfitUsd: pf.profitUsd, error: `Pre-flight failed — fresh profit after fees $${pf.profitUsd.toFixed(4)} ≤ minimum $${threshold.toFixed(4)}.` });
+      res.json({ success: false, isDryRun, executed: false, route, preflightProfitUsd: pf.profitUsd, error: `Pre-flight failed — fresh profit after ${effectiveFeesPct.toFixed(2)}%/leg fees${actualFeePct != null ? " (your actual Kraken tier)" : ""} is $${pf.profitUsd.toFixed(4)} ≤ minimum $${threshold.toFixed(4)}.` });
       return;
     }
 

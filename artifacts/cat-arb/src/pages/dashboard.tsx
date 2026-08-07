@@ -708,17 +708,22 @@ function OrderBookHunterCard() {
     return () => clearTimeout(t);
   }, [tradeSizeInput]);
   const tradeSize = Math.max(1, parseFloat(debouncedSize) || 10);
-  const obParams = { tradeSizeUsd: tradeSize, feesPct: 0.5, minProfitUsd: 0.02, maxSlippagePct: 0.5, volatilityFilter: true };
+  // Min-profit floor: skip few-cent edges (advisor rec). Default $0.10.
+  const [minProfitInput, setMinProfitInput] = useState("0.10");
+  const minProfit = Math.max(0, parseFloat(minProfitInput) || 0);
+  // 0.40%/leg = Kraken base taker tier; the executor overrides with the
+  // account's ACTUAL fee tier during pre-flight.
+  const obParams = { tradeSizeUsd: tradeSize, feesPct: 0.4, minProfitUsd: 0.02, maxSlippagePct: 0.5, volatilityFilter: true };
   const { data, isLoading } = useGetObScan(obParams, {
     query: { queryKey: getGetObScanQueryKey(obParams), refetchInterval: 5_000, staleTime: 4_000 },
   });
 
   const cycles: ObCycleEntry[] = data?.cycles ?? [];
   const topCycle = cycles[0];
-  // Execution gate: any positive profit after fees passes the server
-  // pre-flight (no size-scaled minimum). The button stays clickable whenever
-  // a route exists — the pre-flight is the real guard.
-  const topBelowThreshold = !!topCycle && topCycle.estimatedProfitUsd <= 0;
+  // Execution gate: fresh profit after real fees must clear the min-profit
+  // floor. The button stays clickable whenever a route exists — the server
+  // pre-flight is the real guard.
+  const topBelowThreshold = !!topCycle && topCycle.estimatedProfitUsd <= minProfit;
   const canExecute = !!topCycle && !executeMutation.isPending;
 
   const executeTopRoute = async () => {
@@ -738,8 +743,8 @@ function OrderBookHunterCard() {
           assetA: topCycle.assetA,
           assetB: topCycle.assetB,
           tradeSizeUsd: tradeSize,
-          feesPct: 0.5,
-          minProfitUsd: 0, // execute on any profit after fees
+          feesPct: 0.4, // fallback only — server uses your actual Kraken fee tier
+          minProfitUsd: minProfit,
           isDryRun: !liveMode,
         },
       });
@@ -777,6 +782,17 @@ function OrderBookHunterCard() {
               aria-label="Trade size in USD"
             /> trade size
           </span>
+          <span className="flex items-center gap-1 text-[10px] font-mono font-normal text-muted-foreground">
+            min $<input
+              type="number"
+              min={0}
+              step={0.05}
+              value={minProfitInput}
+              onChange={e => setMinProfitInput(e.target.value)}
+              className="w-14 bg-transparent border border-border px-1 py-0.5 text-foreground focus:outline-none focus:border-primary"
+              aria-label="Minimum profit in USD to execute"
+            /> profit
+          </span>
           {data && data.readyCount > 0 && (
             <span className="text-[9px] font-mono font-bold px-1 border border-success text-success animate-pulse">
               {data.readyCount} READY
@@ -807,7 +823,7 @@ function OrderBookHunterCard() {
         )}
         {!execResult && topBelowThreshold && topCycle && (
           <div className="px-3 py-1.5 text-[10px] font-mono text-muted-foreground border-b border-border/50">
-            ⚠ Top route {topCycle.route} shows no profit after fees (${topCycle.estimatedProfitUsd.toFixed(4)}) — pre-flight will reject unless the edge improves.
+            ⚠ Top route {topCycle.route} profit ${topCycle.estimatedProfitUsd.toFixed(4)} is below your ${minProfit.toFixed(2)} minimum — pre-flight will reject unless the edge improves.
           </div>
         )}
         {cycles.length === 0 ? (

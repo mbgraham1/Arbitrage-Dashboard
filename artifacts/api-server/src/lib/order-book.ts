@@ -381,9 +381,14 @@ function simulateCycle(
   const avg3  = usdFinal / bAmt; // USD per B
   const best3 = obBUsd.bids[0]![0];
 
-  // Gross profit, then apply flat fee deduction (Python: profit * (1 - feesPct/100))
+  // Fees apply PER LEG on the traded notional, not on the profit. (The Python
+  // formula `profit * (1 - fee%)` deducted fees from the few-cent profit —
+  // fractions of a cent — while Kraken actually charges fee% of each leg's
+  // notional, ~3 × size × fee%. That bug made losing cycles look green.)
+  // feesPct is the per-leg taker fee in percent (Kraken base tier: 0.40%).
   const grossProfit = usdFinal - startUsd;
-  const netProfit   = grossProfit * (1 - feesPct / 100);
+  const feeUsd      = (feesPct / 100) * (startUsd + startUsd + usdFinal); // leg1 + leg2 (≈ startUsd notional) + leg3
+  const netProfit   = grossProfit - feeUsd;
 
   // v15: total slippage = per-leg |avg − best| / best, summed across 3 legs.
   const slip = (avg: number, best: number) => best > 0 ? Math.abs(avg - best) / best * 100 : 0;
@@ -483,7 +488,7 @@ const SCALING_SIZES_USD = [10, 50, 100, 500, 1000];
 
 export async function scanOrderBookCycles(
   tradeSizeUsd   = 10,
-  feesPct        = 0.50,
+  feesPct        = 0.40, // per-leg taker %, Kraken base tier
   minProfitUsd   = 0.02, // v18: min profit ($) at $10, scaled by size/10 for larger sizes
   maxSlippagePct = 0.50,
   volatilityFilter = true, // v17
