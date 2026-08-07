@@ -227,6 +227,19 @@ export interface ObCycleEntry {
   confidencePct: number;
 }
 
+/** v18: scaling analysis status at a given trade size. */
+export type ObScalingStatus = "VIABLE" | "HIGH_SLIPPAGE" | "REJECTED";
+
+/** v18: one row of the top-route scaling table. */
+export interface ObScalingRow {
+  sizeUsd: number;
+  profitUsd: number;
+  slippagePct: number;
+  confidencePct: number;
+  /** VIABLE: profit > minProfitUsd×(size/10) and slippage ≤ max; HIGH_SLIPPAGE: profitable but slippage too high; REJECTED otherwise */
+  status: ObScalingStatus;
+}
+
 export interface ObScanResult {
   cycles: ObCycleEntry[];
   tradeSizeUsd: number;
@@ -245,6 +258,10 @@ export interface ObScanResult {
   volatilityFilter: boolean;
   /** v17: assets actually scanned after the volatility filter (all if filter off or fallback) */
   activeAssets: string[];
+  /** v18: route of the top-ranked cycle the scaling table was computed for (null when no cycles) */
+  scalingRoute: string | null;
+  /** v18: top route re-simulated at $10/$50/$100/$500/$1,000; sizes the book can't absorb are omitted */
+  scaling: ObScalingRow[];
   scannedAt: string;
 }
 
@@ -385,10 +402,13 @@ const VOLATILITY_MIN_ASSETS    = 3;   // v17: fallback to all assets below this
  * All simulatable cycles are ranked (top 15) with status + confidence.
  * Sorted by estimatedProfitUsd descending.
  */
+/** v18: trade sizes for the top-route scaling analysis. */
+const SCALING_SIZES_USD = [10, 50, 100, 500, 1000];
+
 export async function scanOrderBookCycles(
   tradeSizeUsd   = 10,
   feesPct        = 0.50,
-  minProfitUsd   = 0.05, // v16: wait for a real edge (> $0.05 on $10)
+  minProfitUsd   = 0.02, // v18: min profit ($) at $10, scaled by size/10 for larger sizes
   maxSlippagePct = 0.50,
   volatilityFilter = true, // v17
 ): Promise<ObScanResult> {
@@ -416,8 +436,8 @@ export async function scanOrderBookCycles(
                    .map(([,, pair]) => pair),
   ])];
 
-  // Fetch all order books in parallel
-  const fetched = await Promise.all(allPairs.map(p => fetchOrderBook(p, 8)));
+  // Fetch all order books in parallel (v18: depth 10 for scaling analysis)
+  const fetched = await Promise.all(allPairs.map(p => fetchOrderBook(p, 10)));
   const orderbooks = new Map<string, OrderBook>();
   let pairsScanned = 0;
   for (let i = 0; i < allPairs.length; i++) {
@@ -463,6 +483,23 @@ export async function scanOrderBookCycles(
   const readyCount = cycles.filter(c => c.status === "READY").length;
   const top = cycles.slice(0, 15); // Python v15 shows top 15 ranked
 
+  // v18: re-simulate the TOP route at each scaling size using the same books.
+  // Sizes the book depth can't fully absorb return null and are omitted.
+  const scaling: ObScalingRow[] = [];
+  const topCycle = cycles[0];
+  if (topCycle) {
+    for (const sizeUsd of SCALING_SIZES_USD) {
+      const r = simulateCycle(topCycle.assetA as ObAsset, topCycle.assetB as ObAsset, sizeUsd, orderbooks, feesPct);
+      if (!r) continue;
+      const threshold = minProfitUsd * (sizeUsd / 10); // v18: scale min profit with size
+      let status: ObScalingStatus;
+      if (r.profitUsd > threshold && r.slippagePct <= maxSlippagePct) status = "VIABLE";
+      else if (r.profitUsd > threshold) status = "HIGH_SLIPPAGE";
+      else status = "REJECTED";
+      scaling.push({ sizeUsd, profitUsd: r.profitUsd, slippagePct: r.slippagePct, confidencePct: r.confidencePct, status });
+    }
+  }
+
   return {
     cycles: top,
     tradeSizeUsd,
@@ -474,6 +511,8 @@ export async function scanOrderBookCycles(
     pairsRequested: allPairs.length,
     volatilityFilter,
     activeAssets: [...activeAssets],
+    scalingRoute: topCycle?.route ?? null,
+    scaling,
     scannedAt: new Date().toISOString(),
   };
 }
