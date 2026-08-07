@@ -257,7 +257,7 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
       const tag = forced ? "[FORCE·MKT]" : live ? "[LIVE·LMT]" : "[DRY RUN]";
       const netEdge = data.grossSpreadPct - s.totalFees - s.slippage;
 
-      const volume = kellySize(
+      let volume = kellySize(
         netEdge,
         cachedBalancesRef.current?.usdOnCoinbase ?? 0,
         s.winRate,
@@ -265,6 +265,11 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
         data.buyPrice,
         s.maxPositionSol,
       );
+      // Port of Python: force-trade path uses 0.5 min test volume when Kelly < 0.1
+      if (forced && volume < 0.1) {
+        volume = 0.5;
+        addLog("info", `${tag} Kelly < 0.1 — using minimum test volume 0.5`);
+      }
       const expectedProfit = (netEdge / 100) * data.buyPrice * volume;
       addLog("trade",
         `${tag} ${data.bestBuyExchange} → ${data.bestSellExchange} | ` +
