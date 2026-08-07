@@ -359,6 +359,9 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
       const tag = forced ? "[FORCE·MKT]" : live ? "[LIVE·LMT]" : "[DRY RUN]";
       const netEdge = data.grossSpreadPct - s.totalFees - s.slippage;
 
+      // Derive the base asset symbol from the active pair (e.g. "BTC" from "BTC/USD")
+      const baseAsset = data.pair ? data.pair.split("/")[0] : "SOL";
+
       let volume = kellySize(
         netEdge,
         cachedBalancesRef.current?.usdOnCoinbase ?? 0,
@@ -370,17 +373,17 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
       // Port of Python: force-trade path uses 0.5 min test volume when Kelly < 0.1
       if (forced && volume < 0.1) {
         volume = 0.5;
-        addLog("info", `${tag} Kelly < 0.1 — using minimum test volume 0.5`);
+        addLog("info", `${tag} Kelly < 0.1 — using minimum test volume 0.5 ${baseAsset}`);
       }
       const expectedProfit = (netEdge / 100) * data.buyPrice * volume;
       addLog("trade",
         `${tag} ${data.bestBuyExchange} → ${data.bestSellExchange} | ` +
-        `${volume.toFixed(4)} SOL | ` +
+        `${volume.toFixed(4)} ${baseAsset} | ` +
         `Buy $${data.buyPrice.toFixed(4)} | ` +
         `Sell $${data.sellPrice.toFixed(4)} | ` +
         `Net Edge ${netEdge.toFixed(3)}%`
       );
-      addLog("info", `${tag} Kelly size: ${volume.toFixed(4)} SOL | Est. profit: $${expectedProfit.toFixed(2)}`);
+      addLog("info", `${tag} Kelly size: ${volume.toFixed(4)} ${baseAsset} | Est. profit: $${expectedProfit.toFixed(2)}`);
       try {
         const res = await executeTradeMutation.mutateAsync({
           data: {

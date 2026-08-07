@@ -891,20 +891,41 @@ router.post("/execute-trade", async (req, res): Promise<void> => {
   }
 
   // Live trade — pre-check balances before placing any orders
+  // Use the correct base asset for the active pair (e.g. BTC for BTC/USD, not always SOL).
   try {
     const [krakenBalances, coinbaseBalances] = await Promise.all([
       getKrakenBalances({ krakenKey, krakenSecret }),
       getCoinbaseBalances({ coinbaseKey, coinbaseSecret }),
     ]);
-    const solOnKraken  = krakenBalances.find(b => b.currency === "SOL" || b.currency === "SOL.S")?.amount ?? 0;
-    const solOnCoinbase = coinbaseBalances.find(b => b.currency === "SOL")?.amount ?? 0;
-    const usdOnCoinbase = coinbaseBalances.find(b => b.currency === "USD" || b.currency === "USDC")?.amount ?? 0;
-    const MAX_SOL = 1.0;
-    const maxSol = Math.min(solOnKraken, solOnCoinbase, krakenPrice > 0 ? usdOnCoinbase / krakenPrice : 0, MAX_SOL / 0.8) * 0.8;
 
-    if (maxSol < 0.05) {
-      const reason = maxSol <= 0.01 ? "Trade skipped: insufficient balance." : "Trade skipped: volume too small.";
-      req.log.warn({ solOnKraken, solOnCoinbase, usdOnCoinbase, maxSol }, reason);
+    // Derive base asset from the pair (e.g. "BTC" from "BTC/USD")
+    const baseAsset = pair.split("/")[0] ?? "SOL";
+
+    // Kraken uses non-standard currency codes for some assets
+    const krakenBaseVariants = (asset: string): string[] => {
+      if (asset === "BTC") return ["XXBT", "XBT"];
+      if (asset === "ETH") return ["XETH", "ETH"];
+      if (asset === "SOL") return ["SOL", "SOL.S"];
+      return [asset];
+    };
+
+    const baseOnKraken   = krakenBalances.find(b => krakenBaseVariants(baseAsset).includes(b.currency))?.amount ?? 0;
+    const baseOnCoinbase = coinbaseBalances.find(b => b.currency === baseAsset)?.amount ?? 0;
+    const usdOnKraken    = krakenBalances.find(b => ["ZUSD", "USD"].includes(b.currency))?.amount ?? 0;
+    const usdOnCoinbase  = coinbaseBalances.find(b => ["USD", "USDC"].includes(b.currency))?.amount ?? 0;
+
+    // Sell exchange must hold the base asset; buy exchange must hold USD
+    const baseOnSellExchange = sellExchange === "Kraken" ? baseOnKraken   : baseOnCoinbase;
+    const usdOnBuyExchange   = buyExchange  === "Kraken" ? usdOnKraken    : usdOnCoinbase;
+    const buyPriceForPair    = Math.min(krakenPrice, coinbasePrice);
+
+    // Require at least $5 notional worth of base asset on the sell side
+    const minNotionalUsd = 5;
+    const minBaseVolume  = buyPriceForPair > 0 ? minNotionalUsd / buyPriceForPair : 0;
+
+    if (baseOnSellExchange < minBaseVolume || usdOnBuyExchange < minNotionalUsd) {
+      const reason = `Trade skipped: insufficient ${baseAsset} balance on ${sellExchange} or USD on ${buyExchange}.`;
+      req.log.warn({ baseAsset, baseOnSellExchange, usdOnBuyExchange, minBaseVolume, minNotionalUsd }, reason);
       res.json({ success: false, skipped: true, isDryRun: false, estimatedProfitUsd: 0, tradeNumber, buyOrderId: null, sellOrderId: null, error: reason });
       return;
     }
