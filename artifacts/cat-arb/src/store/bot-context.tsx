@@ -15,8 +15,11 @@ import {
   getListTradesQueryKey,
   getGetTradeSummaryQueryKey,
   scanAllPairs,
+  useGetObScan,
+  useObExecute,
+  getGetObScanQueryKey,
 } from "@workspace/api-client-react";
-import type { ExchangeCredentials, PriceData, BalanceData, TriangularOpportunity, CointegrationSignal } from "@workspace/api-client-react";
+import type { ExchangeCredentials, PriceData, BalanceData, TriangularOpportunity, CointegrationSignal, ObCycleEntry } from "@workspace/api-client-react";
 import { useQueryClient } from "@tanstack/react-query";
 
 export interface LogEntry {
@@ -91,6 +94,10 @@ export interface BotContextType {
   triPriceSource: Record<string, "direct" | "synthetic">;
   /** Latest cointegration mean-reversion signals from the Kalman filter scan */
   cointSignals: CointegrationSignal[];
+  /** Latest OB scan cycles from the Order Book Hunter */
+  obCycles: ObCycleEntry[];
+  /** True while the auto-execute OB trade is in-flight */
+  isAutoExecutingOb: boolean;
 }
 
 const BotContext = createContext<BotContextType | undefined>(undefined);
@@ -190,6 +197,8 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
   const [triOpportunities, setTriOpportunities] = useState<TriangularOpportunity[]>([]);
   const [triPriceSource, setTriPriceSource] = useState<Record<string, "direct" | "synthetic">>({});
   const [cointSignals, setCointSignals] = useState<CointegrationSignal[]>([]);
+  const [isAutoExecutingOb, setIsAutoExecutingOb] = useState(false);
+  const [obCycles, setObCycles] = useState<ObCycleEntry[]>([]);
 
   // ── Refs that give poll() always-current values without re-triggering effects ──
   const credentialsRef = useRef(credentials);
@@ -208,6 +217,10 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
   const dailyLossRef = useRef<number>(0);
   const emergencyStopRef = useRef<boolean>(false);
   const isExecutingRef = useRef<boolean>(false);
+  // Execution locks for triangular and OB auto-executors — refs so all three
+  // loops can read each other's state without React closure staleness.
+  const isAutoExecutingTriRef = useRef<boolean>(false);
+  const isAutoExecutingObRef  = useRef<boolean>(false);
   // Track previous WS state so degradation is logged only on transition, not every poll
   const prevWsRef = useRef<{ kraken: boolean; coinbase: boolean }>({ kraken: true, coinbase: true });
   // Always-current balances for Kelly sizing inside poll()
@@ -233,6 +246,7 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
   });
 
   const lastTriTradeTimeRef = useRef<number>(0);
+  const lastObTradeTimeRef = useRef<number>(0);
 
   useEffect(() => {
     if (!triScan.data) return;
@@ -262,7 +276,9 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
         isRunning &&
         liveModeRef.current &&
         !emergencyStopRef.current &&
-        !isAutoExecutingTri &&
+        !isExecutingRef.current &&
+        !isAutoExecutingTriRef.current &&
+        !isAutoExecutingObRef.current &&
         now - lastTriTradeTimeRef.current >= cooldownMs
       ) {
         // Pick best opportunity above threshold: prefer BTC variant, then ETH
@@ -274,6 +290,7 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
         if (best) {
           const tag = best.variant === "btc" ? "TRI·BTC·AUTO" : "TRI·ETH·AUTO";
           lastTriTradeTimeRef.current = now;
+          isAutoExecutingTriRef.current = true;
           setIsAutoExecutingTri(true);
           addLog("trade", `[${tag}] ${best.loop} | +${best.profitPct.toFixed(3)}% — firing`);
           executeTriangularMutation.mutate(
@@ -281,11 +298,13 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
             { data: { krakenKey: creds.krakenKey, krakenSecret: creds.krakenSecret, loop: best.loop, isDryRun: false, orderType: "market" } },
             {
               onSuccess: (r) => {
+                isAutoExecutingTriRef.current = false;
                 setIsAutoExecutingTri(false);
                 if (r.success) addLog("success", `[${tag}] Done — est. $${r.estimatedProfitUsd.toFixed(2)}`);
                 else addLog("error", `[${tag}] Failed: ${r.error}`);
               },
               onError: (e) => {
+                isAutoExecutingTriRef.current = false;
                 setIsAutoExecutingTri(false);
                 addLog("error", `[${tag}] Exception: ${e instanceof Error ? e.message : "Unknown"}`);
               },
@@ -320,6 +339,102 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [cointScan.data]);
+
+  // ── Order Book Hunter scan — auto-execute the top READY cycle ────────────────
+  // Polls /arb/ob-scan while the bot is running (same interval as cross-exchange
+  // scan). Mirrors the Python v14 auto-execute loop: when the top cycle is READY
+  // and its net profit exceeds settings.minProfitUsd and the cooldown has elapsed,
+  // fires the three Kraken market orders automatically. Dry-run mode records to
+  // the trade ledger without placing real orders.
+  const obScanParams = { tradeSizeUsd: 10, feesPct: 0.4, minProfitUsd: 0.02, maxSlippagePct: 0.5, volatilityFilter: true };
+  const obScan = useGetObScan(obScanParams, {
+    query: {
+      queryKey: getGetObScanQueryKey(obScanParams),
+      enabled: isRunning,
+      refetchInterval: Math.max(2, settingsRef.current.pollInterval) * 1000,
+      staleTime: 0,
+    },
+  });
+  const obExecuteMutation = useObExecute();
+
+  useEffect(() => {
+    if (!obScan.data) return;
+    const cycles = obScan.data.cycles;
+    setObCycles(cycles);
+
+    const s = settingsRef.current;
+    const creds = credentialsRef.current;
+    const now = Date.now();
+    const cooldownMs = s.cooldown * 1000;
+
+    // Auto-execute gate: bot running, no other executor in-flight, cooldown elapsed.
+    // Use refs (not React state) for all lock checks so the gate never reads stale
+    // closure values when multiple scan callbacks arrive in rapid succession.
+    if (
+      !isRunning ||
+      emergencyStopRef.current ||
+      isExecutingRef.current ||
+      isAutoExecutingTriRef.current ||
+      isAutoExecutingObRef.current ||
+      now - lastObTradeTimeRef.current < cooldownMs
+    ) return;
+
+    // Pick the best READY cycle above the profit floor. cycles[] is sorted by
+    // estimatedProfitUsd descending, but the #1 entry may be HIGH_SLIPPAGE or
+    // LOW_PROFIT — filter first, then take the highest-profit READY one.
+    const top = cycles
+      .filter(c => c.status === "READY" && c.estimatedProfitUsd > s.minProfitUsd)
+      .sort((a, b) => b.estimatedProfitUsd - a.estimatedProfitUsd)[0];
+    if (!top) return;
+
+    const isDryRun = !liveModeRef.current;
+    const tag = isDryRun ? "OB·AUTO·DRY" : "OB·AUTO";
+    lastObTradeTimeRef.current = now;
+    isAutoExecutingObRef.current = true;
+    setIsAutoExecutingOb(true);
+    addLog(
+      "trade",
+      `[${tag}] ${top.route} | profit $${top.estimatedProfitUsd.toFixed(4)} | slippage ${top.slippagePct.toFixed(2)}% — firing`,
+    );
+
+    obExecuteMutation.mutate(
+      {
+        data: {
+          krakenKey: creds.krakenKey,
+          krakenSecret: creds.krakenSecret,
+          assetA: top.assetA,
+          assetB: top.assetB,
+          tradeSizeUsd: 10,
+          feesPct: 0.4,
+          minProfitUsd: s.minProfitUsd,
+          isDryRun,
+        },
+      },
+      {
+        onSuccess: (r) => {
+          isAutoExecutingObRef.current = false;
+          setIsAutoExecutingOb(false);
+          if (r.success && r.executed) {
+            const profit = r.preflightProfitUsd ?? 0;
+            addLog(
+              "success",
+              `[${tag}] ✅ ${r.route} | $${profit.toFixed(4)}${r.isDryRun ? " (dry run)" : ` | orders ${[r.leg1OrderId, r.leg2OrderId, r.leg3OrderId].filter(Boolean).join(", ")}`}`,
+            );
+            queryClient.invalidateQueries({ queryKey: getGetTradeSummaryQueryKey() });
+            queryClient.invalidateQueries({ queryKey: getListTradesQueryKey() });
+          } else {
+            addLog("warning", `[${tag}] ❌ ${r.error ?? "Pre-flight failed — edge disappeared."}`);
+          }
+        },
+        onError: (e) => {
+          isAutoExecutingObRef.current = false;
+          setIsAutoExecutingOb(false);
+          addLog("error", `[${tag}] Exception: ${e instanceof Error ? e.message : "Unknown"}`);
+        },
+      },
+    );
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [obScan.data]);
 
   // ── Preloaded credentials (run once) ─────────────────────────────────────────
   const preloadAppliedRef = useRef(false);
@@ -643,7 +758,7 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
     let cancelled = false;
 
     const poll = async () => {
-      if (cancelled || isExecutingRef.current) return;
+      if (cancelled || isExecutingRef.current || isAutoExecutingTriRef.current || isAutoExecutingObRef.current) return;
 
       const c = credentialsRef.current;
       const s = settingsRef.current;
@@ -776,6 +891,8 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
     triOpportunities,
     triPriceSource,
     cointSignals,
+    obCycles,
+    isAutoExecutingOb,
   };
 
   return <BotContext.Provider value={value}>{children}</BotContext.Provider>;
