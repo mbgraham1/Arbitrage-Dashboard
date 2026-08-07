@@ -264,14 +264,17 @@ paths:
     get:
       operationId: getObScan
       tags: [arb]
-      summary: Scan 30 triangular cycles using L2 order book depth (v15 port)
+      summary: Scan triangular cycles across 21 assets using L2 order book depth (v17 port)
       description: >
-        Port of Python v15 "Order Book Hunter (Conservative)". Fetches Kraken Depth
-        API for all required pairs in parallel, then walks the book for each of the
-        30 A→B permutations of 6 assets to compute realistic fill prices at the
-        given trade size. All simulatable cycles (top 15) are returned ranked by
-        estimated net profit, each with total execution slippage and a
-        READY / HIGH_SLIPPAGE / LOW_PROFIT status classification.
+        Port of Python v17 "420-Route Hunter". Fetches Kraken Depth API for all
+        required pairs in parallel, then walks the book for each A→B permutation
+        of 21 assets (up to 420 routes; only routes with a real Kraken cross pair
+        are simulatable) to compute realistic fill prices at the given trade size.
+        An optional volatility filter restricts the scan to assets that moved more
+        than 1.5% in 24h (falls back to all assets when fewer than 3 qualify).
+        All simulatable cycles (top 15) are returned ranked by estimated net
+        profit, each with total execution slippage, a liquidity confidence score,
+        and a READY / HIGH_SLIPPAGE / LOW_PROFIT status classification.
       parameters:
         - name: tradeSizeUsd
           in: query
@@ -289,6 +292,10 @@ paths:
           in: query
           description: Maximum tolerated total slippage (%) for READY status (default 0.5)
           schema: {type: number, default: 0.5}
+        - name: volatilityFilter
+          in: query
+          description: v17 — scan only assets with |24h change| > 1.5% (default true; falls back to all assets when fewer than 3 qualify)
+          schema: {type: boolean, default: true}
       responses:
         "200":
           description: Ranked cycle list
@@ -639,7 +646,7 @@ components:
 
     ObCycleEntry:
       type: object
-      required: [route, assetA, assetB, estimatedProfitUsd, profitPct, avgPriceA, avgCrossRate, avgPriceB, volumeA, slippagePct, status]
+      required: [route, assetA, assetB, estimatedProfitUsd, profitPct, avgPriceA, avgCrossRate, avgPriceB, volumeA, slippagePct, status, confidencePct]
       properties:
         route: {type: string, description: "e.g. USD→SOL→ETH→USD"}
         assetA: {type: string}
@@ -655,10 +662,11 @@ components:
           type: string
           enum: [READY, HIGH_SLIPPAGE, LOW_PROFIT]
           description: "v15 conservative classification"
+        confidencePct: {type: number, description: "v17 liquidity confidence 0-100 — avg top-of-book coverage across the 3 legs"}
 
     ObScanResult:
       type: object
-      required: [cycles, tradeSizeUsd, feesPct, minProfitUsd, maxSlippagePct, readyCount, pairsScanned, pairsRequested, scannedAt]
+      required: [cycles, tradeSizeUsd, feesPct, minProfitUsd, maxSlippagePct, readyCount, pairsScanned, pairsRequested, volatilityFilter, activeAssets, scannedAt]
       properties:
         cycles:
           type: array
@@ -671,6 +679,11 @@ components:
         readyCount: {type: number, description: "number of READY cycles"}
         pairsScanned: {type: number, description: "pairs whose order book fetch succeeded"}
         pairsRequested: {type: number, description: "pairs the scan attempted to fetch"}
+        volatilityFilter: {type: boolean, description: "v17 — whether the volatility filter was requested"}
+        activeAssets:
+          type: array
+          items: {type: string}
+          description: "v17 — assets actually scanned after the volatility filter"
         scannedAt: {type: string}
 
     TriExecuteRequest:

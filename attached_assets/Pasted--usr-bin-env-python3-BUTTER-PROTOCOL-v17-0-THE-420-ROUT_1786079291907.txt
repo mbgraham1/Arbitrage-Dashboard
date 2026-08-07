@@ -1,0 +1,514 @@
+#!/usr/bin/env python3
+"""
+BUTTER PROTOCOL v17.0 – THE 420‑ROUTE HUNTER
+- 21 assets → 420 triangular routes.
+- Volatility filter (skips flat markets).
+- Confidence scoring + liquidity fill ratio.
+- Ranked by dollar profit.
+- Pre-flight + slippage checks.
+"""
+
+import base64
+import hashlib
+import hmac
+import json
+import os
+import threading
+import time
+import uuid
+from decimal import Decimal, ROUND_DOWN
+from urllib.parse import urlencode
+from itertools import permutations
+
+import requests
+import streamlit as st
+
+# ---------- PERSISTENT LEDGER ----------
+LEDGER_FILE = "ledger.json"
+
+def load_ledger():
+    try:
+        with open(LEDGER_FILE, "r") as f:
+            data = json.load(f)
+            return Decimal(data.get("profit", "0.00")), int(data.get("trades", 0))
+    except:
+        return Decimal("0.00"), 0
+
+def save_ledger(profit, trades):
+    with open(LEDGER_FILE, "w") as f:
+        json.dump({"profit": str(profit), "trades": trades}, f)
+
+# ---------- Kraken API Wrappers ----------
+KRAKEN_BASE_URL = "https://api.kraken.com"
+REQUEST_TIMEOUT = 10
+session = requests.Session()
+
+def D(v): return Decimal(str(v))
+
+def kraken_private_request(api_key, api_secret, path, data):
+    nonce = str(time.time_ns())
+    payload = {"nonce": nonce, **data}
+    postdata = urlencode(payload)
+    encoded = (nonce + postdata).encode()
+    message = path.encode() + hashlib.sha256(encoded).digest()
+    decoded_secret = base64.b64decode(api_secret)
+    api_sign = base64.b64encode(hmac.new(decoded_secret, message, hashlib.sha512).digest()).decode()
+    resp = session.post(KRAKEN_BASE_URL + path, data=payload, headers={"API-Key": api_key, "API-Sign": api_sign}, timeout=REQUEST_TIMEOUT)
+    resp.raise_for_status()
+    result = resp.json()
+    if result.get("error"):
+        raise RuntimeError("Kraken: " + "; ".join(result["error"]))
+    return result
+
+def get_kraken_balance(api_key, api_secret):
+    res = kraken_private_request(api_key, api_secret, "/0/private/Balance", {})
+    return {k: D(v) for k, v in res["result"].items() if D(v) > 0}
+
+def kraken_market_order(api_key, api_secret, pair, side, volume):
+    return kraken_private_request(api_key, api_secret, "/0/private/AddOrder", {
+        "pair": pair,
+        "type": side.lower(),
+        "ordertype": "market",
+        "volume": format(volume, "f"),
+    })
+
+# ---------- EXPANDED ASSETS (21) ----------
+ASSETS = [
+    "BTC", "ETH", "SOL", "XRP", "LINK", "DOGE", "AVAX", "SUI", "LTC", "ADA",
+    "DOT", "UNI", "AAVE", "NEAR", "ATOM", "HBAR", "TON", "BCH", "FIL", "ARB", "OP"
+]
+
+USD_PAIRS = {
+    "BTC": "XXBTZUSD",
+    "ETH": "ETHUSD",
+    "SOL": "SOLUSD",
+    "XRP": "XRPUSD",
+    "LINK": "LINKUSD",
+    "DOGE": "DOGEUSD",
+    "AVAX": "AVAXUSD",
+    "SUI": "SUIUSD",
+    "LTC": "LTCUSD",
+    "ADA": "ADAUSD",
+    "DOT": "DOTUSD",
+    "UNI": "UNIUSD",
+    "AAVE": "AAVEUSD",
+    "NEAR": "NEARUSD",
+    "ATOM": "ATOMUSD",
+    "HBAR": "HBARUSD",
+    "TON": "TONUSD",
+    "BCH": "BCHUSD",
+    "FIL": "FILUSD",
+    "ARB": "ARBUSD",
+    "OP": "OPUSD",
+}
+
+# We'll generate cross pairs on the fly by trying common naming conventions.
+def get_cross_pair(a, b):
+    # Try the most common Kraken naming: e.g., SOLXBT, ETHXBT, XRPETH, LINKETH, etc.
+    # Kraken uses BASEQUOTE, e.g., SOLXBT (SOL/BTC), ETHXBT (ETH/BTC), XRPETH (XRP/ETH).
+    # Quote can be USD (handled by USD_PAIRS), BTC, ETH, or other majors.
+    if a == "BTC" or b == "BTC":
+        quote = "XBT"
+        base = a if b == "BTC" else b
+        return f"{base}{quote}"
+    if a == "ETH" or b == "ETH":
+        quote = "ETH"
+        base = a if b == "ETH" else b
+        return f"{base}{quote}"
+    # For pairs like SOL/LINK, Kraken often uses LINKSOL (LINK/SOL) but we can try SOLUSD if not.
+    # We'll just return the base+quote and let the fetch fail if it doesn't exist.
+    return f"{a}{b}"
+
+# But Kraken uses specific pairs for USD, so we only need cross pairs for non-USD quotes.
+# We'll dynamically try all pairs, but we need to check which ones exist.
+# We'll use a cache to avoid repeated failing fetches.
+
+# ---------- ORDER BOOK FETCH & SIMULATION ----------
+def fetch_order_book(pair, count=10):
+    try:
+        r = requests.get(f"https://api.kraken.com/0/public/Depth?pair={pair}&count={count}", timeout=3)
+        data = r.json()
+        if data.get("error"):
+            return None
+        res = list(data["result"].values())[0]
+        asks = [[D(price), D(vol)] for price, vol in res["asks"]]
+        bids = [[D(price), D(vol)] for price, vol in res["bids"]]
+        return {"asks": asks, "bids": bids}
+    except:
+        return None
+
+def get_24h_change(asset):
+    """Fetches 24h change percent from Kraken ticker."""
+    pair = USD_PAIRS.get(asset)
+    if not pair:
+        return None
+    try:
+        r = requests.get(f"https://api.kraken.com/0/public/Ticker?pair={pair}", timeout=3)
+        data = r.json()
+        if data.get("error"):
+            return None
+        res = list(data["result"].values())[0]
+        return D(res["p"][0])  # 'p' = 24h change percent
+    except:
+        return None
+
+def simulate_triangular_cycle(asset_a, asset_b, start_usd, orderbooks, fees_pct):
+    """Simulates USD -> A -> B -> USD using L2 order books."""
+    # Leg 1: Buy A with USD
+    pair_a_usd = USD_PAIRS.get(asset_a)
+    if not pair_a_usd or pair_a_usd not in orderbooks: return None
+    ob_a_usd = orderbooks[pair_a_usd]
+    if not ob_a_usd or not ob_a_usd["asks"]: return None
+    remaining_usd = start_usd
+    a_amt = D("0")
+    avg_price_1 = D("0")
+    best_price_1 = ob_a_usd["asks"][0][0]
+    for price, vol in ob_a_usd["asks"]:
+        cost = price * vol
+        if remaining_usd <= cost:
+            a_amt += remaining_usd / price
+            avg_price_1 = (avg_price_1 * (a_amt - (remaining_usd / price)) + (remaining_usd / price) * price) / a_amt if a_amt > 0 else price
+            remaining_usd = D("0")
+            break
+        else:
+            a_amt += vol
+            avg_price_1 = (avg_price_1 * (a_amt - vol) + vol * price) / a_amt
+            remaining_usd -= cost
+    if a_amt == 0 or remaining_usd > 0: return None
+
+    # Leg 2: Sell A for B (try dynamic pair)
+    pair_a_b = get_cross_pair(asset_a, asset_b)
+    if pair_a_b not in orderbooks:
+        # Try reverse (if we asked A/B but Kraken has B/A)
+        pair_a_b_rev = get_cross_pair(asset_b, asset_a)
+        if pair_a_b_rev in orderbooks:
+            pair_a_b = pair_a_b_rev
+            # If reversed, the price is B per A if original, but since we sell A for B, we check if exists.
+        else:
+            return None
+    ob_a_b = orderbooks[pair_a_b]
+    if not ob_a_b or not ob_a_b["bids"]: return None
+    b_amt = D("0")
+    avg_price_2 = D("0")
+    best_price_2 = ob_a_b["bids"][0][0]
+    remaining_a = a_amt
+    for price, vol in ob_a_b["bids"]:
+        if remaining_a <= vol:
+            b_amt += remaining_a * price
+            avg_price_2 = (avg_price_2 * (b_amt - (remaining_a * price)) + (remaining_a * price)) / b_amt if b_amt > 0 else price
+            remaining_a = D("0")
+            break
+        else:
+            b_amt += vol * price
+            avg_price_2 = (avg_price_2 * (b_amt - (vol * price)) + (vol * price)) / b_amt
+            remaining_a -= vol
+    if b_amt == 0 or remaining_a > 0: return None
+
+    # Leg 3: Sell B for USD
+    pair_b_usd = USD_PAIRS.get(asset_b)
+    if not pair_b_usd or pair_b_usd not in orderbooks: return None
+    ob_b_usd = orderbooks[pair_b_usd]
+    if not ob_b_usd or not ob_b_usd["bids"]: return None
+    usd_final = D("0")
+    avg_price_3 = D("0")
+    best_price_3 = ob_b_usd["bids"][0][0]
+    remaining_b = b_amt
+    for price, vol in ob_b_usd["bids"]:
+        if remaining_b <= vol:
+            usd_final += remaining_b * price
+            avg_price_3 = (avg_price_3 * (usd_final - (remaining_b * price)) + (remaining_b * price)) / usd_final if usd_final > 0 else price
+            remaining_b = D("0")
+            break
+        else:
+            usd_final += vol * price
+            avg_price_3 = (avg_price_3 * (usd_final - (vol * price)) + (vol * price)) / usd_final
+            remaining_b -= vol
+    if usd_final == 0 or remaining_b > 0: return None
+
+    profit = usd_final - start_usd
+    profit = profit * (D("1") - fees_pct / D("100"))
+
+    slippage_1 = abs(avg_price_1 - best_price_1) / best_price_1 * 100 if best_price_1 > 0 else 0
+    slippage_2 = abs(avg_price_2 - best_price_2) / best_price_2 * 100 if best_price_2 > 0 else 0
+    slippage_3 = abs(avg_price_3 - best_price_3) / best_price_3 * 100 if best_price_3 > 0 else 0
+    total_slippage = slippage_1 + slippage_2 + slippage_3
+
+    # Confidence score: based on how much of the order book is consumed.
+    # If we consumed less than 50% of the first level, confidence is high.
+    # Simpler: fill ratio at best level.
+    fill_ratio_1 = 1 if a_amt > 0 else 0
+    if ob_a_usd["asks"] and ob_a_usd["asks"][0][1] > 0:
+        fill_ratio_1 = min(1, a_amt / ob_a_usd["asks"][0][1])
+    fill_ratio_2 = 1 if b_amt > 0 else 0
+    if ob_a_b["bids"] and ob_a_b["bids"][0][1] > 0:
+        fill_ratio_2 = min(1, a_amt / ob_a_b["bids"][0][1])
+    fill_ratio_3 = 1 if usd_final > 0 else 0
+    if ob_b_usd["bids"] and ob_b_usd["bids"][0][1] > 0:
+        fill_ratio_3 = min(1, b_amt / ob_b_usd["bids"][0][1])
+    avg_fill = (fill_ratio_1 + fill_ratio_2 + fill_ratio_3) / 3
+    confidence = min(100, int(avg_fill * 100))
+
+    return profit, avg_price_1, avg_price_2, avg_price_3, a_amt, total_slippage, confidence
+
+# ---------- Streamlit UI ----------
+st.set_page_config(page_title="🐱 v17.0 – 420 Routes", layout="wide")
+st.title("🐱 v17.0 – 420‑Route Hunter (21 Assets)")
+
+loaded_profit, loaded_trades = load_ledger()
+
+if "running" not in st.session_state: st.session_state.running = False
+if "live_mode" not in st.session_state: st.session_state.live_mode = False
+if "logs" not in st.session_state: st.session_state.logs = []
+if "trade_count" not in st.session_state: st.session_state.trade_count = loaded_trades
+if "total_profit_usd" not in st.session_state: st.session_state.total_profit_usd = loaded_profit
+if "last_trade_time" not in st.session_state: st.session_state.last_trade_time = 0.0
+
+def add_log(msg):
+    ts = time.strftime("%H:%M:%S")
+    st.session_state.logs.insert(0, f"[{ts}] {msg}")
+    st.session_state.logs = st.session_state.logs[:200]
+
+# Sidebar
+st.sidebar.header("🔐 Kraken API")
+kraken_key = st.sidebar.text_input("API Key", type="password", key="kraken_key")
+kraken_secret = st.sidebar.text_area("Private Key", type="password", key="kraken_secret", height=80)
+
+st.sidebar.divider()
+st.sidebar.header("⚙️ Strategy Settings")
+min_profit_usd = D(st.sidebar.number_input("Min Profit ($)", value=0.05, step=0.01, format="%.2f"))
+trade_size_usd = D(st.sidebar.number_input("Trade Size ($)", value=10.0, step=5.0, format="%.1f"))
+tri_fees = D(st.sidebar.number_input("Estimated Fees (%)", value=0.50, step=0.01, format="%.2f"))
+max_slippage = D(st.sidebar.number_input("Max Slippage (%)", value=0.50, step=0.05, format="%.2f"))
+volatility_filter = st.sidebar.toggle("Enable Volatility Filter (>1.5% 24h change)", value=True)
+cooldown = st.sidebar.number_input("Cooldown (sec)", value=30, step=5)
+poll = st.sidebar.slider("Refresh (sec)", 2, 15, 5)
+
+st.sidebar.divider()
+st.sidebar.header("🔴 Live Trading")
+st.session_state.live_mode = st.sidebar.toggle("Enable live orders", value=st.session_state.live_mode)
+if st.session_state.live_mode:
+    st.sidebar.error("⚠️ LIVE ACTIVE")
+else:
+    st.sidebar.info("🧪 DRY RUN")
+
+if st.sidebar.button("⏹ STOP BOT", use_container_width=True):
+    st.session_state.running = False
+    save_ledger(st.session_state.total_profit_usd, st.session_state.trade_count)
+
+creds_ok = all([kraken_key.strip(), kraken_secret.strip()])
+
+def self_ping():
+    slug = os.environ.get("REPL_SLUG", "")
+    owner = os.environ.get("REPL_OWNER", "")
+    if slug and owner:
+        url = f"https://{slug}.{owner}.replit.app"
+    else:
+        url = "http://localhost:8080"
+    while True:
+        time.sleep(120)
+        try:
+            requests.get(url, timeout=5)
+        except:
+            pass
+
+if creds_ok and st.session_state.running:
+    threading.Thread(target=self_ping, daemon=True).start()
+
+col1, col2 = st.columns(2)
+with col1:
+    if st.button("▶ START", use_container_width=True, disabled=not creds_ok or st.session_state.running):
+        st.session_state.running = True
+        st.rerun()
+with col2:
+    if st.button("Test Kraken", use_container_width=True, disabled=not creds_ok):
+        try:
+            bal = get_kraken_balance(kraken_key, kraken_secret)
+            st.success("✅ Connected.")
+            st.json({k: f"{v:.4f}" for k, v in bal.items() if v > 0})
+            add_log("Kraken test passed.")
+        except Exception as e:
+            st.error(f"❌ {e}")
+            add_log(f"Test failed: {e}")
+
+# ---------- MAIN LOOP ----------
+placeholder = st.empty()
+
+if st.session_state.running and creds_ok:
+    try:
+        while st.session_state.running:
+            # 0. Volatility filter: get 24h change for all assets
+            active_assets = ASSETS.copy()
+            if volatility_filter:
+                filtered = []
+                for asset in ASSETS:
+                    change = get_24h_change(asset)
+                    if change is not None and abs(change) > D("1.5"):
+                        filtered.append(asset)
+                if len(filtered) < 3:  # need at least a few to form triangles
+                    filtered = ASSETS  # fallback to all
+                active_assets = filtered
+                add_log(f"📡 Volatility filter: scanning {len(active_assets)} active assets.")
+
+            # 1. Fetch order books for active assets + cross pairs
+            pairs_to_fetch = [USD_PAIRS[a] for a in active_assets]
+            # For cross pairs, we'll try them on the fly, but we need to pre-fetch candidates.
+            # We'll fetch all possible cross pairs among active assets to avoid extra latency.
+            cross_pairs_to_try = set()
+            for a in active_assets:
+                for b in active_assets:
+                    if a != b:
+                        cross_pairs_to_try.add(get_cross_pair(a, b))
+            pairs_to_fetch.extend(cross_pairs_to_try)
+            pairs_to_fetch = list(set(pairs_to_fetch))
+
+            orderbooks = {}
+            for pair in pairs_to_fetch:
+                ob = fetch_order_book(pair, count=8)
+                if ob:
+                    orderbooks[pair] = ob
+
+            # 2. Simulate all cycles (A -> B)
+            cycles = []
+            for asset_a, asset_b in permutations(active_assets, 2):
+                # Check if USD pairs exist
+                pair_a_usd = USD_PAIRS.get(asset_a)
+                pair_b_usd = USD_PAIRS.get(asset_b)
+                if not pair_a_usd or not pair_b_usd:
+                    continue
+                if pair_a_usd not in orderbooks or pair_b_usd not in orderbooks:
+                    continue
+
+                # Check cross pair
+                pair_ab = get_cross_pair(asset_a, asset_b)
+                if pair_ab not in orderbooks:
+                    pair_ab_rev = get_cross_pair(asset_b, asset_a)
+                    if pair_ab_rev in orderbooks:
+                        pair_ab = pair_ab_rev
+                    else:
+                        continue
+
+                result = simulate_triangular_cycle(asset_a, asset_b, trade_size_usd, orderbooks, tri_fees)
+                if not result:
+                    continue
+                profit, avg1, avg2, avg3, vol_a, slippage, confidence = result
+
+                status = "❌ LOW PROFIT"
+                if profit > min_profit_usd and slippage <= max_slippage:
+                    status = "✅ READY"
+                elif profit > min_profit_usd and slippage > max_slippage:
+                    status = "⚠️ SLIPPAGE"
+
+                # Profit %
+                profit_pct = (profit / trade_size_usd) * 100 if trade_size_usd > 0 else 0
+
+                cycles.append({
+                    "route": f"USD→{asset_a}→{asset_b}→USD",
+                    "asset_a": asset_a,
+                    "asset_b": asset_b,
+                    "profit": profit,
+                    "profit_pct": profit_pct,
+                    "slippage": slippage,
+                    "vol": vol_a,
+                    "status": status,
+                    "confidence": confidence,
+                })
+
+            # 3. Sort by profit descending
+            cycles.sort(key=lambda x: x["profit"], reverse=True)
+
+            # 4. Display UI
+            with placeholder.container():
+                st.subheader(f"📊 TOP OPPORTUNITIES ({len(active_assets)} assets, {len(cycles)} routes scanned)")
+
+                if cycles:
+                    rows = []
+                    for i, c in enumerate(cycles[:15], start=1):
+                        rows.append({
+                            "Rank": i,
+                            "Route": c["route"],
+                            "Profit ($)": f"${c['profit']:.4f}",
+                            "Profit %": f"{c['profit_pct']:.3f}%",
+                            "Slippage": f"{c['slippage']:.3f}%",
+                            "Confidence": f"{c['confidence']}%",
+                            "Status": c["status"],
+                        })
+                    st.table(rows)
+
+                    # 5. Find best executable cycle
+                    best_ready = next((c for c in cycles if c["status"] == "✅ READY"), None)
+
+                    if best_ready and (time.time() - st.session_state.last_trade_time) >= cooldown:
+                        add_log(f"🔍 Pre-flight for {best_ready['route']} | Profit ${best_ready['profit']:.4f}")
+                        # Quick re-fetch for the winning route
+                        fresh_books = {}
+                        pairs_needed = [USD_PAIRS[best_ready["asset_a"]], USD_PAIRS[best_ready["asset_b"]]]
+                        cross_needed = get_cross_pair(best_ready["asset_a"], best_ready["asset_b"])
+                        if cross_needed not in orderbooks:
+                            cross_needed = get_cross_pair(best_ready["asset_b"], best_ready["asset_a"])
+                        pairs_needed.append(cross_needed)
+                        for p in pairs_needed:
+                            ob = fetch_order_book(p, count=8)
+                            if ob:
+                                fresh_books[p] = ob
+                        if all(p in fresh_books for p in pairs_needed):
+                            fresh_result = simulate_triangular_cycle(
+                                best_ready["asset_a"], best_ready["asset_b"],
+                                trade_size_usd, fresh_books, tri_fees
+                            )
+                            if fresh_result:
+                                fresh_profit, _, _, _, _, f_slip, f_conf = fresh_result
+                                if (fresh_profit > min_profit_usd and f_slip <= max_slippage and
+                                    fresh_profit > best_ready["profit"] * D("0.8")):
+                                    if st.session_state.live_mode:
+                                        st.success(f"🔥 EXECUTING: {best_ready['route']} | Profit: ${fresh_profit:.4f}")
+                                        try:
+                                            kraken_market_order(kraken_key, kraken_secret, USD_PAIRS[best_ready["asset_a"]], "buy", best_ready["vol"])
+                                            pair_ab = get_cross_pair(best_ready["asset_a"], best_ready["asset_b"])
+                                            if pair_ab not in fresh_books:
+                                                pair_ab = get_cross_pair(best_ready["asset_b"], best_ready["asset_a"])
+                                            kraken_market_order(kraken_key, kraken_secret, pair_ab, "sell", best_ready["vol"])
+                                            b_amt = best_ready["vol"] * (best_ready["profit"] / trade_size_usd)  # rough estimate
+                                            # Recalculate b_amt from simulation?
+                                            kraken_market_order(kraken_key, kraken_secret, USD_PAIRS[best_ready["asset_b"]], "sell", b_amt)
+
+                                            st.session_state.total_profit_usd += fresh_profit
+                                            st.session_state.trade_count += 1
+                                            st.session_state.last_trade_time = time.time()
+                                            save_ledger(st.session_state.total_profit_usd, st.session_state.trade_count)
+                                            add_log(f"✅ TRI #{st.session_state.trade_count} | {best_ready['route']} | profit ${fresh_profit:.4f}")
+                                            st.balloons()
+                                        except Exception as e:
+                                            st.error(f"Execution error: {e}")
+                                            add_log(f"Execution error: {e}")
+                                    else:
+                                        st.warning(f"🔍 DRY RUN: {best_ready['route']} profit ${fresh_profit:.4f}")
+                                        st.session_state.last_trade_time = time.time()
+                                else:
+                                    add_log(f"⛔ Pre-flight failed (fresh profit degraded).")
+                            else:
+                                add_log("⛔ Pre-flight failed (simulation error).")
+                        else:
+                            add_log("⛔ Pre-flight failed (books unavailable).")
+                else:
+                    st.info("No cycles simulated. Check API or increase trade size.")
+
+                st.subheader("📋 Activity Log")
+                st.code("\n".join(st.session_state.logs[:30]) or "No activity.")
+
+            time.sleep(poll)
+
+    except Exception as e:
+        with placeholder.container():
+            st.error(f"🚨 Loop crashed: {e}")
+        add_log(f"Loop crash: {e}")
+        st.session_state.running = False
+        save_ledger(st.session_state.total_profit_usd, st.session_state.trade_count)
+
+else:
+    if not creds_ok:
+        placeholder.warning("Paste your Kraken API keys and test connection.")
+    else:
+        placeholder.info("Bot idle. Press START to begin monitoring.")
+
+st.divider()
+st.caption("🐱 v17.0 – 420 routes. Volatility filter. Confidence scoring.")

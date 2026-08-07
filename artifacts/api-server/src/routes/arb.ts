@@ -173,18 +173,21 @@ router.get("/arb/scan", async (_req, res): Promise<void> => {
 });
 
 // ── GET /arb/ob-scan ──────────────────────────────────────────────────────────
-// Port of Python v15 "Order Book Hunter (Conservative)".
-// Fetches L2 depth from Kraken, walks the book for all 30 triangular cycles,
-// and classifies each with a READY / HIGH_SLIPPAGE / LOW_PROFIT status.
+// Port of Python v17 "420-Route Hunter" (21 assets, up to 420 permutations).
+// Fetches L2 depth from Kraken, walks the book for all simulatable cycles,
+// classifies each READY / HIGH_SLIPPAGE / LOW_PROFIT and scores liquidity
+// confidence. Optional volatility filter scans only assets moving >1.5%/24h.
 // Query params: tradeSizeUsd (default 10), feesPct (default 0.5),
-//               minProfitUsd (default 0.01), maxSlippagePct (default 0.5)
+//               minProfitUsd (default 0.05), maxSlippagePct (default 0.5),
+//               volatilityFilter (default true)
 router.get("/arb/ob-scan", async (req, res): Promise<void> => {
   const tradeSizeUsd   = Math.max(1, parseFloat(String(req.query["tradeSizeUsd"]   ?? "10"))   || 10);
   const feesPct        = Math.max(0, parseFloat(String(req.query["feesPct"]        ?? "0.5"))  || 0.5);
   const minProfitUsd   = Math.max(0, parseFloat(String(req.query["minProfitUsd"]   ?? "0.05")) || 0.05);
   const maxSlippagePct = Math.max(0, parseFloat(String(req.query["maxSlippagePct"] ?? "0.5"))  || 0.5);
+  const volatilityFilter = String(req.query["volatilityFilter"] ?? "true") !== "false";
   try {
-    const result = await scanOrderBookCycles(tradeSizeUsd, feesPct, minProfitUsd, maxSlippagePct);
+    const result = await scanOrderBookCycles(tradeSizeUsd, feesPct, minProfitUsd, maxSlippagePct, volatilityFilter);
     res.json(result);
   } catch (err) {
     req.log.error({ err }, "OB scan error");

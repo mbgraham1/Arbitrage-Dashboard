@@ -215,6 +215,8 @@ export interface ObCycleEntry {
   slippagePct: number;
   /** v15 conservative classification */
   status: ObCycleEntryStatus;
+  /** v17 liquidity confidence 0-100 — avg top-of-book coverage across the 3 legs */
+  confidencePct: number;
 }
 
 export type ObCycleEntryStatus = (typeof ObCycleEntryStatus)[keyof typeof ObCycleEntryStatus];
@@ -240,6 +242,10 @@ export interface ObScanResult {
   pairsScanned: number;
   /** Pairs the scan attempted to fetch */
   pairsRequested: number;
+  /** v17 — whether the volatility filter was requested */
+  volatilityFilter: boolean;
+  /** v17 — assets actually scanned after the volatility filter */
+  activeAssets: string[];
   scannedAt: string;
 }
 

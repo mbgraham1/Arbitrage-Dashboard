@@ -8,3 +8,12 @@ The user uploads successive Python "BUTTER PROTOCOL" versions to port. Their `si
 **Why:** In every cross-pair mapping used (ETHXBT, SOLXBT, SOLETH, LINKSOL, …), the SECOND asset of the (A, B) tuple is the Kraken BASE and the first is the QUOTE. Going A→B with A as quote means BUYING the base → walk ASKS (price = A per B); A as base means SELLING → walk BIDS.
 
 **How to apply:** When porting any future Python version's order-book/triangular logic, keep the corrected orientation-aware cross-leg math (CROSS_LOOKUP with `aIsQuote`) rather than transliterating the Python's bid-only walk. Also keep: full-fill rejection (partial fills return null) and surfacing failed order-book fetches (pairsScanned/pairsRequested) instead of silently reporting "no opportunity". Kraken lacks many exotic crosses (LINKSOL etc.), so ~12/21 pairs fetching is normal, not an error.
+
+## Ticker response keys are INTERNAL names
+Kraken's /0/public/Ticker keys its result by internal pair names even when you
+request altnames: ETHUSD→XETHZUSD, XRPUSD→XXRPZUSD, LTCUSD→XLTCZUSD,
+XBTUSD→XXBTZUSD; DOGE is XDGUSD (no Z form). Match by explicit mapping, never
+suffix heuristics. Also: Ticker field "p" is VWAP, NOT 24h change — the Python
+bots misuse it; compute change as (c[0]−o)/o. Verify pair existence via
+/0/public/AssetPairs (gives authoritative base/quote) instead of guessing
+symbol names like the Python versions do.

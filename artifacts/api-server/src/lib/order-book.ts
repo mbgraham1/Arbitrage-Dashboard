@@ -1,60 +1,84 @@
 /**
- * v14 "Order Book Hunter" — port of Python v14 simulate_triangular_cycle().
+ * v17 "420-Route Hunter" — port of Python v17 (originally v14 simulate_triangular_cycle()).
  *
  * Fetches L2 order book depth from Kraken public Depth API and walks the book
  * level-by-level to get realistic average fill prices at a given trade size.
- * Scans all 30 permutations of 6 assets: BTC, ETH, SOL, LINK, ADA, MATIC.
+ * v17: 21 assets (420 A×B permutations), volatility filter (24h change),
+ * per-cycle confidence score (top-of-book liquidity coverage).
+ *
+ * Pairs below are the FULL verified set from Kraken /0/public/AssetPairs
+ * (checked 2026-08) — the Python guesses symbol names and lets fetches fail;
+ * we only list real pairs. MATIC was delisted from Kraken (no MATICUSD), so it
+ * was dropped in v17's asset list. Many v17 assets (AVAX, SUI, HBAR, TON, ARB,
+ * OP, NEAR) have NO cross pairs on Kraken — they can't form cycles yet.
  */
 
 // ── Asset definitions ─────────────────────────────────────────────────────────
 
-export const OB_ASSETS = ["BTC", "ETH", "SOL", "LINK", "ADA", "MATIC", "DOGE", "AVAX", "XRP", "SUI"] as const;
+export const OB_ASSETS = [
+  "BTC", "ETH", "SOL", "XRP", "LINK", "DOGE", "AVAX", "SUI", "LTC", "ADA",
+  "DOT", "UNI", "AAVE", "NEAR", "ATOM", "HBAR", "TON", "BCH", "FIL", "ARB", "OP",
+] as const;
 export type ObAsset = typeof OB_ASSETS[number];
 
-/** Kraken REST pair symbols for the USD leg of each asset. */
+/** Kraken REST pair symbols for the USD leg of each asset (verified altnames). */
 export const OB_USD_PAIRS: Record<ObAsset, string> = {
-  BTC:   "XXBTZUSD",
-  ETH:   "ETHUSD",
-  SOL:   "SOLUSD",
-  LINK:  "LINKUSD",
-  ADA:   "ADAUSD",
-  MATIC: "MATICUSD",
-  DOGE:  "DOGEUSD",
-  AVAX:  "AVAXUSD",
-  XRP:   "XRPUSD",
-  SUI:   "SUIUSD",
+  BTC:  "XXBTZUSD",
+  ETH:  "ETHUSD",
+  SOL:  "SOLUSD",
+  XRP:  "XRPUSD",
+  LINK: "LINKUSD",
+  DOGE: "XDGUSD",  // Kraken's DOGE code is XDG
+  AVAX: "AVAXUSD",
+  SUI:  "SUIUSD",
+  LTC:  "LTCUSD",
+  ADA:  "ADAUSD",
+  DOT:  "DOTUSD",
+  UNI:  "UNIUSD",
+  AAVE: "AAVEUSD",
+  NEAR: "NEARUSD",
+  ATOM: "ATOMUSD",
+  HBAR: "HBARUSD",
+  TON:  "TONUSD",
+  BCH:  "BCHUSD",
+  FIL:  "FILUSD",
+  ARB:  "ARBUSD",
+  OP:   "OPUSD",
 };
 
 /**
- * Cross-pair definitions matching Python v14 CROSS_PAIRS.
- * Layout: [assetA, assetB, krakenPairSymbol]
- * Bid side of this pair = "sell A, receive B" (B per A).
+ * Cross-pair definitions.
+ * Layout: [quoteAsset, baseAsset, krakenPairSymbol] — the Kraken symbol's BASE
+ * is the second element, QUOTE is the first.
+ * Complete verified list of crosses among OB_ASSETS on Kraken (2026-08).
  */
 const OB_CROSS_MAP: Array<[ObAsset, ObAsset, string]> = [
-  // vs BTC (quote BTC, base = second asset) — all verified live on Kraken
-  ["BTC",  "ETH",   "ETHXBT"],
-  ["BTC",  "SOL",   "SOLXBT"],
-  ["BTC",  "LINK",  "LINKXBT"],
-  ["BTC",  "ADA",   "ADAXBT"],
-  ["BTC",  "DOGE",  "DOGEXBT"],   // v16
-  ["BTC",  "XRP",   "XRPXBT"],    // v16
-  // vs ETH (quote ETH, base = second asset)
-  ["ETH",  "SOL",   "SOLETH"],
-  ["ETH",  "LINK",  "LINKETH"],
-  ["ETH",  "ADA",   "ADAETH"],
-  ["ETH",  "XRP",   "XRPETH"],    // v16
-  // Other crosses (may not all exist on Kraken; missing books self-exclude)
-  ["BTC",  "MATIC", "MATICXBT"],
-  ["ETH",  "MATIC", "MATICETH"],
-  ["SOL",  "LINK",  "LINKSOL"],
-  ["SOL",  "ADA",   "ADASOL"],
-  ["SOL",  "MATIC", "MATICSOL"],
-  ["LINK", "ADA",   "ADALINK"],
-  ["LINK", "MATIC", "MATICLINK"],
-  ["ADA",  "MATIC", "MATICADA"],
-  // NOTE (v16): the Python guessed AVAXXBT / SUIXBT / DOGEETH / AVAXETH / SUIETH,
-  // but Kraken does not list them (verified 2026-08) — AVAX and SUI currently
-  // trade vs USD only, so they cannot form triangular cycles yet.
+  // vs BTC
+  ["BTC", "ETH",  "ETHXBT"],
+  ["BTC", "SOL",  "SOLXBT"],
+  ["BTC", "XRP",  "XRPXBT"],
+  ["BTC", "LINK", "LINKXBT"],
+  ["BTC", "DOGE", "XDGXBT"],
+  ["BTC", "LTC",  "LTCXBT"],
+  ["BTC", "ADA",  "ADAXBT"],
+  ["BTC", "DOT",  "DOTXBT"],
+  ["BTC", "UNI",  "UNIXBT"],
+  ["BTC", "AAVE", "AAVEXBT"],
+  ["BTC", "ATOM", "ATOMXBT"],
+  ["BTC", "BCH",  "BCHXBT"],
+  ["BTC", "FIL",  "FILXBT"],
+  // vs ETH
+  ["ETH", "SOL",  "SOLETH"],
+  ["ETH", "XRP",  "XRPETH"],
+  ["ETH", "LINK", "LINKETH"],
+  ["ETH", "LTC",  "LTCETH"],
+  ["ETH", "ADA",  "ADAETH"],
+  ["ETH", "DOT",  "DOTETH"],
+  ["ETH", "UNI",  "UNIETH"],
+  ["ETH", "AAVE", "AAVEETH"],
+  ["ETH", "ATOM", "ATOMETH"],
+  ["ETH", "BCH",  "BCHETH"],
+  ["ETH", "FIL",  "FILETH"],
 ];
 
 /**
@@ -111,6 +135,65 @@ export async function fetchOrderBook(pair: string, count = 8): Promise<OrderBook
   } catch { return null; }
 }
 
+// ── v17: 24h change (volatility filter) ──────────────────────────────────────
+
+/**
+ * Kraken's INTERNAL pair keys for assets with legacy X/Z-prefixed codes.
+ * The Ticker endpoint keys its result by these even when you request the
+ * altname (e.g. requesting ETHUSD returns key XETHZUSD). Assets not listed
+ * here use their altname as the internal key too.
+ */
+const TICKER_INTERNAL_KEYS: Partial<Record<ObAsset, string>> = {
+  BTC:  "XXBTZUSD",
+  ETH:  "XETHZUSD",
+  XRP:  "XXRPZUSD",
+  LTC:  "XLTCZUSD",
+  DOGE: "XDGUSD", // XDG has no Z-suffixed USD form
+};
+
+const TICKER_CACHE_TTL_MS = 60_000;
+let tickerCache: { changes: Map<ObAsset, number>; fetchedAt: number } | null = null;
+
+/**
+ * Fetches 24h price change % for all assets in ONE batched Ticker request.
+ * NOTE: the Python v17 reads ticker field "p" (that's the VWAP, not a change %)
+ * — a bug that makes its filter nearly a no-op. We port the stated intent:
+ * change % = (last close − today's open) / open × 100.
+ * Returns a map; assets missing from the response are simply absent.
+ */
+export async function get24hChanges(): Promise<Map<ObAsset, number>> {
+  if (tickerCache && Date.now() - tickerCache.fetchedAt < TICKER_CACHE_TTL_MS) {
+    return tickerCache.changes;
+  }
+  const changes = new Map<ObAsset, number>();
+  try {
+    const pairList = Object.values(OB_USD_PAIRS).join(",");
+    const r = await fetch(
+      `https://api.kraken.com/0/public/Ticker?pair=${pairList}`,
+      { signal: AbortSignal.timeout(4_000) },
+    );
+    if (!r.ok) return changes;
+    const data = await r.json() as {
+      error?: string[];
+      result?: Record<string, { c: string[]; o: string }>;
+    };
+    if (data.error?.length || !data.result) return changes;
+    for (const [asset, pair] of Object.entries(OB_USD_PAIRS) as Array<[ObAsset, string]>) {
+      // Kraken keys the response by INTERNAL pair names (e.g. XETHZUSD for
+      // ETHUSD). Try the requested altname first, then the known internal key.
+      const t = data.result[pair] ?? data.result[TICKER_INTERNAL_KEYS[asset] ?? ""];
+      if (!t) continue;
+      const close = parseFloat(t.c?.[0] ?? "");
+      const open  = parseFloat(t.o ?? "");
+      if (Number.isFinite(close) && Number.isFinite(open) && open > 0) {
+        changes.set(asset, ((close - open) / open) * 100);
+      }
+    }
+    if (changes.size > 0) tickerCache = { changes, fetchedAt: Date.now() };
+  } catch { /* leave whatever we collected */ }
+  return changes;
+}
+
 // ── Cycle simulation ──────────────────────────────────────────────────────────
 
 /** v15 status classification for a simulated cycle. */
@@ -134,6 +217,14 @@ export interface ObCycleEntry {
   slippagePct: number;
   /** v15: READY / HIGH_SLIPPAGE / LOW_PROFIT */
   status: ObCycleStatus;
+  /**
+   * v17: 0–100 liquidity confidence — average top-of-book coverage across the
+   * 3 legs (how many times over the best level alone could fill the leg,
+   * capped at 100%). Higher = deeper book = more reliable fill estimate.
+   * NOTE: the Python computes consumed/available (inverted vs its stated
+   * intent); we port the intent.
+   */
+  confidencePct: number;
 }
 
 export interface ObScanResult {
@@ -150,6 +241,10 @@ export interface ObScanResult {
   pairsScanned: number;
   /** Number of pairs the scan attempted to fetch */
   pairsRequested: number;
+  /** v17: whether the volatility filter was requested */
+  volatilityFilter: boolean;
+  /** v17: assets actually scanned after the volatility filter (all if filter off or fallback) */
+  activeAssets: string[];
   scannedAt: string;
 }
 
@@ -168,7 +263,7 @@ function simulateCycle(
   startUsd: number,
   orderbooks: Map<string, OrderBook>,
   feesPct: number,
-): { profitUsd: number; avg1: number; avg2: number; avg3: number; volA: number; slippagePct: number } | null {
+): { profitUsd: number; avg1: number; avg2: number; avg3: number; volA: number; slippagePct: number; confidencePct: number } | null {
   const usdPairA = OB_USD_PAIRS[assetA];
   const usdPairB = OB_USD_PAIRS[assetB];
   const cross    = CROSS_LOOKUP.get(`${assetA}-${assetB}`);
@@ -261,16 +356,33 @@ function simulateCycle(
   const slip = (avg: number, best: number) => best > 0 ? Math.abs(avg - best) / best * 100 : 0;
   const slippagePct = slip(avg1, best1) + slip(avg2, best2) + slip(avg3, best3);
 
-  return { profitUsd: netProfit, avg1, avg2, avg3, volA: aAmt, slippagePct };
+  // v17: liquidity confidence — top-of-book coverage per leg (available/needed,
+  // capped at 1), averaged. Needed amounts are denominated in each book's BASE
+  // asset units to match the level volumes.
+  const coverage = (topVol: number | undefined, needed: number) =>
+    topVol && needed > 0 ? Math.min(1, topVol / needed) : 0;
+  const cov1 = coverage(obAUsd.asks[0]?.[1], aAmt);                       // leg 1: A units
+  const cov2 = cross.aIsQuote
+    ? coverage(obCross.asks[0]?.[1], bAmt)                                // buying base B: B units
+    : coverage(obCross.bids[0]?.[1], aAmt);                               // selling base A: A units
+  const cov3 = coverage(obBUsd.bids[0]?.[1], bAmt);                       // leg 3: B units
+  const confidencePct = Math.round(((cov1 + cov2 + cov3) / 3) * 100);
+
+  return { profitUsd: netProfit, avg1, avg2, avg3, volA: aAmt, slippagePct, confidencePct };
 }
 
 // ── Full scan ─────────────────────────────────────────────────────────────────
 
+const VOLATILITY_THRESHOLD_PCT = 1.5; // v17: |24h change| must exceed this
+const VOLATILITY_MIN_ASSETS    = 3;   // v17: fallback to all assets below this
+
 /**
- * Port of Python v15 main loop: fetches all order books in parallel and
- * simulates all 30 triangular cycles across 6 assets (A × B permutations).
- * v15: ALL simulatable cycles are ranked (top 15) with a status
- * classification, instead of filtering to profitable ones only.
+ * Port of Python v17 main loop: fetches all order books in parallel and
+ * simulates all A × B permutations across 21 assets (up to 420 routes;
+ * only routes with a real Kraken cross pair are simulatable).
+ * v17: optional volatility filter — only assets that moved >1.5% in 24h are
+ * scanned (falls back to ALL assets when fewer than 3 qualify).
+ * All simulatable cycles are ranked (top 15) with status + confidence.
  * Sorted by estimatedProfitUsd descending.
  */
 export async function scanOrderBookCycles(
@@ -278,11 +390,30 @@ export async function scanOrderBookCycles(
   feesPct        = 0.50,
   minProfitUsd   = 0.05, // v16: wait for a real edge (> $0.05 on $10)
   maxSlippagePct = 0.50,
+  volatilityFilter = true, // v17
 ): Promise<ObScanResult> {
-  // Deduplicated list of all pairs we need
+  // v17: volatility filter — restrict to assets that actually moved
+  let activeAssets: readonly ObAsset[] = OB_ASSETS;
+  if (volatilityFilter) {
+    const changes = await get24hChanges();
+    const moving = OB_ASSETS.filter(a => {
+      const chg = changes.get(a);
+      return chg !== undefined && Math.abs(chg) > VOLATILITY_THRESHOLD_PCT;
+    });
+    // Python falls back to all assets only when <3 qualify; we also fall back
+    // when the moving set can't form a single triangle (no cross pair among
+    // them) — otherwise the scan would return 0 cycles despite a live market.
+    const movingSet = new Set(moving);
+    const canFormCycle = OB_CROSS_MAP.some(([a, b]) => movingSet.has(a) && movingSet.has(b));
+    if (moving.length >= VOLATILITY_MIN_ASSETS && canFormCycle) activeAssets = moving;
+  }
+  const activeSet = new Set<ObAsset>(activeAssets);
+
+  // Deduplicated list of pairs needed for the active asset set
   const allPairs = [...new Set([
-    ...Object.values(OB_USD_PAIRS),
-    ...OB_CROSS_MAP.map(([,, pair]) => pair),
+    ...activeAssets.map(a => OB_USD_PAIRS[a]),
+    ...OB_CROSS_MAP.filter(([a, b]) => activeSet.has(a) && activeSet.has(b))
+                   .map(([,, pair]) => pair),
   ])];
 
   // Fetch all order books in parallel
@@ -293,10 +424,10 @@ export async function scanOrderBookCycles(
     if (fetched[i]) { orderbooks.set(allPairs[i], fetched[i]!); pairsScanned++; }
   }
 
-  // All A≠B permutations
+  // All A≠B permutations among active assets
   const cycles: ObCycleEntry[] = [];
-  for (const assetA of OB_ASSETS) {
-    for (const assetB of OB_ASSETS) {
+  for (const assetA of activeAssets) {
+    for (const assetB of activeAssets) {
       if (assetA === assetB) continue;
       const r = simulateCycle(assetA, assetB, tradeSizeUsd, orderbooks, feesPct);
       if (r) {
@@ -321,6 +452,7 @@ export async function scanOrderBookCycles(
           volumeA:             r.volA,
           slippagePct:         r.slippagePct,
           status,
+          confidencePct:       r.confidencePct,
         });
       }
     }
@@ -340,6 +472,8 @@ export async function scanOrderBookCycles(
     readyCount,
     pairsScanned,
     pairsRequested: allPairs.length,
+    volatilityFilter,
+    activeAssets: [...activeAssets],
     scannedAt: new Date().toISOString(),
   };
 }

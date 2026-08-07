@@ -636,36 +636,39 @@ export const getScanCointegrationArbUrl = () => {
 
 
 // ── /arb/ob-scan ─────────────────────────────────────────────────────────────
-// Port of Python v15 "Order Book Hunter (Conservative)" — walks L2 depth for
-// 30 cycles and classifies each with READY / HIGH_SLIPPAGE / LOW_PROFIT.
+// Port of Python v17 "420-Route Hunter" — walks L2 depth across 21 assets,
+// classifies each cycle READY / HIGH_SLIPPAGE / LOW_PROFIT, scores liquidity
+// confidence, with an optional 24h volatility filter.
 
-export const getObScanUrl = (tradeSizeUsd?: number, feesPct?: number, minProfitUsd?: number, maxSlippagePct?: number) => {
+export const getObScanUrl = (tradeSizeUsd?: number, feesPct?: number, minProfitUsd?: number, maxSlippagePct?: number, volatilityFilter?: boolean) => {
   const p = new URLSearchParams();
-  if (tradeSizeUsd   != null) p.set("tradeSizeUsd",   String(tradeSizeUsd));
-  if (feesPct        != null) p.set("feesPct",        String(feesPct));
-  if (minProfitUsd   != null) p.set("minProfitUsd",   String(minProfitUsd));
-  if (maxSlippagePct != null) p.set("maxSlippagePct", String(maxSlippagePct));
+  if (tradeSizeUsd     != null) p.set("tradeSizeUsd",     String(tradeSizeUsd));
+  if (feesPct          != null) p.set("feesPct",          String(feesPct));
+  if (minProfitUsd     != null) p.set("minProfitUsd",     String(minProfitUsd));
+  if (maxSlippagePct   != null) p.set("maxSlippagePct",   String(maxSlippagePct));
+  if (volatilityFilter != null) p.set("volatilityFilter", String(volatilityFilter));
   const qs = p.toString();
   return `/api/arb/ob-scan${qs ? `?${qs}` : ""}`;
 };
 
 /**
- * Fetches the v15 order book hunter scan — all 30 triangular cycles across
- * 6 assets, simulated using actual L2 depth from Kraken, with slippage and
- * status classification.
- * @summary Scan 30 triangular cycles using L2 order book depth (v15)
+ * Fetches the v17 order book hunter scan — all simulatable triangular cycles
+ * across 21 assets, simulated using actual L2 depth from Kraken, with
+ * slippage, confidence, status classification, and optional volatility filter.
+ * @summary Scan triangular cycles across 21 assets using L2 order book depth (v17)
  */
 export const getObScan = async (
   tradeSizeUsd?: number,
   feesPct?: number,
   minProfitUsd?: number,
   maxSlippagePct?: number,
+  volatilityFilter?: boolean,
   options?: RequestInit,
 ): Promise<ObScanResult> =>
-  customFetch<ObScanResult>(getObScanUrl(tradeSizeUsd, feesPct, minProfitUsd, maxSlippagePct), { ...options, method: "GET" });
+  customFetch<ObScanResult>(getObScanUrl(tradeSizeUsd, feesPct, minProfitUsd, maxSlippagePct, volatilityFilter), { ...options, method: "GET" });
 
-export const getObScanQueryKey = (tradeSizeUsd?: number, feesPct?: number, minProfitUsd?: number, maxSlippagePct?: number) =>
-  [`/api/arb/ob-scan`, tradeSizeUsd, feesPct, minProfitUsd, maxSlippagePct] as const;
+export const getObScanQueryKey = (tradeSizeUsd?: number, feesPct?: number, minProfitUsd?: number, maxSlippagePct?: number, volatilityFilter?: boolean) =>
+  [`/api/arb/ob-scan`, tradeSizeUsd, feesPct, minProfitUsd, maxSlippagePct, volatilityFilter] as const;
 
 export const getObScanQueryOptions = <
   TData = Awaited<ReturnType<typeof getObScan>>,
@@ -675,12 +678,13 @@ export const getObScanQueryOptions = <
   feesPct?: number,
   minProfitUsd?: number,
   maxSlippagePct?: number,
+  volatilityFilter?: boolean,
   options?: { query?: UseQueryOptions<Awaited<ReturnType<typeof getObScan>>, TError, TData>; request?: SecondParameter<typeof customFetch> },
 ): UseQueryOptions<Awaited<ReturnType<typeof getObScan>>, TError, TData> & { queryKey: QueryKey } => {
   const { query: queryOptions, request: requestOptions } = options ?? {};
-  const queryKey = queryOptions?.queryKey ?? getObScanQueryKey(tradeSizeUsd, feesPct, minProfitUsd, maxSlippagePct);
+  const queryKey = queryOptions?.queryKey ?? getObScanQueryKey(tradeSizeUsd, feesPct, minProfitUsd, maxSlippagePct, volatilityFilter);
   const queryFn: QueryFunction<Awaited<ReturnType<typeof getObScan>>> = ({ signal }) =>
-    getObScan(tradeSizeUsd, feesPct, minProfitUsd, maxSlippagePct, { signal, ...requestOptions });
+    getObScan(tradeSizeUsd, feesPct, minProfitUsd, maxSlippagePct, volatilityFilter, { signal, ...requestOptions });
   return { queryKey, queryFn, ...queryOptions } as UseQueryOptions<Awaited<ReturnType<typeof getObScan>>, TError, TData> & { queryKey: QueryKey };
 };
 
@@ -688,7 +692,7 @@ export type GetObScanQueryResult = NonNullable<Awaited<ReturnType<typeof getObSc
 export type GetObScanQueryError = ErrorType<ErrorResponse>;
 
 /**
- * @summary Scan 30 triangular cycles using L2 order book depth (v15 port)
+ * @summary Scan triangular cycles across 21 assets using L2 order book depth (v17 port)
  */
 export const useGetObScan = <
   TData = Awaited<ReturnType<typeof getObScan>>,
@@ -698,9 +702,10 @@ export const useGetObScan = <
   feesPct?: number,
   minProfitUsd?: number,
   maxSlippagePct?: number,
+  volatilityFilter?: boolean,
   options?: { query?: UseQueryOptions<Awaited<ReturnType<typeof getObScan>>, TError, TData>; request?: SecondParameter<typeof customFetch> },
 ): UseQueryResult<TData, TError> & { queryKey: QueryKey } => {
-  const queryOptions = getObScanQueryOptions(tradeSizeUsd, feesPct, minProfitUsd, maxSlippagePct, options);
+  const queryOptions = getObScanQueryOptions(tradeSizeUsd, feesPct, minProfitUsd, maxSlippagePct, volatilityFilter, options);
   const query = useQuery(queryOptions) as UseQueryResult<TData, TError> & { queryKey: QueryKey };
   return withQueryKey(query, queryOptions.queryKey);
 };

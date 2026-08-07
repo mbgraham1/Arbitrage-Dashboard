@@ -590,8 +590,8 @@ const OB_STATUS_META: Record<string, { label: string; className: string }> = {
 };
 
 function OrderBookHunterCard() {
-  const { data, isLoading } = useGetObScan(10, 0.5, 0.05, 0.5, {
-    query: { queryKey: getObScanQueryKey(10, 0.5, 0.05, 0.5), refetchInterval: 5_000, staleTime: 4_000 },
+  const { data, isLoading } = useGetObScan(10, 0.5, 0.05, 0.5, true, {
+    query: { queryKey: getObScanQueryKey(10, 0.5, 0.05, 0.5, true), refetchInterval: 5_000, staleTime: 4_000 },
   });
 
   const cycles: ObCycleEntry[] = data?.cycles ?? [];
@@ -602,7 +602,7 @@ function OrderBookHunterCard() {
         <CardTitle className="text-sm flex items-center gap-2">
           <BookOpen className="h-4 w-4" /> Order Book Hunter
           <span className="text-[10px] font-mono text-muted-foreground font-normal">
-            v16 · Wide-Net · $10 · 10 assets · 90 routes
+            v17 · 420-Route · $10 · 21 assets
           </span>
           {data && data.readyCount > 0 && (
             <span className="text-[9px] font-mono font-bold px-1 border border-success text-success animate-pulse">
@@ -612,7 +612,7 @@ function OrderBookHunterCard() {
         </CardTitle>
         <div className="flex items-center gap-2 text-[10px] font-mono text-muted-foreground">
           {isLoading && <RefreshCw className="h-3 w-3 animate-spin" />}
-          {data && `${data.pairsScanned}/${data.pairsRequested} pairs · ${data.cycles.length} cycles ranked`}
+          {data && `${data.activeAssets.length} active assets · ${data.pairsScanned}/${data.pairsRequested} pairs · ${data.cycles.length} cycles ranked`}
         </div>
       </CardHeader>
       <CardContent className="px-0 pb-0">
@@ -629,7 +629,7 @@ function OrderBookHunterCard() {
             <table className="w-full text-xs font-mono border-collapse">
               <thead>
                 <tr className="border-b-2 border-border bg-muted/50">
-                  {["#", "Route", "Net Profit", "Profit %", "Slippage", "Status", "Vol A"].map(h => (
+                  {["#", "Route", "Net Profit", "Profit %", "Slippage", "Confidence", "Status", "Vol A"].map(h => (
                     <th key={h} className="text-left px-3 py-2 text-[10px] uppercase font-bold text-muted-foreground whitespace-nowrap">{h}</th>
                   ))}
                 </tr>
@@ -653,6 +653,9 @@ function OrderBookHunterCard() {
                       <td className={cn("px-3 py-1.5", c.slippagePct > (data?.maxSlippagePct ?? 0.5) ? "text-amber-500" : "text-muted-foreground")}>
                         {c.slippagePct.toFixed(2)}%
                       </td>
+                      <td className={cn("px-3 py-1.5", c.confidencePct >= 80 ? "text-success" : c.confidencePct >= 40 ? "text-amber-500" : "text-destructive")}>
+                        {c.confidencePct}%
+                      </td>
                       <td className="px-3 py-1.5">
                         <span className={cn("text-[9px] font-bold px-1 border whitespace-nowrap", meta.className)}>{meta.label}</span>
                       </td>
@@ -666,7 +669,7 @@ function OrderBookHunterCard() {
             </table>
             {data && (
               <div className="px-3 py-2 text-[10px] font-mono text-muted-foreground border-t border-border/50">
-                Trade size: ${data.tradeSizeUsd} · Fees: {data.feesPct}% · Min profit: ${data.minProfitUsd} · Max slippage: {data.maxSlippagePct}% · Scanned: {format(new Date(data.scannedAt), "HH:mm:ss")}
+                Trade size: ${data.tradeSizeUsd} · Fees: {data.feesPct}% · Min profit: ${data.minProfitUsd} · Max slippage: {data.maxSlippagePct}% · Volatility filter: {data.volatilityFilter ? `on (${data.activeAssets.length}/21 moving)` : "off"} · Scanned: {format(new Date(data.scannedAt), "HH:mm:ss")}
               </div>
             )}
           </div>
