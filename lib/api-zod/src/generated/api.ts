@@ -349,6 +349,39 @@ export const ObExecuteBody = zod.object({
   "isDryRun": zod.boolean().default(obExecuteBodyIsDryRunDefault)
 })
 
+/**
+ * Execute the top (or a named) Opportunity Engine route. Re-runs a fresh graph
+ * scan (pre-flight); only executes when fresh net profit clears minProfitUsd.
+ * Kraken-only triangles reuse the ob-execute 3-leg limit machinery; cross-exchange
+ * inventory routes (buy on one venue, sell on the other) place both market orders.
+ * @summary Manually execute an Opportunity Engine route
+ */
+export const graphExecuteBodyTradeSizeUsdDefault = 10;
+export const graphExecuteBodyIsDryRunDefault = true;
+
+export const GraphExecuteBody = zod.object({
+  "krakenKey": zod.string(),
+  "krakenSecret": zod.string(),
+  "coinbaseKey": zod.string().optional(),
+  "coinbaseSecret": zod.string().optional(),
+  "routeDescription": zod.string().optional().describe('Exact route description to execute; omitted = fresh top route'),
+  "tradeSizeUsd": zod.number().default(graphExecuteBodyTradeSizeUsdDefault),
+  "krakenFeesPct": zod.number().default(0.16),
+  "coinbaseFeesPct": zod.number().default(0.4),
+  "minProfitUsd": zod.number().default(0.02),
+  "isDryRun": zod.boolean().default(graphExecuteBodyIsDryRunDefault)
+})
+
+export const GraphExecuteResponse = zod.object({
+  "success": zod.boolean(),
+  "isDryRun": zod.boolean(),
+  "executed": zod.boolean(),
+  "route": zod.string(),
+  "preflightProfitUsd": zod.number().nullish(),
+  "orderIds": zod.array(zod.string()).nullish(),
+  "error": zod.string().nullish()
+})
+
 export const ObExecuteResponse = zod.object({
   "success": zod.boolean(),
   "isDryRun": zod.boolean(),

@@ -9,6 +9,7 @@ import {
   ExecuteTradeBody,
   ExecuteTriangularBody,
   ObExecuteBody,
+  GraphExecuteBody,
   ListTradesQueryParams,
 } from "@workspace/api-zod";
 import {
@@ -27,6 +28,7 @@ import {
   coinbaseMarketOrder,
   coinbaseLimitOrder,
   coinbaseOrderFilled,
+  coinbaseOrderDetails,
   coinbaseFillPrice,
   coinbaseCancelOrder,
   PAIRS,
@@ -246,13 +248,32 @@ router.post("/arb/ob-execute", async (req, res): Promise<void> => {
     res.status(400).json({ error: parsed.error.message });
     return;
   }
-  const { krakenKey, krakenSecret, assetA, assetB, tradeSizeUsd, feesPct, minProfitUsd, isDryRun } = parsed.data;
+  const out = await runKrakenTriangle(parsed.data, req.log);
+  if (out.badRequest) { res.status(400).json({ error: out.badRequest }); return; }
+  res.json(out.body);
+});
+
+// Shared core for ob-execute and graph-execute (Kraken-only triangles).
+interface TriangleExecInput {
+  krakenKey: string; krakenSecret: string;
+  assetA: string; assetB: string;
+  tradeSizeUsd: number; feesPct: number; minProfitUsd: number; isDryRun: boolean;
+}
+interface TriangleExecOut { badRequest?: string; body?: Record<string, unknown>; }
+type ReqLog = { info: (o: unknown, m?: string) => void; error: (o: unknown, m?: string) => void };
+
+/** Sell-leg failure carrying the UNSOLD residual (base units) needing unwind. */
+class ResidualError extends Error {
+  constructor(message: string, public readonly residual: number) { super(message); }
+}
+
+async function runKrakenTriangle(input: TriangleExecInput, reqLog: ReqLog): Promise<TriangleExecOut> {
+  const { krakenKey, krakenSecret, assetA, assetB, tradeSizeUsd, feesPct, minProfitUsd, isDryRun } = input;
   const creds = { krakenKey, krakenSecret };
   const route = `USD→${assetA}→${assetB}→USD`;
 
   if (!(OB_ASSETS as readonly string[]).includes(assetA) || !(OB_ASSETS as readonly string[]).includes(assetB)) {
-    res.status(400).json({ error: `Unknown asset(s): ${assetA}/${assetB}` });
-    return;
+    return { badRequest: `Unknown asset(s): ${assetA}/${assetB}` };
   }
 
   try {
@@ -267,15 +288,13 @@ router.post("/arb/ob-execute", async (req, res): Promise<void> => {
     // 1. Fresh pre-flight (cache bypassed, depth 10)
     const pf = await preflightObCycle(assetA as ObAsset, assetB as ObAsset, tradeSizeUsd, effectiveFeesPct);
     if (!pf) {
-      res.json({ success: false, isDryRun, executed: false, route, preflightProfitUsd: null, error: "Could not fetch fresh order books (or depth can't absorb the size)." });
-      return;
+      return { body: { success: false, isDryRun, executed: false, route, preflightProfitUsd: null, error: "Could not fetch fresh order books (or depth can't absorb the size)." } };
     }
     // Execution gate: fresh profit AFTER FEES must clear the caller's
     // minProfitUsd floor (flat USD, not scaled by trade size).
     const threshold = minProfitUsd;
     if (pf.profitUsd <= threshold) {
-      res.json({ success: false, isDryRun, executed: false, route, preflightProfitUsd: pf.profitUsd, error: `Pre-flight failed — fresh profit after ${effectiveFeesPct.toFixed(2)}%/leg fees${actualFeePct != null ? " (your actual Kraken tier)" : ""} is $${pf.profitUsd.toFixed(4)} ≤ minimum $${threshold.toFixed(4)}.` });
-      return;
+      return { body: { success: false, isDryRun, executed: false, route, preflightProfitUsd: pf.profitUsd, error: `Pre-flight failed — fresh profit after ${effectiveFeesPct.toFixed(2)}%/leg fees${actualFeePct != null ? " (your actual Kraken tier)" : ""} is $${pf.profitUsd.toFixed(4)} ≤ minimum $${threshold.toFixed(4)}.` } };
     }
 
     // 2. Dry run — record a ledger row, no orders
@@ -291,16 +310,15 @@ router.post("/arb/ob-execute", async (req, res): Promise<void> => {
         krakenPrice: "0",
         coinbasePrice: "0",
       });
-      req.log.info({ route, tradeSizeUsd, profit: pf.profitUsd }, "OB manual execute (dry run)");
-      res.json({ success: true, isDryRun: true, executed: true, route, preflightProfitUsd: pf.profitUsd, leg1OrderId: null, leg2OrderId: null, leg3OrderId: null });
-      return;
+      reqLog.info({ route, tradeSizeUsd, profit: pf.profitUsd }, "OB manual execute (dry run)");
+      return { body: { success: true, isDryRun: true, executed: true, route, preflightProfitUsd: pf.profitUsd, leg1OrderId: null, leg2OrderId: null, leg3OrderId: null } };
     }
 
     // 3. Live — three sequential market orders. Each leg must FULLY fill or
     //    the execution aborts and unwinds the ACTUAL residual positions
     //    (queried from the exchange, never assumed from the plan). Success is
     //    only reported when the position ends flat.
-    const log = { info: (m: string) => req.log.info(m), error: (m: string) => req.log.error(m) };
+    const log = { info: (m: string) => reqLog.info(m), error: (m: string) => reqLog.error(m) };
     const [l1, l2, l3] = pf.legs;
     const cross = CROSS_LOOKUP.get(`${assetA}-${assetB}`)!; // validated by pre-flight
     const pairA = OB_USD_PAIRS[assetA as ObAsset];
@@ -417,11 +435,256 @@ router.post("/arb/ob-execute", async (req, res): Promise<void> => {
       buyOrderId: leg1Id || null,
       sellOrderId: leg3Id || null,
     });
-    req.log.info({ route, tradeSizeUsd, realizedProfit, usdSpent, usdReceived, totalFees, leg1Id, leg2Id, leg3Id }, "OB manual execute LIVE");
-    res.json({ success: true, isDryRun: false, executed: true, route, preflightProfitUsd: realizedProfit, leg1OrderId: leg1Id, leg2OrderId: leg2Id, leg3OrderId: leg3Id });
+    reqLog.info({ route, tradeSizeUsd, realizedProfit, usdSpent, usdReceived, totalFees, leg1Id, leg2Id, leg3Id }, "OB manual execute LIVE");
+    return { body: { success: true, isDryRun: false, executed: true, route, preflightProfitUsd: realizedProfit, leg1OrderId: leg1Id, leg2OrderId: leg2Id, leg3OrderId: leg3Id } };
   } catch (err) {
-    req.log.error({ err, route }, "OB manual execute error");
-    res.json({ success: false, isDryRun, executed: false, route, preflightProfitUsd: null, error: (err as Error).message });
+    reqLog.error({ err, route }, "OB manual execute error");
+    return { body: { success: false, isDryRun, executed: false, route, preflightProfitUsd: null, error: (err as Error).message } };
+  }
+}
+
+// ── POST /arb/graph-execute ───────────────────────────────────────────────────
+// Execute button for the Opportunity Engine. Re-runs a FRESH graph scan
+// (pre-flight), locates the requested route (or the top route), and gates on
+// fresh net profit > minProfitUsd. Two executable shapes:
+//   • Kraken-only triangle (3 kraken hops) — delegates to the same 3-leg
+//     post-only limit machinery as ob-execute (full-fill confirm + unwind).
+//   • Cross-exchange inventory route (2 real hops + bridge, e.g.
+//     USD[K]→X[K]→X[CB]→USD[CB]) — buys X on one venue and sells X on the
+//     other simultaneously (market orders; requires inventory on both venues).
+// Anything else executes as dry-run only.
+router.post("/arb/graph-execute", async (req, res): Promise<void> => {
+  const parsed = GraphExecuteBody.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: parsed.error.message });
+    return;
+  }
+  const { krakenKey, krakenSecret, coinbaseKey, coinbaseSecret, routeDescription, isDryRun } = parsed.data;
+  // Server-side safety bounds — never trust client numbers for live orders:
+  // finite positive size, non-negative fees, and (live only) a non-negative
+  // profit floor so a negative minProfitUsd can't push a losing route through.
+  const tradeSizeUsd    = Math.min(100_000, Math.max(1, Number.isFinite(parsed.data.tradeSizeUsd) ? parsed.data.tradeSizeUsd : 10));
+  const krakenFeesPct   = Math.max(0, Number.isFinite(parsed.data.krakenFeesPct)   ? parsed.data.krakenFeesPct   : 0.16);
+  const coinbaseFeesPct = Math.max(0, Number.isFinite(parsed.data.coinbaseFeesPct) ? parsed.data.coinbaseFeesPct : 0.40);
+  const minProfitUsd    = isDryRun ? parsed.data.minProfitUsd : Math.max(0, parsed.data.minProfitUsd);
+  const asset = (node: string) => node.split(":")[1] ?? node;
+
+  try {
+    // 1. Fresh pre-flight scan
+    const scan = await scanGraphOpportunities(tradeSizeUsd, krakenFeesPct, coinbaseFeesPct, 4);
+    const route = routeDescription
+      ? scan.routes.find(r => r.description === routeDescription)
+      : scan.routes[0];
+    if (!route) {
+      res.json({ success: false, isDryRun, executed: false, route: routeDescription ?? "(top route)", preflightProfitUsd: null, error: "Route no longer present in a fresh scan — prices moved." });
+      return;
+    }
+    // 2. Gate on fresh net profit
+    if (route.netProfitUsd <= minProfitUsd) {
+      res.json({ success: false, isDryRun, executed: false, route: route.description, preflightProfitUsd: route.netProfitUsd, error: `Pre-flight failed — fresh net profit $${route.netProfitUsd.toFixed(4)} ≤ minimum $${minProfitUsd.toFixed(4)}.` });
+      return;
+    }
+
+    const realHops = route.hops.filter(h => h.exchange !== "bridge");
+    const isKrakenTriangle = route.hops.length === 3 && realHops.length === 3 && realHops.every(h => h.exchange === "kraken");
+    const isCrossInventory = realHops.length === 2 && route.hops.length === 3 &&
+      realHops[0]!.side === "buy" && realHops[1]!.side === "sell" &&
+      asset(realHops[0]!.to) === asset(realHops[1]!.from);
+
+    // 3a. Kraken-only triangle → same machinery as ob-execute (incl. its own
+    //     fresh order-book pre-flight, actual fee tier, fill confirm, unwind).
+    if (isKrakenTriangle) {
+      const out = await runKrakenTriangle({
+        krakenKey, krakenSecret,
+        assetA: asset(route.hops[0]!.to),
+        assetB: asset(route.hops[1]!.to),
+        tradeSizeUsd, feesPct: krakenFeesPct, minProfitUsd, isDryRun,
+      }, req.log);
+      if (out.badRequest) { res.status(400).json({ error: out.badRequest }); return; }
+      const b = out.body!;
+      res.json({ success: b["success"], isDryRun: b["isDryRun"], executed: b["executed"], route: route.description, preflightProfitUsd: b["preflightProfitUsd"], orderIds: [b["leg1OrderId"], b["leg2OrderId"], b["leg3OrderId"]].filter(Boolean), error: b["error"] ?? null });
+      return;
+    }
+
+    // 3b. Dry run (any shape) — ledger row, no orders
+    if (isDryRun) {
+      await db.insert(tradesTable).values({
+        pair: route.description,
+        buyExchange: realHops[0]?.exchange ?? "kraken",
+        sellExchange: realHops[realHops.length - 1]?.exchange ?? "kraken",
+        volumeSol: (realHops[0]?.amountOut ?? 0).toFixed(8),
+        estimatedProfitUsd: route.netProfitUsd.toFixed(6),
+        netEdgePct: route.profitPct.toFixed(4),
+        isDryRun: true,
+        krakenPrice: "0",
+        coinbasePrice: "0",
+      });
+      req.log.info({ route: route.description, tradeSizeUsd, profit: route.netProfitUsd }, "Graph execute (dry run)");
+      res.json({ success: true, isDryRun: true, executed: true, route: route.description, preflightProfitUsd: route.netProfitUsd, orderIds: [] });
+      return;
+    }
+
+    // 3c. Live cross-exchange inventory route — SEQUENTIAL confirmed legs.
+    //     Buy first, confirm the actual fill, then sell the FILLED amount on
+    //     the other venue. If the sell leg fails, unwind the buy on its own
+    //     venue so the position ends flat. Never report success on an
+    //     unconfirmed order.
+    if (!isCrossInventory) {
+      res.json({ success: false, isDryRun: false, executed: false, route: route.description, preflightProfitUsd: route.netProfitUsd, error: "Live execution supports Kraken triangles and 2-leg cross-exchange inventory routes only. Run as dry-run to record the opportunity." });
+      return;
+    }
+    const [buyHop, sellHop] = [realHops[0]!, realHops[1]!];
+    if ((buyHop.exchange === "coinbase" || sellHop.exchange === "coinbase") && (!coinbaseKey || !coinbaseSecret)) {
+      res.json({ success: false, isDryRun: false, executed: false, route: route.description, preflightProfitUsd: route.netProfitUsd, error: "Coinbase API credentials are required for this cross-exchange route." });
+      return;
+    }
+    const cbCreds = { coinbaseKey: coinbaseKey ?? "", coinbaseSecret: coinbaseSecret ?? "" };
+    const kCreds  = { krakenKey, krakenSecret };
+    const log = { info: (m: string) => req.log.info(m), error: (m: string) => req.log.error(m) };
+    const plannedVolume = buyHop.amountOut; // base units the route expects to acquire
+
+    // Poll Kraken market order until closed (markets fill fast; 15 s cap).
+    const waitKrakenFill = async (txid: string) => {
+      for (let i = 0; i < 30; i++) {
+        await new Promise(r => setTimeout(r, 500));
+        try {
+          const info = await krakenOrderInfo(kCreds, txid);
+          if (info.status === "closed" || info.status === "canceled" || info.status === "expired") return info;
+        } catch { /* transient — keep polling */ }
+      }
+      return { status: "unknown", volExec: 0, price: 0, cost: 0, fee: 0 };
+    };
+    // Poll Coinbase order to a terminal state (15 s cap), then return details
+    // with CUMULATIVE BASE fills — never assume quantity from a status flag.
+    const CB_TERMINAL = new Set(["FILLED", "CANCELLED", "EXPIRED", "FAILED"]);
+    const waitCoinbaseFill = async (orderId: string) => {
+      for (let i = 0; i < 30; i++) {
+        await new Promise(r => setTimeout(r, 500));
+        try {
+          const d = await coinbaseOrderDetails(cbCreds, orderId);
+          if (CB_TERMINAL.has(d.status)) return d;
+        } catch { /* keep polling */ }
+      }
+      // Timed out — cancel, then read FINAL fills (a partial fill may exist).
+      try { await coinbaseCancelOrder(cbCreds, orderId); } catch { /* best effort */ }
+      try { return await coinbaseOrderDetails(cbCreds, orderId); }
+      catch { return { status: "UNKNOWN", filledSize: 0, filledValue: 0, avgPrice: 0 }; }
+    };
+    // Failure ledger row — persisted whenever ANY order was accepted, so
+    // manual reconciliation always has the order ids and actual volume.
+    let buyOrderId = "", sellOrderId = "";
+    let anyAccepted = false;
+    const recordFailure = async (volume: number, note: string) => {
+      try {
+        await db.insert(tradesTable).values({
+          pair: `${route.description} [FAILED: ${note.slice(0, 120)}]`,
+          buyExchange: buyHop.exchange,
+          sellExchange: sellHop.exchange,
+          volumeSol: volume.toFixed(8),
+          estimatedProfitUsd: "0",
+          netEdgePct: "0",
+          isDryRun: false,
+          krakenPrice: "0",
+          coinbasePrice: "0",
+          buyOrderId: buyOrderId || null,
+          sellOrderId: sellOrderId || null,
+        });
+      } catch (e) { log.error(`Failed to write failure ledger row: ${(e as Error).message}`); }
+    };
+
+    let filledVolume = 0;
+    try {
+      // ── Buy leg: place, confirm acceptance AND fill, learn ACTUAL volume ───
+      if (buyHop.exchange === "kraken") {
+        const r = await krakenRawMarketOrder(kCreds, "buy", plannedVolume, buyHop.pair);
+        buyOrderId = r.txid[0] ?? "";
+        if (!buyOrderId) throw new Error("Kraken buy order was not accepted (no txid returned) — nothing executed.");
+        anyAccepted = true;
+        const fill = await waitKrakenFill(buyOrderId);
+        filledVolume = fill.volExec;
+        if (fill.status !== "closed" || filledVolume <= 0) {
+          if (filledVolume > 0) await tryUnwindMarket(kCreds, "sell", filledVolume, buyHop.pair, "sell partial buy-leg fill (graph cross)", log);
+          throw new Error(`Kraken buy leg did not fully fill (status ${fill.status}, ${filledVolume.toFixed(8)}/${plannedVolume.toFixed(8)}); partial fill unwound. Nothing sold.`);
+        }
+      } else {
+        const r = await coinbaseMarketOrder(cbCreds, "BUY", plannedVolume, buyHop.limitPrice, buyHop.pair as Pair);
+        buyOrderId = r.orderId ?? "";
+        if (!buyOrderId || r.success === false) throw new Error("Coinbase buy order was rejected (no order id) — nothing executed.");
+        anyAccepted = true;
+        const d = await waitCoinbaseFill(buyOrderId);
+        filledVolume = d.filledSize; // ACTUAL base units acquired (never assumed)
+        if (d.status !== "FILLED") {
+          if (filledVolume > 0) {
+            // Partial fill exists — neutralize it on Coinbase.
+            try { await coinbaseMarketOrder(cbCreds, "SELL", filledVolume, buyHop.limitPrice, buyHop.pair as Pair); }
+            catch (e) { log.error(`Coinbase partial-buy unwind failed — MANUAL REBALANCE NEEDED (${filledVolume.toFixed(8)} ${buyHop.pair}): ${(e as Error).message}`); }
+          }
+          throw new Error(`Coinbase buy order ${buyOrderId} ended ${d.status} with ${filledVolume.toFixed(8)}/${plannedVolume.toFixed(8)} filled; partial fill unwound. Nothing sold.`);
+        }
+      }
+
+      // ── Sell leg: sell the ACTUAL filled volume on the other venue ─────────
+      try {
+        if (sellHop.exchange === "kraken") {
+          const r = await krakenRawMarketOrder(kCreds, "sell", filledVolume, sellHop.pair);
+          sellOrderId = r.txid[0] ?? "";
+          if (!sellOrderId) throw new Error("Kraken sell order was not accepted (no txid returned).");
+          const fill = await waitKrakenFill(sellOrderId);
+          if (fill.status !== "closed" || fill.volExec < filledVolume * 0.999) {
+            // Only the UNSOLD remainder is residual exposure.
+            const residual = Math.max(0, filledVolume - fill.volExec);
+            throw new ResidualError(`Kraken sell leg did not fully fill (status ${fill.status}, ${fill.volExec.toFixed(8)}/${filledVolume.toFixed(8)}).`, residual);
+          }
+        } else {
+          const r = await coinbaseMarketOrder(cbCreds, "SELL", filledVolume, sellHop.limitPrice, sellHop.pair as Pair);
+          sellOrderId = r.orderId ?? "";
+          if (!sellOrderId || r.success === false) throw new Error("Coinbase sell order was rejected (no order id).");
+          const d = await waitCoinbaseFill(sellOrderId);
+          if (d.status !== "FILLED") {
+            const residual = Math.max(0, filledVolume - d.filledSize);
+            throw new ResidualError(`Coinbase sell order ${sellOrderId} ended ${d.status} with ${d.filledSize.toFixed(8)}/${filledVolume.toFixed(8)} sold.`, residual);
+          }
+        }
+      } catch (sellErr) {
+        // Neutralize ONLY the unsold residual on the BUY venue (the sold part
+        // already left the sell venue's inventory as intended).
+        const residual = sellErr instanceof ResidualError ? sellErr.residual : filledVolume;
+        if (residual > 0) {
+          if (buyHop.exchange === "kraken") {
+            await tryUnwindMarket(kCreds, "sell", residual, buyHop.pair, "unwind residual after sell-leg failure (graph cross)", log);
+          } else {
+            try { await coinbaseMarketOrder(cbCreds, "SELL", residual, buyHop.limitPrice, buyHop.pair as Pair); }
+            catch (e) { log.error(`Coinbase unwind failed — MANUAL REBALANCE NEEDED (${residual.toFixed(8)}): ${(e as Error).message}`); }
+          }
+        }
+        throw new Error(`Sell leg failed: ${(sellErr as Error).message} Residual ${residual.toFixed(8)} unwound on ${buyHop.exchange} — verify balances on both venues.`);
+      }
+    } catch (execErr) {
+      const msg = (execErr as Error).message;
+      if (anyAccepted) await recordFailure(filledVolume, msg);
+      req.log.error({ route: route.description, buyOrderId, sellOrderId, filledVolume, err: msg }, "Graph execute LIVE — failed");
+      res.json({ success: false, isDryRun: false, executed: anyAccepted, route: route.description, preflightProfitUsd: route.netProfitUsd, orderIds: [buyOrderId, sellOrderId].filter(Boolean), error: msg });
+      return;
+    }
+
+    await db.insert(tradesTable).values({
+      pair: route.description,
+      buyExchange: buyHop.exchange,
+      sellExchange: sellHop.exchange,
+      volumeSol: filledVolume.toFixed(8),
+      estimatedProfitUsd: route.netProfitUsd.toFixed(6),
+      netEdgePct: route.profitPct.toFixed(4),
+      isDryRun: false,
+      krakenPrice: "0",
+      coinbasePrice: "0",
+      buyOrderId: buyOrderId || null,
+      sellOrderId: sellOrderId || null,
+    });
+    req.log.info({ route: route.description, tradeSizeUsd, filledVolume, buyOrderId, sellOrderId }, "Graph execute LIVE — both legs confirmed filled");
+    res.json({ success: true, isDryRun: false, executed: true, route: route.description, preflightProfitUsd: route.netProfitUsd, orderIds: [buyOrderId, sellOrderId] });
+  } catch (err) {
+    req.log.error({ err }, "graph-execute error");
+    res.json({ success: false, isDryRun, executed: false, route: routeDescription ?? "(top route)", preflightProfitUsd: null, error: (err as Error).message });
   }
 });
 

@@ -390,6 +390,66 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
 
+  /arb/graph-scan:
+    get:
+      operationId: getGraphScan
+      tags: [trades]
+      summary: Multi-exchange graph opportunity scan
+      description: >
+        Builds a directed graph over Kraken (34 assets + verified cross pairs)
+        and Coinbase (shared assets), DFS-searches all USD→…→USD cycles up to
+        maxHops, and ranks routes by net profit after per-leg fees.
+      parameters:
+        - { name: tradeSizeUsd,    in: query, schema: { type: number, default: 10 } }
+        - { name: krakenFeesPct,   in: query, schema: { type: number, default: 0.16 } }
+        - { name: coinbaseFeesPct, in: query, schema: { type: number, default: 0.4 } }
+        - { name: maxHops,         in: query, schema: { type: integer, default: 4 } }
+      responses:
+        "200":
+          description: Ranked routes
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GraphScanResult"
+        "500":
+          description: Scan error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /arb/graph-execute:
+    post:
+      operationId: graphExecute
+      tags: [trades]
+      summary: Manually execute an Opportunity Engine route
+      description: >
+        Re-runs a fresh graph scan (pre-flight), locates the requested route
+        (or the top route), and gates on fresh net profit > minProfitUsd.
+        Kraken-only triangles reuse the ob-execute 3-leg post-only limit
+        machinery (fill confirm + unwind); 2-leg cross-exchange inventory
+        routes place both market orders in parallel (requires inventory on
+        both venues). Other shapes execute as dry-run only.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/GraphExecuteRequest"
+      responses:
+        "200":
+          description: Execution (or pre-flight rejection) result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GraphExecuteResult"
+        "400":
+          description: Bad request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
   /arb/execute-triangular:
     post:
       operationId: executeTriangular
@@ -899,6 +959,82 @@ components:
         isDryRun:
           type: boolean
           default: true
+
+    GraphRouteHop:
+      type: object
+      required: [from, to, exchange, pair, side, amountIn, amountOut, feePct, limitPrice]
+      properties:
+        from: { type: string }
+        to: { type: string }
+        exchange: { type: string, enum: [kraken, coinbase, bridge] }
+        pair: { type: string }
+        side: { type: string, enum: [buy, sell, bridge] }
+        amountIn: { type: number }
+        amountOut: { type: number }
+        feePct: { type: number }
+        limitPrice: { type: number }
+
+    GraphRoute:
+      type: object
+      required: [hops, description, startUsd, grossProfitUsd, feeUsd, netProfitUsd, profitPct, slippagePct, status]
+      properties:
+        hops:
+          type: array
+          items: { $ref: "#/components/schemas/GraphRouteHop" }
+        description: { type: string }
+        startUsd: { type: number }
+        grossProfitUsd: { type: number }
+        feeUsd: { type: number }
+        netProfitUsd: { type: number }
+        profitPct: { type: number }
+        slippagePct: { type: number }
+        status: { type: string, enum: [VIABLE, REJECTED] }
+
+    GraphScanResult:
+      type: object
+      required: [routes, tradeSizeUsd, krakenFeesPct, coinbaseFeesPct, assetsScanned, routesEvaluated, scannedAt]
+      properties:
+        routes:
+          type: array
+          items: { $ref: "#/components/schemas/GraphRoute" }
+        tradeSizeUsd: { type: number }
+        krakenFeesPct: { type: number }
+        coinbaseFeesPct: { type: number }
+        assetsScanned: { type: integer }
+        routesEvaluated: { type: integer }
+        scannedAt: { type: string, format: date-time }
+
+    GraphExecuteRequest:
+      type: object
+      required: [krakenKey, krakenSecret]
+      properties:
+        krakenKey: { type: string }
+        krakenSecret: { type: string }
+        coinbaseKey: { type: string }
+        coinbaseSecret: { type: string }
+        routeDescription:
+          type: string
+          description: Exact route description to execute; omitted = fresh top route
+        tradeSizeUsd: { type: number, default: 10 }
+        krakenFeesPct: { type: number, default: 0.16 }
+        coinbaseFeesPct: { type: number, default: 0.4 }
+        minProfitUsd: { type: number, default: 0.02 }
+        isDryRun: { type: boolean, default: true }
+
+    GraphExecuteResult:
+      type: object
+      required: [success, isDryRun, executed, route]
+      properties:
+        success: { type: boolean }
+        isDryRun: { type: boolean }
+        executed: { type: boolean }
+        route: { type: string }
+        preflightProfitUsd: { type: number, nullable: true }
+        orderIds:
+          type: array
+          items: { type: string }
+          nullable: true
+        error: { type: string, nullable: true }
 
     ObExecuteResult:
       type: object

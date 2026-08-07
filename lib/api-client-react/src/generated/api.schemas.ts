@@ -367,6 +367,30 @@ export interface CointegrationScanResult {
   scannedAt: string;
 }
 
+export interface GraphExecuteRequest {
+  krakenKey: string;
+  krakenSecret: string;
+  coinbaseKey?: string;
+  coinbaseSecret?: string;
+  /** Exact route description to execute; omitted = fresh top route */
+  routeDescription?: string;
+  tradeSizeUsd?: number;
+  krakenFeesPct?: number;
+  coinbaseFeesPct?: number;
+  minProfitUsd?: number;
+  isDryRun?: boolean;
+}
+
+export interface GraphExecuteResult {
+  success: boolean;
+  isDryRun: boolean;
+  executed: boolean;
+  route: string;
+  preflightProfitUsd?: number | null;
+  orderIds?: string[] | null;
+  error?: string | null;
+}
+
 export interface ObExecuteRequest {
   krakenKey: string;
   krakenSecret: string;

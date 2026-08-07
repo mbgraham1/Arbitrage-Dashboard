@@ -1,2 +1,3 @@
 - [Kraken cross-pair orientation](kraken-pair-orientation.md) — orientation bug in Python bots; keep aIsQuote math. Also Ticker key/VWAP gotchas + verify pairs via AssetPairs.
 - [BUTTER fee model bug](butter-fee-model.md) — Python's `profit×(1−fee)` understates fees ~100x; fees apply per-leg on notional (~3×size×fee%). Caused real losses; check all ported profit math.
+- [Live order safety pattern](live-order-safety.md) — live legs must confirm acceptance + actual fill quantities (never status flags), unwind residuals, ledger failures, clamp client numbers.

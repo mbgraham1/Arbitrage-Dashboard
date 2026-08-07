@@ -29,6 +29,8 @@ import type {
   ExchangeCredentials,
   GetGraphScanParams,
   GetObScanParams,
+  GraphExecuteRequest,
+  GraphExecuteResult,
   GraphScanResult,
   HealthStatus,
   KrakenCredentials,
@@ -1273,6 +1275,25 @@ export function useGetGraphScan<TData = Awaited<ReturnType<typeof getGraphScan>>
   const query = useQuery(queryOptions) as UseQueryResult<TData, TError> & { queryKey: QueryKey };
   return withQueryKey(query, queryOptions.queryKey);
 }
+
+export const graphExecute = async (graphExecuteRequest: GraphExecuteRequest, options?: RequestInit): Promise<GraphExecuteResult> =>
+  customFetch<GraphExecuteResult>(`/api/arb/graph-execute`, {
+    ...options,
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...options?.headers },
+    body: JSON.stringify(graphExecuteRequest),
+  });
+
+export const useGraphExecute = <TError = ErrorType<ErrorResponse>, TContext = unknown>(
+  options?: { mutation?: UseMutationOptions<Awaited<ReturnType<typeof graphExecute>>, TError, { data: BodyType<GraphExecuteRequest> }, TContext>; request?: SecondParameter<typeof customFetch> },
+): UseMutationResult<Awaited<ReturnType<typeof graphExecute>>, TError, { data: BodyType<GraphExecuteRequest> }, TContext> => {
+  const { mutation: mutationOptions, request: requestOptions } = options ?? {};
+  const mutationFn: MutationFunction<Awaited<ReturnType<typeof graphExecute>>, { data: BodyType<GraphExecuteRequest> }> = (props) => {
+    const { data } = props ?? {};
+    return graphExecute(data, requestOptions);
+  };
+  return useMutation({ mutationKey: ['graphExecute'], mutationFn, ...mutationOptions });
+};
 
 export const getGetTradeSummaryQueryKey = () => {
     return [

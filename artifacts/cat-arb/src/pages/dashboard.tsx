@@ -8,7 +8,7 @@ import {
 } from "lucide-react";
 import { format } from "date-fns";
 import { cn } from "@/lib/utils";
-import { useGetTradeSummary, useListTrades, useScanAllPairs, useGetObScan, getGetObScanQueryKey, useObExecute, useGetAllPairSnapshots, getGetAllPairSnapshotsQueryKey, useGetGraphScan, getGetGraphScanQueryKey, TradeRecord, PairScanEntry, ObCycleEntry, AllPairSnapshot, GraphRoute, GraphRouteHop } from "@workspace/api-client-react";
+import { useGetTradeSummary, useListTrades, useScanAllPairs, useGetObScan, getGetObScanQueryKey, useObExecute, useGetAllPairSnapshots, getGetAllPairSnapshotsQueryKey, useGetGraphScan, getGetGraphScanQueryKey, useGraphExecute, TradeRecord, PairScanEntry, ObCycleEntry, AllPairSnapshot, GraphRoute, GraphRouteHop } from "@workspace/api-client-react";
 
 // ── Small helpers ──────────────────────────────────────────────────────────────
 
@@ -1088,7 +1088,11 @@ function HopBadge({ hop }: { hop: GraphRouteHop }) {
 }
 
 function GraphEngineCard() {
-  const { settings } = useBotContext();
+  const { settings, credentials, liveMode, addLog } = useBotContext();
+  const executeMutation = useGraphExecute();
+  const [execResult, setExecResult] = useState<string | null>(null);
+  const [minProfitInput, setMinProfitInput] = useState("0.10");
+  const minProfit = Math.max(0, parseFloat(minProfitInput) || 0);
   const [sizeInput, setSizeInput] = useState(String(settings.obTradeSize));
   const [debouncedSize, setDebouncedSize] = useState(String(settings.obTradeSize));
   useEffect(() => {
@@ -1113,6 +1117,46 @@ function GraphEngineCard() {
   const breakEvenPct = topRoute
     ? ((topRoute.feeUsd / tradeSize) * 100).toFixed(3)
     : "—";
+  const canExecute = !!topRoute && !executeMutation.isPending;
+
+  const executeTopRoute = async () => {
+    if (!topRoute) return;
+    if (!credentials.krakenKey || !credentials.krakenSecret) {
+      addLog("warning", "[GRAPH·EXEC] Add Kraken credentials in Config first.");
+      setExecResult("❌ No Kraken credentials — add them in Config.");
+      return;
+    }
+    setExecResult(null);
+    addLog("trade", `[GRAPH·EXEC] ${topRoute.description} | $${tradeSize} | ${liveMode ? "LIVE" : "dry run"} — pre-flight…`);
+    try {
+      const r = await executeMutation.mutateAsync({
+        data: {
+          krakenKey: credentials.krakenKey,
+          krakenSecret: credentials.krakenSecret,
+          coinbaseKey: credentials.coinbaseKey || undefined,
+          coinbaseSecret: credentials.coinbaseSecret || undefined,
+          routeDescription: topRoute.description,
+          tradeSizeUsd: tradeSize,
+          krakenFeesPct: settings.obFeesPct,
+          coinbaseFeesPct: 0.40,
+          minProfitUsd: minProfit,
+          isDryRun: !liveMode,
+        },
+      });
+      if (r.success && r.executed) {
+        const profit = r.preflightProfitUsd ?? 0;
+        addLog("success", `[GRAPH·EXEC] ✅ ${r.route} | profit $${profit.toFixed(4)}${r.isDryRun ? " (dry run)" : ` | orders ${(r.orderIds ?? []).join(", ")}`}`);
+        setExecResult(`✅ Executed ${r.route} — $${profit.toFixed(4)}${r.isDryRun ? " (dry run, recorded to ledger)" : ""}`);
+      } else {
+        addLog("warning", `[GRAPH·EXEC] ❌ ${r.error ?? "Pre-flight failed."}`);
+        setExecResult(`❌ ${r.error ?? "Pre-flight failed — edge disappeared."}`);
+      }
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "Unknown error";
+      addLog("error", `[GRAPH·EXEC] Exception: ${msg}`);
+      setExecResult(`❌ ${msg}`);
+    }
+  };
 
   return (
     <Card className="mt-6">
@@ -1132,14 +1176,45 @@ function GraphEngineCard() {
               aria-label="Trade size USD"
             /> trade size
           </span>
+          <span className="flex items-center gap-1 text-[10px] font-mono font-normal text-muted-foreground">
+            min $<input
+              type="number" min={0} step={0.05}
+              value={minProfitInput}
+              onChange={e => setMinProfitInput(e.target.value)}
+              className="w-14 bg-transparent border border-border px-1 py-0.5 text-foreground focus:outline-none focus:border-primary"
+              aria-label="Minimum profit in USD to execute"
+            /> profit
+          </span>
         </CardTitle>
         <div className="flex items-center gap-2 text-[10px] font-mono text-muted-foreground">
           {isLoading && <RefreshCw className="h-3 w-3 animate-spin" />}
           {data && (
             <span>{data.assetsScanned} assets · {data.routesEvaluated} routes evaluated · {viable.length} viable</span>
           )}
+          <Button
+            size="sm"
+            variant={liveMode ? "destructive" : "outline"}
+            className="h-6 px-2 text-[10px] font-mono font-bold"
+            disabled={!canExecute}
+            onClick={executeTopRoute}
+            title={topRoute ? `Pre-flight + execute ${topRoute.description} at $${tradeSize}${liveMode ? " (LIVE ORDERS)" : " (dry run)"}` : "No route available"}
+          >
+            {executeMutation.isPending ? "EXECUTING…" : `🔴 EXECUTE TOP ROUTE${liveMode ? "" : " (DRY)"}`}
+          </Button>
         </div>
       </CardHeader>
+
+      {execResult && (
+        <div className={cn("px-3 py-2 text-[11px] font-mono border-b border-border/50", execResult.startsWith("✅") ? "text-success" : "text-destructive")}>
+          {execResult}
+          {topRoute && !execResult.startsWith("✅") && ` · Current best: ${topRoute.description} | $${topRoute.netProfitUsd.toFixed(4)}`}
+        </div>
+      )}
+      {!execResult && topRoute && topRoute.netProfitUsd <= minProfit && (
+        <div className="px-3 py-1.5 text-[10px] font-mono text-muted-foreground border-b border-border/50">
+          ⚠ Top route net profit ${topRoute.netProfitUsd.toFixed(4)} is below your ${minProfit.toFixed(2)} minimum — pre-flight will reject unless the edge improves.
+        </div>
+      )}
 
       {/* Fee diagnostic */}
       {data && topRoute && (
