@@ -1,9 +1,10 @@
 /**
- * price-cache.ts — v5.0 multi-exchange price aggregator
+ * price-cache.ts — v5.1 multi-exchange price aggregator
  *
  * • Maintains persistent WebSocket connections to Kraken (v2) and Coinbase Exchange
  * • Falls back to REST if WS price is stale (> 10 s)
  * • Polls Binance and KuCoin via REST on a background timer
+ * • Tracks ETH/USD and ETH/SOL for triangular arbitrage detection
  * • All reconnections are handled automatically
  */
 
@@ -11,6 +12,7 @@ import { getKrakenPrice, getCoinbasePrice } from "./exchange";
 
 const WS_STALE_MS = 15_000; // treat WS price as stale after 15 s (matches Python prices_fresh check)
 const BINANCE_KU_POLL_MS = 5_000; // REST poll interval for Binance + KuCoin
+const TRI_POLL_MS = 3_000;  // ETH/USD + ETH/SOL REST poll interval for triangular arb
 
 interface CacheEntry {
   price: number;   // mid/last — used for REST fallback and reference prices
@@ -25,6 +27,29 @@ const cache: { [K in "kraken" | "coinbase" | "binance" | "kucoin"]: CacheEntry |
   coinbase: null,
   binance: null,
   kucoin: null,
+};
+
+// ── Triangular arb price cache (ETH/USD and ETH/SOL per exchange) ──────────────
+interface TriEntry {
+  bid: number;
+  ask: number;
+  updatedAt: number;
+}
+
+const triCache: {
+  krakenEthUsd: TriEntry | null;
+  krakenEthSol: TriEntry | null;
+  coinbaseEthUsd: TriEntry | null;
+  coinbaseEthSol: TriEntry | null;
+  binanceEthUsd: TriEntry | null;
+  kucoinEthUsd: TriEntry | null;
+} = {
+  krakenEthUsd: null,
+  krakenEthSol: null,
+  coinbaseEthUsd: null,
+  coinbaseEthSol: null,
+  binanceEthUsd: null,
+  kucoinEthUsd: null,
 };
 
 // ── WebSocket helpers ──────────────────────────────────────────────────────────
@@ -72,6 +97,7 @@ function reconnectingWs(
 }
 
 // ── Kraken WebSocket (v2) ──────────────────────────────────────────────────────
+// Subscribes to SOL/USD, ETH/USD, and ETH/SOL in a single connection.
 
 function startKrakenWs(): void {
   reconnectingWs(
@@ -79,7 +105,7 @@ function startKrakenWs(): void {
     (ws) => {
       ws.send(JSON.stringify({
         method: "subscribe",
-        params: { channel: "ticker", symbol: ["SOL/USD"] },
+        params: { channel: "ticker", symbol: ["SOL/USD", "ETH/USD", "ETH/SOL"] },
       }));
     },
     (raw) => {
@@ -91,14 +117,21 @@ function startKrakenWs(): void {
           data?: Array<{ symbol?: string; last?: number; bid?: number; ask?: number }>;
         };
         // Accept both snapshot (initial) and update messages
-        if (msg.channel === "ticker" && (msg.type === "update" || msg.type === "snapshot") && msg.data?.[0] != null) {
-          const d = msg.data[0];
-          const bid = d.bid;
-          const ask = d.ask;
-          const last = d.last;
-          const mid = (bid != null && ask != null) ? (bid + ask) / 2 : (last ?? 0);
-          if (mid > 0) {
-            cache.kraken = { price: mid, bid: bid ?? mid, ask: ask ?? mid, updatedAt: Date.now(), source: "ws" };
+        if (msg.channel === "ticker" && (msg.type === "update" || msg.type === "snapshot") && msg.data != null) {
+          for (const d of msg.data) {
+            const bid = d.bid;
+            const ask = d.ask;
+            const last = d.last;
+            const mid = (bid != null && ask != null) ? (bid + ask) / 2 : (last ?? 0);
+            if (mid <= 0) continue;
+
+            if (d.symbol === "SOL/USD") {
+              cache.kraken = { price: mid, bid: bid ?? mid, ask: ask ?? mid, updatedAt: Date.now(), source: "ws" };
+            } else if (d.symbol === "ETH/USD") {
+              triCache.krakenEthUsd = { bid: bid ?? mid, ask: ask ?? mid, updatedAt: Date.now() };
+            } else if (d.symbol === "ETH/SOL") {
+              triCache.krakenEthSol = { bid: bid ?? mid, ask: ask ?? mid, updatedAt: Date.now() };
+            }
           }
         }
       } catch (e) { console.error(`[price-cache] Kraken WS message error: ${e}`); }
@@ -107,41 +140,91 @@ function startKrakenWs(): void {
   );
 }
 
-// ── Coinbase REST fast-poll (replaces Exchange WS which requires auth) ─────────
-// Polls Coinbase Advanced Trade best_bid_ask endpoint every 2 s so Coinbase
-// prices stay as fresh as a WS feed without needing a credentialed connection.
+// ── Coinbase REST fast-poll ────────────────────────────────────────────────────
+// The Coinbase Advanced Trade v3 brokerage/best_bid_ask endpoint requires auth.
+// We use two public fallbacks instead:
+//   • SOL/USD: api.coinbase.com/v2/prices/SOL-USD/spot  (spot mid only — no bid/ask)
+//   • ETH/USD: api.exchange.coinbase.com/products/ETH-USD/ticker  (has bid + ask)
+// ETH/SOL has no public Coinbase endpoint; we rely on synthetic derivation.
 
-async function fetchCoinbaseBestBidAsk(): Promise<void> {
+async function fetchCoinbaseSolUsd(): Promise<void> {
   try {
-    // Public endpoint — no auth required
-    const r = await fetch(
-      "https://api.coinbase.com/api/v3/brokerage/best_bid_ask?product_ids=SOL-USD",
-      { signal: AbortSignal.timeout(3_000) }
-    );
-    if (!r.ok) {
-      // Fall back to plain ticker REST
-      await getCoinbasePrice().then(p => {
-        cache.coinbase = { price: p, bid: p, ask: p, updatedAt: Date.now(), source: "ws" };
-      }).catch(() => {});
-      return;
-    }
-    const j = await r.json() as {
-      pricebooks?: Array<{ product_id: string; bids: Array<{ price: string }>; asks: Array<{ price: string }> }>;
-    };
-    const book = j.pricebooks?.find(b => b.product_id === "SOL-USD");
-    const bid = parseFloat(book?.bids?.[0]?.price ?? "0") || 0;
-    const ask = parseFloat(book?.asks?.[0]?.price ?? "0") || 0;
-    const mid = bid > 0 && ask > 0 ? (bid + ask) / 2 : bid || ask;
-    if (mid > 0) {
+    // Same endpoint getCoinbasePrice() uses — returns spot mid price
+    const r = await fetch("https://api.coinbase.com/v2/prices/SOL-USD/spot", {
+      signal: AbortSignal.timeout(3_000),
+    });
+    if (!r.ok) return;
+    const j = await r.json() as { data?: { amount?: string } };
+    const p = parseFloat(j.data?.amount ?? "0");
+    if (p > 0) {
       // Mark as "ws" so wsStatus.coinbase stays true — prices are fresh (≤2 s)
-      cache.coinbase = { price: mid, bid: bid || mid, ask: ask || mid, updatedAt: Date.now(), source: "ws" };
+      cache.coinbase = { price: p, bid: p, ask: p, updatedAt: Date.now(), source: "ws" };
     }
-  } catch { /* ignore — stale cache fallback handles it */ }
+  } catch { /* ignore */ }
+}
+
+async function fetchCoinbaseEthUsd(): Promise<void> {
+  try {
+    // Public Exchange REST ticker — returns bid, ask, and last price
+    const r = await fetch("https://api.exchange.coinbase.com/products/ETH-USD/ticker", {
+      signal: AbortSignal.timeout(3_000),
+    });
+    if (!r.ok) return;
+    const j = await r.json() as { bid?: string; ask?: string; price?: string };
+    const bid = parseFloat(j.bid ?? "0");
+    const ask = parseFloat(j.ask ?? "0");
+    const last = parseFloat(j.price ?? "0");
+    const mid = bid > 0 && ask > 0 ? (bid + ask) / 2 : last;
+    if (mid > 0) {
+      triCache.coinbaseEthUsd = { bid: bid || mid, ask: ask || mid, updatedAt: Date.now() };
+    }
+  } catch { /* ignore */ }
 }
 
 function startCoinbaseFastPoll(): void {
-  fetchCoinbaseBestBidAsk(); // immediate first run
-  setInterval(fetchCoinbaseBestBidAsk, 2_000);
+  const poll = () => {
+    void fetchCoinbaseSolUsd();
+    void fetchCoinbaseEthUsd();
+  };
+  poll(); // immediate first run
+  setInterval(poll, 2_000);
+}
+
+// ── Binance ETH/USD REST poll (for triangular scan reference) ─────────────────
+// Binance lacks a direct ETH/SOL pair so we poll ETH/USDT alongside SOLUSDT
+// and derive a synthetic ETH/SOL cross. Results feed the triangular scan.
+
+async function fetchBinanceEthPrice(): Promise<void> {
+  try {
+    const r = await fetch("https://api.binance.com/api/v3/ticker/bookTicker?symbol=ETHUSDT", {
+      signal: AbortSignal.timeout(4_000),
+    });
+    if (!r.ok) return;
+    const j = await r.json() as { bidPrice?: string; askPrice?: string };
+    const bid = parseFloat(j.bidPrice ?? "0");
+    const ask = parseFloat(j.askPrice ?? "0");
+    if (bid > 0 && ask > 0) {
+      triCache.binanceEthUsd = { bid, ask, updatedAt: Date.now() };
+    }
+  } catch { /* ignore */ }
+}
+
+// ── KuCoin ETH/USDT REST poll ──────────────────────────────────────────────────
+
+async function fetchKuCoinEthPrice(): Promise<void> {
+  try {
+    const r = await fetch(
+      "https://api.kucoin.com/api/v1/market/orderbook/level1?symbol=ETH-USDT",
+      { signal: AbortSignal.timeout(4_000) }
+    );
+    if (!r.ok) return;
+    const j = await r.json() as { data?: { bestBid?: string; bestAsk?: string } };
+    const bid = parseFloat(j.data?.bestBid ?? "0");
+    const ask = parseFloat(j.data?.bestAsk ?? "0");
+    if (bid > 0 && ask > 0) {
+      triCache.kucoinEthUsd = { bid, ask, updatedAt: Date.now() };
+    }
+  } catch { /* ignore */ }
 }
 
 // ── Binance + KuCoin REST poll ─────────────────────────────────────────────────
@@ -180,6 +263,15 @@ function startRestPollers(): void {
   setInterval(poll, BINANCE_KU_POLL_MS);
 }
 
+function startTriPollers(): void {
+  const poll = () => {
+    void fetchBinanceEthPrice();
+    void fetchKuCoinEthPrice();
+  };
+  poll();
+  setInterval(poll, TRI_POLL_MS);
+}
+
 // ── Public interface ───────────────────────────────────────────────────────────
 
 /** Call once at server startup. Safe to call multiple times (idempotent). */
@@ -190,7 +282,103 @@ export function initPriceFeeds(): void {
   startKrakenWs();
   startCoinbaseFastPoll(); // replaces Exchange WS (auth-gated); polls every 2 s
   startRestPollers();
-  console.log("[price-cache] Price feeds initialised");
+  startTriPollers(); // ETH/USD via Binance+KuCoin REST for triangular arb
+  console.log("[price-cache] Price feeds initialised (incl. triangular ETH feeds)");
+}
+
+export interface TriPrices {
+  /** SOL/USD bid/ask per exchange */
+  kraken: { solBid: number; solAsk: number; ethBid: number; ethAsk: number; ethSolBid: number; ethSolAsk: number } | null;
+  coinbase: { solBid: number; solAsk: number; ethBid: number; ethAsk: number; ethSolBid: number; ethSolAsk: number } | null;
+}
+
+const TRI_STALE_MS = 30_000; // tri prices older than 30 s are considered stale
+
+/**
+ * Returns per-exchange ETH/USD and ETH/SOL bid/ask prices for triangular arb scanning.
+ *
+ * IMPORTANT: each exchange's loop must only use price legs from THAT SAME exchange.
+ * Cross-exchange mixing would make the "opportunity" non-executable (you couldn't
+ * leg into all three steps on one venue) and produce false positives/negatives.
+ *
+ * Per-exchange policy:
+ *   Kraken:   SOL/USD (WS) + ETH/USD (WS) + ETH/SOL (WS direct, else synthetic)
+ *   Coinbase: SOL/USD (REST poll) + ETH/USD (REST poll) + ETH/SOL (REST direct, else synthetic)
+ *
+ * Synthetic ETH/SOL cross = ETH/USD bid-ask ÷ SOL/USD ask-bid (same exchange only).
+ * With purely synthetic rates the triangular loops always yield a product ≤ 1
+ * (no opportunity) — only a live direct ETH/SOL market deviating from the cross
+ * rate can yield genuine arb. This is the mathematically correct behaviour.
+ *
+ * Binance/KuCoin ETH prices are NOT used as fallbacks for Kraken or Coinbase — that
+ * would silently cross-exchange the ETH/USD leg.
+ */
+export function getTriPrices(): TriPrices {
+  const now = Date.now();
+  const fresh = (e: TriEntry | null) => !!(e && now - e.updatedAt < TRI_STALE_MS);
+
+  // ── Derive synthetic ETH/SOL cross bid/ask using legs from the same exchange ─
+  // Selling ETH → receive SOL: cross bid  = ethBid  / solAsk (sell ETH at ETH/USD bid, buy SOL at SOL/USD ask)
+  // Buying  ETH ← pay   SOL:  cross ask  = ethAsk  / solBid (buy  ETH at ETH/USD ask, sell SOL at SOL/USD bid)
+  const syntheticEthSol = (
+    ethBid: number, ethAsk: number,
+    solBid: number, solAsk: number,
+  ): { bid: number; ask: number } => ({
+    bid: solAsk > 0 ? ethBid / solAsk : 0,
+    ask: solBid > 0 ? ethAsk / solBid : 0,
+  });
+
+  // ── Kraken — all legs must come from Kraken price cache ───────────────────
+  let krakenResult: TriPrices["kraken"] = null;
+  if (
+    cache.kraken && now - cache.kraken.updatedAt < TRI_STALE_MS &&
+    fresh(triCache.krakenEthUsd)   // require Kraken's own ETH/USD (from Kraken WS)
+  ) {
+    const solBid = cache.kraken.bid ?? cache.kraken.price;
+    const solAsk = cache.kraken.ask ?? cache.kraken.price;
+    const kEth = triCache.krakenEthUsd!;
+    // Prefer Kraken's direct ETH/SOL market; fall back to synthetic from Kraken-only legs
+    const ethSol = fresh(triCache.krakenEthSol)
+      ? { bid: triCache.krakenEthSol!.bid, ask: triCache.krakenEthSol!.ask }
+      : syntheticEthSol(kEth.bid, kEth.ask, solBid, solAsk);
+    if (ethSol.bid > 0 && ethSol.ask > 0) {
+      krakenResult = {
+        solBid,
+        solAsk,
+        ethBid: kEth.bid,
+        ethAsk: kEth.ask,
+        ethSolBid: ethSol.bid,
+        ethSolAsk: ethSol.ask,
+      };
+    }
+  }
+
+  // ── Coinbase — all legs must come from Coinbase price cache ───────────────
+  let coinbaseResult: TriPrices["coinbase"] = null;
+  if (
+    cache.coinbase && now - cache.coinbase.updatedAt < TRI_STALE_MS &&
+    fresh(triCache.coinbaseEthUsd)  // require Coinbase's own ETH/USD (from Coinbase REST poll)
+  ) {
+    const solBid = cache.coinbase.bid ?? cache.coinbase.price;
+    const solAsk = cache.coinbase.ask ?? cache.coinbase.price;
+    const cEth = triCache.coinbaseEthUsd!;
+    // Prefer Coinbase's direct ETH/SOL; fall back to synthetic from Coinbase-only legs
+    const ethSol = fresh(triCache.coinbaseEthSol)
+      ? { bid: triCache.coinbaseEthSol!.bid, ask: triCache.coinbaseEthSol!.ask }
+      : syntheticEthSol(cEth.bid, cEth.ask, solBid, solAsk);
+    if (ethSol.bid > 0 && ethSol.ask > 0) {
+      coinbaseResult = {
+        solBid,
+        solAsk,
+        ethBid: cEth.bid,
+        ethAsk: cEth.ask,
+        ethSolBid: ethSol.bid,
+        ethSolAsk: ethSol.ask,
+      };
+    }
+  }
+
+  return { kraken: krakenResult, coinbase: coinbaseResult };
 }
 
 export interface AllPrices {

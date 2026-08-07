@@ -211,6 +211,29 @@ paths:
                 items:
                   $ref: "#/components/schemas/TradeRecord"
 
+  /arb/triangular:
+    get:
+      operationId: scanTriangularArb
+      tags: [exchange]
+      summary: Scan for triangular arbitrage opportunities within each exchange
+      description: >
+        Checks USDT→SOL→ETH→USDT and USDT→ETH→SOL→USDT loops on Kraken and
+        Coinbase using live bid/ask prices. Returns opportunities where the
+        loop product after fees exceeds the 0.1% profit threshold.
+      responses:
+        "200":
+          description: Triangular arbitrage scan results
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TriangularScanResult"
+        "500":
+          description: Price fetch error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
   /trades/summary:
     get:
       operationId: getTradeSummary
@@ -467,6 +490,47 @@ components:
           type: ["string", "null"]
         sellOrderId:
           type: ["string", "null"]
+
+    TriangularOpportunity:
+      type: object
+      required: [exchange, loop, profitPct, solUsd, ethUsd, ethSol, timestamp]
+      properties:
+        exchange:
+          type: string
+          description: "Exchange where the loop was detected (e.g. Kraken)"
+        loop:
+          type: string
+          description: "Loop direction, e.g. USD→SOL→ETH→USD"
+        profitPct:
+          type: number
+          description: "Net profit percentage after fees"
+        solUsd:
+          type: number
+          description: "SOL/USD mid price used"
+        ethUsd:
+          type: number
+          description: "ETH/USD mid price used"
+        ethSol:
+          type: number
+          description: "ETH/SOL mid price used"
+        timestamp:
+          type: string
+
+    TriangularScanResult:
+      type: object
+      required: [opportunities, prices, scannedAt]
+      properties:
+        opportunities:
+          type: array
+          items:
+            $ref: "#/components/schemas/TriangularOpportunity"
+        prices:
+          type: object
+          description: "Raw prices used in this scan"
+          required: []
+          additionalProperties: true
+        scannedAt:
+          type: string
 
     TradeSummary:
       type: object

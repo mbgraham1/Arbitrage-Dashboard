@@ -24,9 +24,96 @@ import {
   coinbaseFillPrice,
   coinbaseCancelOrder,
 } from "../lib/exchange";
-import { getAllPrices } from "../lib/price-cache";
+import { getAllPrices, getTriPrices } from "../lib/price-cache";
+
+// ── Triangular arb helpers ─────────────────────────────────────────────────────
+
+const TRI_FEE_PER_LEG = 0.0026;   // 0.26% taker fee per leg (conservative)
+const TRI_MIN_PROFIT_PCT = 0.10;  // minimum net profit % to surface an opportunity
+
+interface TriOpp {
+  exchange: string;
+  loop: string;
+  profitPct: number;
+  solUsd: number;
+  ethUsd: number;
+  ethSol: number;
+  timestamp: string;
+}
+
+/**
+ * For a single exchange with known bid/ask on all three pairs, compute the
+ * profitability of both triangular loops after taker fees.
+ *
+ * Loop 1: USD → SOL → ETH → USD
+ *   Start 1 USD.
+ *   Buy SOL at solAsk, pay fee: SOL = 1 / (solAsk × (1 + f))
+ *   Buy ETH with SOL at ethSolAsk, pay fee: ETH = SOL / (ethSolAsk × (1 + f))
+ *   Sell ETH for USD at ethBid, receive after fee: USD = ETH × ethBid × (1 – f)
+ *   product1 = ethBid×(1–f) / (solAsk×ethSolAsk×(1+f)²)
+ *
+ * Loop 2: USD → ETH → SOL → USD
+ *   Buy ETH at ethAsk: ETH = 1 / (ethAsk × (1+f))
+ *   Sell ETH for SOL at ethSolBid: SOL = ETH × ethSolBid × (1–f)
+ *   Sell SOL at solBid: USD = SOL × solBid × (1–f)
+ *   product2 = ethSolBid×solBid×(1–f)² / (ethAsk×(1+f))
+ */
+function computeTriLoops(
+  exchange: string,
+  solBid: number, solAsk: number,
+  ethBid: number, ethAsk: number,
+  ethSolBid: number, ethSolAsk: number,
+): TriOpp[] {
+  const f = TRI_FEE_PER_LEG;
+  const ts = new Date().toISOString();
+  const solUsdMid = (solBid + solAsk) / 2;
+  const ethUsdMid = (ethBid + ethAsk) / 2;
+  const ethSolMid = (ethSolBid + ethSolAsk) / 2;
+  const result: TriOpp[] = [];
+
+  // Loop 1: USD → SOL → ETH → USD
+  const product1 = (ethBid * (1 - f)) / (solAsk * (1 + f) * ethSolAsk * (1 + f));
+  const profit1 = (product1 - 1) * 100;
+  if (profit1 >= TRI_MIN_PROFIT_PCT) {
+    result.push({ exchange, loop: "USD→SOL→ETH→USD", profitPct: profit1, solUsd: solUsdMid, ethUsd: ethUsdMid, ethSol: ethSolMid, timestamp: ts });
+  }
+
+  // Loop 2: USD → ETH → SOL → USD
+  const product2 = (ethSolBid * (1 - f) * solBid * (1 - f)) / (ethAsk * (1 + f));
+  const profit2 = (product2 - 1) * 100;
+  if (profit2 >= TRI_MIN_PROFIT_PCT) {
+    result.push({ exchange, loop: "USD→ETH→SOL→USD", profitPct: profit2, solUsd: solUsdMid, ethUsd: ethUsdMid, ethSol: ethSolMid, timestamp: ts });
+  }
+
+  return result;
+}
 
 const router: IRouter = Router();
+
+// ── GET /arb/triangular ────────────────────────────────────────────────────────
+router.get("/arb/triangular", async (_req, res): Promise<void> => {
+  try {
+    const tri = getTriPrices();
+    const opportunities: TriOpp[] = [];
+    const prices: Record<string, unknown> = {};
+
+    if (tri.kraken) {
+      const { solBid, solAsk, ethBid, ethAsk, ethSolBid, ethSolAsk } = tri.kraken;
+      prices.kraken = { solBid, solAsk, ethBid, ethAsk, ethSolBid, ethSolAsk };
+      opportunities.push(...computeTriLoops("Kraken", solBid, solAsk, ethBid, ethAsk, ethSolBid, ethSolAsk));
+    }
+
+    if (tri.coinbase) {
+      const { solBid, solAsk, ethBid, ethAsk, ethSolBid, ethSolAsk } = tri.coinbase;
+      prices.coinbase = { solBid, solAsk, ethBid, ethAsk, ethSolBid, ethSolAsk };
+      opportunities.push(...computeTriLoops("Coinbase", solBid, solAsk, ethBid, ethAsk, ethSolBid, ethSolAsk));
+    }
+
+    res.json({ opportunities, prices, scannedAt: new Date().toISOString() });
+  } catch (err) {
+    res.status(500).json({ error: (err as Error).message });
+  }
+});
 
 // ── GET /credentials/preloaded ────────────────────────────────────────────────
 router.get("/credentials/preloaded", async (_req, res): Promise<void> => {

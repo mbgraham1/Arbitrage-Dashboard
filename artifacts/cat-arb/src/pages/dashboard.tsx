@@ -4,7 +4,7 @@ import { Button } from "@/components/ui/button";
 import { useBotContext } from "@/store/bot-context";
 import {
   Activity, Play, Square, DollarSign, TrendingUp, Zap, ShieldAlert,
-  FileText, ArrowRight, Radio, Wifi, WifiOff, Siren,
+  FileText, ArrowRight, Radio, Wifi, WifiOff, Siren, RefreshCw,
 } from "lucide-react";
 import { format } from "date-fns";
 import { cn } from "@/lib/utils";
@@ -78,6 +78,7 @@ export default function Dashboard() {
     forceTrade, isForcingTrade,
     emergencyStop, setEmergencyStop,
     startTime, failedTrades, sessionTradeCount, apiLatencyMs,
+    triOpportunities,
   } = useBotContext();
 
   const [uptimeStr, setUptimeStr] = useState("0h 0m");
@@ -450,9 +451,80 @@ export default function Dashboard() {
         </div>
       </div>
 
+      {/* Triangular Arb Opportunities */}
+      <TriangularCard opportunities={triOpportunities} isRunning={isRunning} />
+
       {/* Trade History Table */}
       <TradeHistoryTable />
     </div>
+  );
+}
+
+// ── Triangular Arb Card ────────────────────────────────────────────────────────
+
+function TriangularCard({
+  opportunities,
+  isRunning,
+}: {
+  opportunities: Array<{ exchange: string; loop: string; profitPct: number; solUsd: number; ethUsd: number; ethSol: number; timestamp: string }>;
+  isRunning: boolean;
+}) {
+  return (
+    <Card>
+      <CardHeader className="py-3 flex flex-row items-center justify-between space-y-0">
+        <CardTitle className="text-sm flex items-center gap-2">
+          <RefreshCw className="h-4 w-4" /> Triangular Arbitrage
+          <span className="text-[9px] font-mono font-bold px-1 border border-primary text-primary">TRI</span>
+          <span className="text-[10px] font-mono text-muted-foreground">Same-exchange loops</span>
+        </CardTitle>
+        {isRunning && (
+          <span className="text-[10px] font-mono text-muted-foreground">scanning…</span>
+        )}
+      </CardHeader>
+      <CardContent className="p-0">
+        {opportunities.length === 0 ? (
+          <div className="p-6 text-center text-sm font-mono text-muted-foreground">
+            {isRunning
+              ? "No triangular opportunities detected (net profit > 0.1% threshold)"
+              : "Start bot to begin scanning for triangular loops"}
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs font-mono border-collapse">
+              <thead>
+                <tr className="border-b-2 border-border bg-muted/50">
+                  {["Tag", "Exchange", "Loop", "Net Profit", "SOL/USD", "ETH/USD", "ETH/SOL", "Detected"].map((h) => (
+                    <th key={h} className="text-left px-3 py-2 text-[10px] uppercase font-bold text-muted-foreground whitespace-nowrap">{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {opportunities.map((opp, i) => (
+                  <tr key={`${opp.exchange}-${opp.loop}-${i}`} className={cn(
+                    "border-b border-border/50",
+                    i % 2 === 0 ? "" : "bg-muted/20",
+                    "animate-pulse-once"
+                  )}>
+                    <td className="px-3 py-1.5">
+                      <span className="text-[9px] font-mono font-bold px-1 border border-success text-success">TRI</span>
+                    </td>
+                    <td className="px-3 py-1.5 font-bold">{opp.exchange}</td>
+                    <td className="px-3 py-1.5 text-muted-foreground">{opp.loop}</td>
+                    <td className={cn("px-3 py-1.5 font-bold", opp.profitPct > 0 ? "text-success animate-pulse" : "")}>
+                      +{opp.profitPct.toFixed(3)}%
+                    </td>
+                    <td className="px-3 py-1.5">${opp.solUsd.toFixed(4)}</td>
+                    <td className="px-3 py-1.5">${opp.ethUsd.toFixed(2)}</td>
+                    <td className="px-3 py-1.5">{opp.ethSol.toFixed(4)}</td>
+                    <td className="px-3 py-1.5 text-muted-foreground whitespace-nowrap">{format(new Date(opp.timestamp), "HH:mm:ss")}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </CardContent>
+    </Card>
   );
 }
 

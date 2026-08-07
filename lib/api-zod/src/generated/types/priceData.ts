@@ -9,7 +9,11 @@ import type { WsStatus } from './wsStatus';
 
 export interface PriceData {
   krakenPrice: number;
+  krakenBid: number;
+  krakenAsk: number;
   coinbasePrice: number;
+  coinbaseBid: number;
+  coinbaseAsk: number;
   binancePrice?: number | null;
   kuCoinPrice?: number | null;
   grossSpreadPct: number;

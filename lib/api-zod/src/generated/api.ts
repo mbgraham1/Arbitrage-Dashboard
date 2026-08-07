@@ -29,7 +29,11 @@ export const FetchPricesBody = zod.object({
 
 export const FetchPricesResponse = zod.object({
   "krakenPrice": zod.number(),
+  "krakenBid": zod.number(),
+  "krakenAsk": zod.number(),
   "coinbasePrice": zod.number(),
+  "coinbaseBid": zod.number(),
+  "coinbaseAsk": zod.number(),
   "binancePrice": zod.number().nullish(),
   "kuCoinPrice": zod.number().nullish(),
   "grossSpreadPct": zod.number(),
@@ -182,6 +186,25 @@ export const ListTradesResponseItem = zod.object({
   "sellOrderId": zod.string().nullish()
 })
 export const ListTradesResponse = zod.array(ListTradesResponseItem)
+
+
+/**
+ * Checks USDT→SOL→ETH→USDT and USDT→ETH→SOL→USDT loops on Kraken and Coinbase using live bid/ask prices. Returns opportunities where the loop product after fees exceeds the 0.1% profit threshold.
+ * @summary Scan for triangular arbitrage opportunities within each exchange
+ */
+export const ScanTriangularArbResponse = zod.object({
+  "opportunities": zod.array(zod.object({
+  "exchange": zod.string().describe('Exchange where the loop was detected (e.g. Kraken)'),
+  "loop": zod.string().describe('Loop direction, e.g. USD→SOL→ETH→USD'),
+  "profitPct": zod.number().describe('Net profit percentage after fees'),
+  "solUsd": zod.number().describe('SOL\/USD mid price used'),
+  "ethUsd": zod.number().describe('ETH\/USD mid price used'),
+  "ethSol": zod.number().describe('ETH\/SOL mid price used'),
+  "timestamp": zod.string()
+})),
+  "prices": zod.record(zod.string(), zod.unknown()).describe('Raw prices used in this scan'),
+  "scannedAt": zod.string()
+})
 
 
 /**

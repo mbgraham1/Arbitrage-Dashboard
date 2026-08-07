@@ -22,4 +22,7 @@ export * from './tradeRequest';
 export * from './tradeRequestOrderType';
 export * from './tradeResult';
 export * from './tradeSummary';
+export * from './triangularOpportunity';
+export * from './triangularScanResult';
+export * from './triangularScanResultPrices';
 export * from './wsStatus';

@@ -141,6 +141,34 @@ export interface TradeRecord {
   sellOrderId?: string | null;
 }
 
+export interface TriangularOpportunity {
+  /** Exchange where the loop was detected (e.g. Kraken) */
+  exchange: string;
+  /** Loop direction, e.g. USD→SOL→ETH→USD */
+  loop: string;
+  /** Net profit percentage after fees */
+  profitPct: number;
+  /** SOL/USD mid price used */
+  solUsd: number;
+  /** ETH/USD mid price used */
+  ethUsd: number;
+  /** ETH/SOL mid price used */
+  ethSol: number;
+  timestamp: string;
+}
+
+/**
+ * Raw prices used in this scan
+ */
+export type TriangularScanResultPrices = { [key: string]: unknown };
+
+export interface TriangularScanResult {
+  opportunities: TriangularOpportunity[];
+  /** Raw prices used in this scan */
+  prices: TriangularScanResultPrices;
+  scannedAt: string;
+}
+
 export interface TradeSummary {
   totalTrades: number;
   liveTrades: number;

@@ -33,7 +33,8 @@ import type {
   TradeRecord,
   TradeRequest,
   TradeResult,
-  TradeSummary
+  TradeSummary,
+  TriangularScanResult
 } from './api.schemas';
 
 import { customFetch } from '../custom-fetch';
@@ -645,6 +646,84 @@ export function useListTrades<TData = Awaited<ReturnType<typeof listTrades>>, TE
  ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
 
   const queryOptions = getListTradesQueryOptions(params,options)
+
+  const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+
+export const getScanTriangularArbUrl = () => {
+
+
+
+
+  return `/api/arb/triangular`
+}
+
+/**
+ * Checks USDT→SOL→ETH→USDT and USDT→ETH→SOL→USDT loops on Kraken and Coinbase using live bid/ask prices. Returns opportunities where the loop product after fees exceeds the 0.1% profit threshold.
+ * @summary Scan for triangular arbitrage opportunities within each exchange
+ */
+export const scanTriangularArb = async ( options?: RequestInit): Promise<TriangularScanResult> => {
+
+  return customFetch<TriangularScanResult>(getScanTriangularArbUrl(),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getScanTriangularArbQueryKey = () => {
+    return [
+    `/api/arb/triangular`
+    ] as const;
+    }
+
+
+export const getScanTriangularArbQueryOptions = <TData = Awaited<ReturnType<typeof scanTriangularArb>>, TError = ErrorType<ErrorResponse>>( options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof scanTriangularArb>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getScanTriangularArbQueryKey();
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof scanTriangularArb>>> = ({ signal }) => scanTriangularArb({ signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof scanTriangularArb>>, TError, TData> & { queryKey: QueryKey }
+}
+
+export type ScanTriangularArbQueryResult = NonNullable<Awaited<ReturnType<typeof scanTriangularArb>>>
+export type ScanTriangularArbQueryError = ErrorType<ErrorResponse>
+
+
+/**
+ * @summary Scan for triangular arbitrage opportunities within each exchange
+ */
+
+export function useScanTriangularArb<TData = Awaited<ReturnType<typeof scanTriangularArb>>, TError = ErrorType<ErrorResponse>>(
+  options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof scanTriangularArb>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+
+ ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+
+  const queryOptions = getScanTriangularArbQueryOptions(options)
 
   const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
 

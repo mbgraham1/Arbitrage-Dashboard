@@ -7,10 +7,12 @@ import {
   useFetchBalances,
   useExecuteTrade,
   useGetPreloadedCredentials,
+  useScanTriangularArb,
+  getScanTriangularArbQueryKey,
   getListTradesQueryKey,
   getGetTradeSummaryQueryKey,
 } from "@workspace/api-client-react";
-import type { ExchangeCredentials, PriceData, BalanceData } from "@workspace/api-client-react";
+import type { ExchangeCredentials, PriceData, BalanceData, TriangularOpportunity } from "@workspace/api-client-react";
 import { useQueryClient } from "@tanstack/react-query";
 
 export interface LogEntry {
@@ -59,6 +61,8 @@ export interface BotContextType {
   secretsLoaded: boolean;
   forceTrade: () => Promise<void>;
   isForcingTrade: boolean;
+  /** Latest triangular arb opportunities from the server-side scan */
+  triOpportunities: TriangularOpportunity[];
 }
 
 const BotContext = createContext<BotContextType | undefined>(undefined);
@@ -151,6 +155,7 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
   const [startTime, setStartTime] = useState<number | null>(null);
   const [secretsLoaded, setSecretsLoaded] = useState(false);
   const [isForcingTrade, setIsForcingTrade] = useState(false);
+  const [triOpportunities, setTriOpportunities] = useState<TriangularOpportunity[]>([]);
 
   // ── Refs that give poll() always-current values without re-triggering effects ──
   const credentialsRef = useRef(credentials);
@@ -179,6 +184,34 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
   const fetchPricesMutation = useFetchPrices();
   const fetchBalancesMutation = useFetchBalances();
   const executeTradeMutation = useExecuteTrade();
+
+  // ── Triangular arb scan — runs independently while bot is active ──────────────
+  // Polls the /arb/triangular endpoint on the same interval as the cross-exchange
+  // scan. Results are stored in state so the dashboard can display them.
+  const triScan = useScanTriangularArb({
+    query: {
+      queryKey: getScanTriangularArbQueryKey(),
+      enabled: isRunning,
+      refetchInterval: Math.max(2, settingsRef.current.pollInterval) * 1000,
+      staleTime: 0,
+    },
+  });
+
+  useEffect(() => {
+    if (!triScan.data) return;
+    const opps = triScan.data.opportunities;
+    setTriOpportunities(opps);
+    if (opps.length > 0) {
+      for (const opp of opps) {
+        addLog(
+          "info",
+          `[TRI] ${opp.exchange} ${opp.loop} | Net +${opp.profitPct.toFixed(3)}% | ` +
+          `SOL/USD $${opp.solUsd.toFixed(4)} ETH/USD $${opp.ethUsd.toFixed(2)} ETH/SOL ${opp.ethSol.toFixed(4)}`
+        );
+      }
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [triScan.data]);
 
   // ── Preloaded credentials (run once) ─────────────────────────────────────────
   const preloadAppliedRef = useRef(false);
@@ -480,6 +513,7 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
     secretsLoaded,
     forceTrade,
     isForcingTrade,
+    triOpportunities,
   };
 
   return <BotContext.Provider value={value}>{children}</BotContext.Provider>;
