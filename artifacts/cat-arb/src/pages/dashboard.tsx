@@ -1266,6 +1266,29 @@ function GraphEngineCard() {
   const [autoArmed, setAutoArmed] = useState(false);
   const AUTO_COOLDOWN_MS = 30_000;
   const lastAutoFire = useRef(0);
+  // Ticks every second while armed so the cooldown countdown stays live.
+  const [, setCooldownTick] = useState(0);
+  useEffect(() => {
+    if (!autoArmed) return;
+    const t = setInterval(() => setCooldownTick(n => n + 1), 1_000);
+    return () => clearInterval(t);
+  }, [autoArmed]);
+  /** Why AUTO is not firing RIGHT NOW (null = clear to fire). */
+  const cooldownLeftMs = Math.max(0, AUTO_COOLDOWN_MS - (Date.now() - lastAutoFire.current));
+  const autoSkipReason: string | null = !autoArmed ? null
+    : executeMutation.isPending ? "execution in flight — waiting for it to finish"
+    : routes.length === 0 ? "no routes in scan yet"
+    : !topRoute ? "no executable route — every scanned route is a shape the live executor doesn't support (4+ hop / mixed)"
+    : cooldownLeftMs > 0 ? `cooldown — ${Math.ceil(cooldownLeftMs / 1000)}s until next fire`
+    : topRoute.netProfitUsd <= 0 ? `fees exceed gross edge — best executable route nets ${topRoute.netProfitUsd < 0 ? "-" : ""}$${Math.abs(topRoute.netProfitUsd).toFixed(4)} after fees`
+    : topRoute.netProfitUsd <= minProfit ? `edge too small — best executable edge $${topRoute.netProfitUsd.toFixed(4)} ≤ your $${minProfit.toFixed(2)} floor`
+    : null;
+  /** Per-route reject reason for the table (pre-execution checks only). */
+  const routeRejectReason = (r: (typeof routes)[number]): string | null =>
+    !r.executable ? "Unsupported route shape — live executor handles Kraken triangles & 2-leg cross only"
+    : r.netProfitUsd <= 0 ? "Fees exceed gross edge"
+    : r.netProfitUsd <= minProfit ? `Edge below your $${minProfit.toFixed(2)} min-profit floor`
+    : null;
   const executeRef = useRef(executeTopRoute);
   executeRef.current = executeTopRoute;
   useEffect(() => {
@@ -1362,6 +1385,16 @@ function GraphEngineCard() {
         </div>
       )}
 
+      {/* AUTO status: always shows WHY the bot is idle instead of leaving you guessing */}
+      {autoArmed && (
+        <div className={cn("px-3 py-1.5 text-[10px] font-mono border-b border-border/50",
+          autoSkipReason ? "text-yellow-500" : "text-success")}>
+          {autoSkipReason
+            ? `⏸ AUTO idle — ${autoSkipReason}`
+            : "▶ AUTO clear to fire — top route edge exceeds your floor; firing on next evaluation"}
+        </div>
+      )}
+
       {/* Fee diagnostic */}
       {data && topRoute && (
         <div className="px-3 py-2 text-[10px] font-mono border-b border-border/50 bg-muted/30 grid grid-cols-2 sm:grid-cols-5 gap-x-4 gap-y-0.5">
@@ -1428,9 +1461,12 @@ function GraphEngineCard() {
                           : r.status === "VIABLE"
                             ? "text-success border-success"
                             : "text-muted-foreground border-border"
-                      )} title={r.executable ? undefined : "The live executor doesn't support this route shape yet (4+ hop / mixed) — dry-run only."}>
+                      )} title={routeRejectReason(r) ?? "Clears every pre-execution check — eligible for AUTO / Execute Top Route."}>
                         {!r.executable ? "◌ SCAN ONLY" : r.status === "VIABLE" ? "✅ VIABLE" : "✕ REJECTED"}
                       </span>
+                      {routeRejectReason(r) && (
+                        <div className="text-[8px] text-muted-foreground mt-0.5 whitespace-nowrap">{routeRejectReason(r)}</div>
+                      )}
                     </td>
                   </tr>
                 ))}
@@ -1455,7 +1491,12 @@ function GraphEngineCard() {
 function RealizedPnlCard() {
   const { credentials } = useBotContext();
   const hasCreds = !!credentials.krakenKey && !!credentials.krakenSecret;
-  const body = { krakenKey: credentials.krakenKey, krakenSecret: credentials.krakenSecret };
+  const hasCoinbase = !!credentials.coinbaseKey && !!credentials.coinbaseSecret;
+  const body = {
+    krakenKey: credentials.krakenKey,
+    krakenSecret: credentials.krakenSecret,
+    ...(hasCoinbase ? { coinbaseKey: credentials.coinbaseKey, coinbaseSecret: credentials.coinbaseSecret } : {}),
+  };
   const { data, isLoading, error } = useGetAccountPnl(body, {
     query: {
       queryKey: getGetAccountPnlQueryKey(body),
@@ -1474,7 +1515,7 @@ function RealizedPnlCard() {
           <DollarSign className="h-4 w-4 text-primary" />
           Realized P&L
           <span className="text-[10px] font-mono text-muted-foreground font-normal">
-            from actual Kraken balances · not scanner estimates
+            from actual {data?.includesCoinbase ? "Kraken + Coinbase" : "Kraken"} balances · not scanner estimates
           </span>
           {data && data.unpricedAssets.length > 0 && (
             <span className="text-[10px] font-mono text-yellow-500 font-normal" title="These assets couldn't be priced — totals under-count them.">
@@ -1517,8 +1558,38 @@ function RealizedPnlCard() {
                 <div className={cn("text-lg font-bold", pnlClass(data.lifetimePnlUsd))}>{money(data.lifetimePnlUsd, true)}</div>
               </div>
             </div>
+
+            {/* Three-way attribution: equity change = cash flows + trading + drift */}
+            <div className="mt-3 grid grid-cols-1 md:grid-cols-3 gap-3 font-mono">
+              <div className="border border-primary/40 p-3">
+                <div className="text-[10px] uppercase text-muted-foreground">Account Equity Change</div>
+                <div className={cn("text-lg font-bold", pnlClass(data.equityChangeUsd))}>{money(data.equityChangeUsd, true)}</div>
+                <div className="text-[9px] text-muted-foreground">everything owned vs. baseline{data.netCashFlowUsd != null && Math.abs(data.netCashFlowUsd) >= 0.01 ? ` · incl. ${money(data.netCashFlowUsd, true)} deposits/withdrawals` : ""}</div>
+              </div>
+              <div className="border border-primary/40 p-3">
+                <div className="text-[10px] uppercase text-muted-foreground">Trading P&L</div>
+                <div className={cn("text-lg font-bold", pnlClass(data.tradingPnlUsd))}>{money(data.tradingPnlUsd, true)}</div>
+                <div className="text-[9px] text-muted-foreground">from {data.tradedFillCount} completed live fill{data.tradedFillCount === 1 ? "" : "s"} only</div>
+              </div>
+              <div className="border border-primary/40 p-3">
+                <div className="text-[10px] uppercase text-muted-foreground">Unrealized P&L</div>
+                {data.unrealizedPnlUsd != null ? (
+                  <>
+                    <div className={cn("text-lg font-bold", pnlClass(data.unrealizedPnlUsd))}>{money(data.unrealizedPnlUsd, true)}</div>
+                    <div className="text-[9px] text-muted-foreground">price drift on held coins (equity − cash flows − trading)</div>
+                  </>
+                ) : (
+                  <>
+                    <div className="text-lg font-bold text-muted-foreground">n/a</div>
+                    <div className="text-[9px] text-yellow-500">withheld — cash flows can't be verified (see note below)</div>
+                  </>
+                )}
+              </div>
+            </div>
+
             <div className="mt-2 text-[9px] font-mono text-muted-foreground">
-              {data.snapshotCount} balance snapshots recorded · a snapshot is taken on every live trade and every 60s poll · P&L = change in total account value, so market moves on held assets and any deposits/withdrawals are included
+              {data.snapshotCount} balance snapshots recorded · a snapshot is taken on every live trade and every 60s poll · deposits/withdrawals are subtracted via Kraken Ledgers{data.includesCoinbase ? " · Coinbase balances included" : ""}
+              {data.cashFlowNote && <span className="text-yellow-500"> · {data.cashFlowNote}</span>}
             </div>
           </>
         )}

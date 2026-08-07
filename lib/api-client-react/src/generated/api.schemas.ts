@@ -379,6 +379,13 @@ export interface CointegrationScanResult {
   scannedAt: string;
 }
 
+export interface AccountPnlRequest {
+  krakenKey: string;
+  krakenSecret: string;
+  coinbaseKey?: string;
+  coinbaseSecret?: string;
+}
+
 export interface FeeTierRequest {
   krakenKey: string;
   krakenSecret: string;
@@ -421,6 +428,17 @@ export interface AccountPnlResult {
   realizedTodayUsd: number;
   /** currentValue − baseline snapshot */
   lifetimePnlUsd: number;
+  /** Total change in everything owned since baseline (current − starting) */
+  equityChangeUsd: number;
+  /** External deposits − withdrawals since baseline (Kraken Ledgers); null when unknowable — attribution withheld */
+  netCashFlowUsd: number | null;
+  /** Sum of per-trade realized profits from live filled executions */
+  tradingPnlUsd: number;
+  tradedFillCount: number;
+  /** Residual: equityChange − cashFlow − tradingPnl ≈ price drift on held coins; null when cash flows are unknowable */
+  unrealizedPnlUsd: number | null;
+  cashFlowNote: string | null;
+  includesCoinbase: boolean;
   snapshotCount: number;
   /** Assets that couldn't be priced — total under-counts when non-empty */
   unpricedAssets: string[];

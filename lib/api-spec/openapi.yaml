@@ -406,17 +406,18 @@ paths:
     post:
       operationId: getAccountPnl
       tags: [trades]
-      summary: Realized P&L from actual Kraken account balances
+      summary: Ground-truth P&L from actual exchange balances
       description: >
-        Values the entire Kraken account (cash + holdings at live tickers),
-        stores a snapshot, and computes realized P&L as differences between
-        snapshots. Never estimated from scanner profit.
+        Values the Kraken account (plus Coinbase when creds provided) at live
+        tickers, stores a snapshot, and decomposes the equity change into
+        external cash flows (Kraken Ledgers), trading P&L (sum of per-trade
+        realized fills), and unrealized drift. Never estimated from scanner profit.
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/FeeTierRequest"
+              $ref: "#/components/schemas/AccountPnlRequest"
       responses:
         "200":
           description: Account P&L computed from balance snapshots
@@ -1032,9 +1033,17 @@ components:
         krakenKey: { type: string }
         krakenSecret: { type: string }
 
+    AccountPnlRequest:
+      type: object
+      required: [krakenKey, krakenSecret]
+      properties:
+        krakenKey: { type: string }
+        krakenSecret: { type: string }
+        coinbaseKey: { type: string }
+        coinbaseSecret: { type: string }
     AccountPnlResult:
       type: object
-      required: [startingValueUsd, startedAt, currentValueUsd, usdBalance, unrealizedHoldingsUsd, realizedTodayUsd, lifetimePnlUsd, snapshotCount, unpricedAssets]
+      required: [startingValueUsd, startedAt, currentValueUsd, usdBalance, unrealizedHoldingsUsd, realizedTodayUsd, lifetimePnlUsd, equityChangeUsd, netCashFlowUsd, tradingPnlUsd, tradedFillCount, unrealizedPnlUsd, cashFlowNote, includesCoinbase, snapshotCount, unpricedAssets]
       properties:
         startingValueUsd: { type: number }
         startedAt: { type: string }
@@ -1043,6 +1052,23 @@ components:
         unrealizedHoldingsUsd: { type: number }
         realizedTodayUsd: { type: number }
         lifetimePnlUsd: { type: number }
+        equityChangeUsd:
+          type: number
+          description: "Total change in everything owned since baseline (current − starting)"
+        netCashFlowUsd:
+          type: number
+          nullable: true
+          description: "External deposits − withdrawals since baseline (Kraken Ledgers); null when unknowable (ledger unavailable/incomplete, or Coinbase included) — attribution withheld"
+        tradingPnlUsd:
+          type: number
+          description: "Sum of per-trade realized profits from live filled executions"
+        tradedFillCount: { type: integer }
+        unrealizedPnlUsd:
+          type: number
+          nullable: true
+          description: "Residual: equityChange − cashFlow − tradingPnl ≈ price drift on held coins; null when cash flows are unknowable"
+        cashFlowNote: { type: string, nullable: true }
+        includesCoinbase: { type: boolean }
         snapshotCount: { type: integer }
         unpricedAssets:
           type: array

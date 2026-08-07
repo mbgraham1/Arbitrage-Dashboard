@@ -175,6 +175,75 @@ export async function krakenAccountValueUsd(creds: KrakenCreds): Promise<{
   return { totalUsd: usdBalance + holdingsUsd, usdBalance, holdingsUsd, holdings, unpriced };
 }
 
+/**
+ * Net external cash flow (USD) into the Kraken account since `sinceUnix`:
+ * deposits + incoming transfers − withdrawals − outgoing transfers, from the
+ * private Ledgers API. Non-USD flows are valued at CURRENT ticker prices
+ * (approximation — historical prices aren't fetched). Trades/fees excluded.
+ */
+export async function krakenNetCashFlowUsd(creds: KrakenCreds, sinceUnix: number): Promise<{ netUsd: number; entries: number; approximated: boolean; complete: boolean }> {
+  type LedgerEntry = { refid: string; time: number; type: string; asset: string; amount: string; fee: string };
+  let ofs = 0, entries = 0, approximated = false, complete = false;
+  const flows = new Map<string, number>(); // asset → net amount
+  const MAX_PAGES = 40; // 40 × 50 = 2,000 ledger entries since baseline
+  for (let page = 0; page < MAX_PAGES; page++) {
+    const result = await krakenPrivateRequest<{ ledger: Record<string, LedgerEntry>; count: number }>(
+      "/0/private/Ledgers", { start: String(sinceUnix), ofs: String(ofs) }, creds);
+    const rows = Object.values(result.ledger ?? {});
+    if (rows.length === 0) { complete = true; break; }
+    for (const e of rows) {
+      if (e.type !== "deposit" && e.type !== "withdrawal" && e.type !== "transfer") continue;
+      entries++;
+      flows.set(e.asset, (flows.get(e.asset) ?? 0) + parseFloat(e.amount));
+    }
+    ofs += rows.length;
+    if (ofs >= (result.count ?? 0)) { complete = true; break; }
+  }
+  let netUsd = 0;
+  const normalize = (c: string) => {
+    const stripped = c.length >= 4 && (c.startsWith("X") || c.startsWith("Z")) ? c.slice(1) : c;
+    return stripped.replace(/\.(HOLD|[SF])$/, "");
+  };
+  for (const [rawAsset, amount] of flows) {
+    if (Math.abs(amount) < 1e-12) continue;
+    const asset = normalize(rawAsset);
+    if (asset === "USD" || asset === "USDT" || asset === "USDC") { netUsd += amount; continue; }
+    try {
+      const t = await krakenPublicRequest<Record<string, { c: string[] }>>("/0/public/Ticker", { pair: `${asset}USD` });
+      const first = Object.values(t)[0];
+      const price = first ? parseFloat(first.c[0]!) : NaN;
+      if (isFinite(price)) { netUsd += amount * price; approximated = true; }
+      else approximated = true;
+    } catch { approximated = true; }
+  }
+  return { netUsd, entries, approximated, complete };
+}
+
+/**
+ * Value the Coinbase account in USD from actual balances — sibling of
+ * krakenAccountValueUsd. USD/stables at par; other assets priced at the
+ * public product ticker. Unpriceable assets reported, never guessed.
+ */
+export async function coinbaseAccountValueUsd(creds: CoinbaseCreds): Promise<{
+  totalUsd: number; usdBalance: number; holdingsUsd: number; unpriced: string[];
+}> {
+  const balances = await getCoinbaseBalances(creds);
+  let usdBalance = 0, holdingsUsd = 0;
+  const unpriced: string[] = [];
+  for (const b of balances) {
+    if (b.currency === "USD" || b.currency === "USDT" || b.currency === "USDC") { usdBalance += b.amount; continue; }
+    try {
+      const resp = await fetch(`https://api.exchange.coinbase.com/products/${b.currency}-USD/ticker`, { signal: AbortSignal.timeout(8_000) });
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const json = await resp.json() as { price?: string };
+      const price = parseFloat(json.price ?? "");
+      if (!isFinite(price)) throw new Error("no price");
+      holdingsUsd += b.amount * price;
+    } catch { unpriced.push(b.currency); }
+  }
+  return { totalUsd: usdBalance + holdingsUsd, usdBalance, holdingsUsd, unpriced };
+}
+
 export async function getKrakenBalances(creds: KrakenCreds): Promise<BalanceEntry[]> {
   const result = await krakenPrivateRequest<Record<string, string>>("/0/private/Balance", {}, creds);
   return Object.entries(result)

@@ -8,6 +8,7 @@ import {
   FetchBalancesBody,
   TestKrakenBody,
   FeeTierBody,
+  AccountPnlBody,
   TestCoinbaseBody,
   ExecuteTradeBody,
   ExecuteTriangularBody,
@@ -29,6 +30,8 @@ import {
   krakenFillPrice,
   krakenCancelOrder,
   krakenAccountValueUsd,
+  krakenNetCashFlowUsd,
+  coinbaseAccountValueUsd,
   getCoinbaseBalances,
   coinbaseMarketOrder,
   coinbaseLimitOrder,
@@ -522,9 +525,12 @@ router.get("/arb/execution-quality", async (req, res): Promise<void> => {
 async function recordQuality(row: {
   route: string; style: string; isDryRun: boolean; filled: boolean;
   tradeSizeUsd: number; expectedProfitUsd: number; realizedProfitUsd: number | null; slippagePct?: number; note?: string;
+  /** sha256-prefix scope of the executing Kraken key (accountIdFromKey(krakenKey)); "legacy" when unknown */
+  accountId?: string;
 }, log: { error: (o: object, m: string) => void }): Promise<void> {
   try {
     await db.insert(executionQualityTable).values({
+      accountId: row.accountId ?? "legacy",
       route: row.route, style: row.style, isDryRun: row.isDryRun, filled: row.filled,
       tradeSizeUsd: row.tradeSizeUsd.toFixed(2),
       expectedProfitUsd: row.expectedProfitUsd.toFixed(6),
@@ -570,15 +576,27 @@ let liveGraphExecInFlight = false;
  * Best-effort: never throws (a valuation failure must not fail a trade
  * response). Returns the snapshot values or null.
  */
-/** Stable, non-reversible per-account scope key from the Kraken API key. */
-function accountIdFromKey(krakenKey: string): string {
-  return createHash("sha256").update(krakenKey).digest("hex").slice(0, 16);
+/** Stable, non-reversible per-account scope key. Includes the Coinbase key
+ * when present so Kraken-only and combined valuations never share a baseline
+ * (their totals aren't comparable). */
+function accountIdFromKey(krakenKey: string, coinbaseKey?: string): string {
+  return createHash("sha256").update(`${krakenKey}|${coinbaseKey ?? ""}`).digest("hex").slice(0, 16);
 }
 
-async function snapshotAccountValue(creds: { krakenKey: string; krakenSecret: string }, trigger: "poll" | "post_trade", log: { error: (o: object, m: string) => void }): Promise<{ totalUsd: number; usdBalance: number; holdingsUsd: number; unpriced: string[] } | null> {
+async function snapshotAccountValue(creds: { krakenKey: string; krakenSecret: string; coinbaseKey?: string; coinbaseSecret?: string }, trigger: "poll" | "post_trade", log: { error: (o: object, m: string) => void }): Promise<{ totalUsd: number; usdBalance: number; holdingsUsd: number; unpriced: string[] } | null> {
   try {
-    const v = await krakenAccountValueUsd(creds);
-    const accountId = accountIdFromKey(creds.krakenKey);
+    const k = await krakenAccountValueUsd(creds);
+    let v = { totalUsd: k.totalUsd, usdBalance: k.usdBalance, holdingsUsd: k.holdingsUsd, unpriced: [...k.unpriced] };
+    if (creds.coinbaseKey && creds.coinbaseSecret) {
+      const c = await coinbaseAccountValueUsd({ coinbaseKey: creds.coinbaseKey, coinbaseSecret: creds.coinbaseSecret });
+      v = {
+        totalUsd: k.totalUsd + c.totalUsd,
+        usdBalance: k.usdBalance + c.usdBalance,
+        holdingsUsd: k.holdingsUsd + c.holdingsUsd,
+        unpriced: [...k.unpriced, ...c.unpriced.map(a => `CB:${a}`)],
+      };
+    }
+    const accountId = accountIdFromKey(creds.krakenKey, creds.coinbaseKey);
     // Dedupe poll spam: skip the insert when value is unchanged vs the last
     // snapshot (post-trade snapshots always record — they're the audit trail).
     if (trigger === "poll") {
@@ -603,16 +621,23 @@ async function snapshotAccountValue(creds: { krakenKey: string; krakenSecret: st
 }
 
 // ── POST /arb/account-pnl ─────────────────────────────────────────────────────
-// Realized P&L from ACTUAL exchange balances, never scanner estimates.
-// Takes a fresh Kraken account valuation, stores it as a snapshot, and
-// computes P&L as differences between snapshots.
+// Ground-truth P&L from ACTUAL exchange balances, never scanner estimates.
+// Values Kraken (+ Coinbase when creds provided), stores a snapshot, then
+// decomposes the equity change into three separately-attributable numbers:
+//   equity change = external cash flows + trading P&L + unrealized drift
 router.post("/arb/account-pnl", async (req, res): Promise<void> => {
-  const parsed = FeeTierBody.safeParse(req.body ?? {});
+  const parsed = AccountPnlBody.safeParse(req.body ?? {});
   if (!parsed.success) { res.status(400).json({ error: "krakenKey and krakenSecret are required." }); return; }
+  // Coinbase creds are all-or-nothing — a lone key must not fork the baseline.
+  const hasCoinbase = !!(parsed.data.coinbaseKey && parsed.data.coinbaseSecret);
+  const creds = {
+    krakenKey: parsed.data.krakenKey, krakenSecret: parsed.data.krakenSecret,
+    ...(hasCoinbase ? { coinbaseKey: parsed.data.coinbaseKey, coinbaseSecret: parsed.data.coinbaseSecret } : {}),
+  };
   try {
-    const now = await snapshotAccountValue({ krakenKey: parsed.data.krakenKey, krakenSecret: parsed.data.krakenSecret }, "poll", req.log);
-    if (!now) { res.status(502).json({ error: "Could not value the Kraken account (balance or ticker fetch failed)." }); return; }
-    const accountId = accountIdFromKey(parsed.data.krakenKey);
+    const now = await snapshotAccountValue(creds, "poll", req.log);
+    if (!now) { res.status(502).json({ error: "Could not value the account (balance or ticker fetch failed)." }); return; }
+    const accountId = accountIdFromKey(creds.krakenKey, creds.coinbaseKey);
     const scope = dbEq(accountSnapshotsTable.accountId, accountId);
     const startOfTodayUtc = new Date(); startOfTodayUtc.setUTCHours(0, 0, 0, 0);
     // Indexed baseline lookups — never load full history.
@@ -623,6 +648,45 @@ router.post("/arb/account-pnl", async (req, res): Promise<void> => {
     ]);
     if (!first) { res.status(500).json({ error: "Snapshot insert failed — no baseline available." }); return; }
     const todayBase = firstToday ?? first;
+    // Trading P&L = sum of per-trade realized profits (balance-verified fill
+    // accounting recorded at execution time), live fills only, scoped to THIS
+    // Kraken account and to fills recorded since the equity baseline.
+    const [tradingAgg] = await db.select({ total: sum(executionQualityTable.realizedProfitUsd), trades: dbCount() }).from(executionQualityTable)
+      .where(dbAnd(
+        dbEq(executionQualityTable.isDryRun, false),
+        dbEq(executionQualityTable.filled, true),
+        dbEq(executionQualityTable.accountId, accountId),
+        dbGte(executionQualityTable.createdAt, first.createdAt),
+      ));
+    // External cash flows since the baseline (Kraken Ledgers). If the ledger
+    // is unavailable or incomplete, FAIL CLOSED: withhold the decomposition
+    // instead of presenting a wrong attribution.
+    let netCashFlowUsd: number | null = 0;
+    let cashFlowNote: string | null = null;
+    try {
+      const sinceUnix = Math.floor(first.createdAt.getTime() / 1000);
+      const cf = await krakenNetCashFlowUsd({ krakenKey: creds.krakenKey, krakenSecret: creds.krakenSecret }, sinceUnix);
+      if (!cf.complete) {
+        netCashFlowUsd = null;
+        cashFlowNote = "Kraken ledger history too long to fetch fully — attribution withheld this refresh.";
+      } else {
+        netCashFlowUsd = cf.netUsd;
+        if (cf.approximated) cashFlowNote = "Some non-USD deposits/withdrawals valued at current (not historical) prices.";
+      }
+    } catch (err) {
+      req.log.error({ err }, "ledger cash-flow fetch failed");
+      netCashFlowUsd = null;
+      cashFlowNote = "Kraken ledger fetch failed — cash flows unknown, attribution withheld this refresh.";
+    }
+    // Coinbase deposits/withdrawals aren't retrievable yet — a Coinbase cash
+    // movement would be misclassified as trading/drift, so withhold the
+    // residual attribution for combined accounts.
+    if (hasCoinbase) {
+      netCashFlowUsd = null;
+      cashFlowNote = (cashFlowNote ? cashFlowNote + " " : "") + "Coinbase external deposits/withdrawals can't be tracked yet — attribution withheld for combined accounts.";
+    }
+    const equityChangeUsd = now.totalUsd - parseFloat(first.totalUsd);
+    const tradingPnlUsd = tradingAgg?.total != null ? parseFloat(tradingAgg.total) : 0;
     res.json({
       startingValueUsd: parseFloat(first.totalUsd),
       startedAt: first.createdAt.toISOString(),
@@ -630,7 +694,15 @@ router.post("/arb/account-pnl", async (req, res): Promise<void> => {
       usdBalance: now.usdBalance,
       unrealizedHoldingsUsd: now.holdingsUsd,
       realizedTodayUsd: now.totalUsd - parseFloat(todayBase.totalUsd),
-      lifetimePnlUsd: now.totalUsd - parseFloat(first.totalUsd),
+      lifetimePnlUsd: equityChangeUsd,
+      // Three-way decomposition
+      equityChangeUsd,
+      netCashFlowUsd,
+      tradingPnlUsd,
+      tradedFillCount: tradingAgg?.trades ?? 0,
+      unrealizedPnlUsd: netCashFlowUsd == null ? null : equityChangeUsd - netCashFlowUsd - tradingPnlUsd,
+      cashFlowNote,
+      includesCoinbase: hasCoinbase,
       snapshotCount,
       unpricedAssets: now.unpriced,
     });
@@ -736,6 +808,7 @@ router.post("/arb/graph-execute", async (req, res): Promise<void> => {
       const realizedTri = isLiveTri && b["success"] === true && typeof b["preflightProfitUsd"] === "number" ? b["preflightProfitUsd"] as number : null;
       if (b["executed"] === true || (isLiveTri && !wasPreflightReject)) {
         await recordQuality({
+          accountId: accountIdFromKey(parsed.data.krakenKey, parsed.data.coinbaseKey && parsed.data.coinbaseSecret ? parsed.data.coinbaseKey : undefined),
           route: route.description, style: executionStyle, isDryRun: !!b["isDryRun"],
           filled: b["success"] === true, tradeSizeUsd,
           expectedProfitUsd: route.netProfitUsd,
@@ -747,7 +820,7 @@ router.post("/arb/graph-execute", async (req, res): Promise<void> => {
       // Snapshot after ANY live attempt past pre-flight — an accepted leg may
       // have moved balances even when the run ultimately failed.
       if (isLiveTri && !wasPreflightReject) {
-        await snapshotAccountValue({ krakenKey: parsed.data.krakenKey, krakenSecret: parsed.data.krakenSecret }, "post_trade", req.log);
+        await snapshotAccountValue({ krakenKey: parsed.data.krakenKey, krakenSecret: parsed.data.krakenSecret, coinbaseKey: parsed.data.coinbaseKey, coinbaseSecret: parsed.data.coinbaseSecret }, "post_trade", req.log);
       }
       res.json({ success: b["success"], isDryRun: b["isDryRun"], executed: b["executed"], route: route.description, preflightProfitUsd: b["preflightProfitUsd"], realizedProfitUsd: realizedTri, orderIds: [b["leg1OrderId"], b["leg2OrderId"], b["leg3OrderId"]].filter(Boolean), error: b["error"] ?? null });
       return;
@@ -767,6 +840,7 @@ router.post("/arb/graph-execute", async (req, res): Promise<void> => {
         coinbasePrice: "0",
       });
       await recordQuality({
+        accountId: accountIdFromKey(parsed.data.krakenKey, parsed.data.coinbaseKey && parsed.data.coinbaseSecret ? parsed.data.coinbaseKey : undefined),
         route: route.description, style: executionStyle, isDryRun: true, filled: true,
         tradeSizeUsd, expectedProfitUsd: route.netProfitUsd, realizedProfitUsd: null, slippagePct: route.slippagePct,
       }, req.log);
@@ -929,10 +1003,11 @@ router.post("/arb/graph-execute", async (req, res): Promise<void> => {
       if (anyAccepted) {
         await recordFailure(filledVolume, msg);
         await recordQuality({
+          accountId: accountIdFromKey(parsed.data.krakenKey, parsed.data.coinbaseKey && parsed.data.coinbaseSecret ? parsed.data.coinbaseKey : undefined),
           route: route.description, style: executionStyle, isDryRun: false, filled: false,
           tradeSizeUsd, expectedProfitUsd: route.netProfitUsd, realizedProfitUsd: null, slippagePct: route.slippagePct, note: msg.slice(0, 300),
         }, req.log);
-        await snapshotAccountValue({ krakenKey: parsed.data.krakenKey, krakenSecret: parsed.data.krakenSecret }, "post_trade", req.log);
+        await snapshotAccountValue({ krakenKey: parsed.data.krakenKey, krakenSecret: parsed.data.krakenSecret, coinbaseKey: parsed.data.coinbaseKey, coinbaseSecret: parsed.data.coinbaseSecret }, "post_trade", req.log);
       }
       req.log.error({ route: route.description, buyOrderId, sellOrderId, filledVolume, err: msg }, "Graph execute LIVE — failed");
       res.json({ success: false, isDryRun: false, executed: anyAccepted, route: route.description, preflightProfitUsd: route.netProfitUsd, orderIds: [buyOrderId, sellOrderId].filter(Boolean), error: msg });
@@ -954,10 +1029,11 @@ router.post("/arb/graph-execute", async (req, res): Promise<void> => {
     });
     const realizedProfitUsd = buySpendUsd > 0 && sellProceedsUsd > 0 ? sellProceedsUsd - buySpendUsd : null;
     await recordQuality({
+      accountId: accountIdFromKey(parsed.data.krakenKey, parsed.data.coinbaseKey && parsed.data.coinbaseSecret ? parsed.data.coinbaseKey : undefined),
       route: route.description, style: executionStyle, isDryRun: false, filled: true,
       tradeSizeUsd, expectedProfitUsd: route.netProfitUsd, realizedProfitUsd, slippagePct: route.slippagePct,
     }, req.log);
-    await snapshotAccountValue({ krakenKey: parsed.data.krakenKey, krakenSecret: parsed.data.krakenSecret }, "post_trade", req.log);
+    await snapshotAccountValue({ krakenKey: parsed.data.krakenKey, krakenSecret: parsed.data.krakenSecret, coinbaseKey: parsed.data.coinbaseKey, coinbaseSecret: parsed.data.coinbaseSecret }, "post_trade", req.log);
     req.log.info({ route: route.description, tradeSizeUsd, filledVolume, buyOrderId, sellOrderId, realizedProfitUsd }, "Graph execute LIVE — both legs confirmed filled");
     res.json({ success: true, isDryRun: false, executed: true, route: route.description, preflightProfitUsd: route.netProfitUsd, realizedProfitUsd, orderIds: [buyOrderId, sellOrderId] });
   } catch (err) {

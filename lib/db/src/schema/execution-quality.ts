@@ -1,4 +1,4 @@
-import { pgTable, serial, text, numeric, boolean, timestamp } from "drizzle-orm/pg-core";
+import { pgTable, serial, text, numeric, boolean, timestamp, index } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod/v4";
 
@@ -11,6 +11,8 @@ import { z } from "zod/v4";
 export const executionQualityTable = pgTable("execution_quality", {
   id: serial("id").primaryKey(),
   createdAt: timestamp("created_at").defaultNow().notNull(),
+  /** Per-account scope (sha256 prefix of the Kraken API key); "legacy" for pre-scoping rows */
+  accountId: text("account_id").notNull().default("legacy"),
   route: text("route").notNull(),                 // route description, e.g. "USD[K]→BTC[K]→USD[CB]"
   style: text("style").notNull(),                 // "taker" | "maker"
   isDryRun: boolean("is_dry_run").notNull().default(true),
@@ -22,7 +24,9 @@ export const executionQualityTable = pgTable("execution_quality", {
   /** Depth-walked slippage % of the route at attempt time (0 for maker joins) */
   slippagePct: numeric("slippage_pct", { precision: 10, scale: 4 }),
   note: text("note"),
-});
+}, (t) => [
+  index("execution_quality_account_created_idx").on(t.accountId, t.createdAt),
+]);
 
 export const insertExecutionQualitySchema = createInsertSchema(executionQualityTable).omit({ id: true, createdAt: true });
 export type InsertExecutionQuality = z.infer<typeof insertExecutionQualitySchema>;

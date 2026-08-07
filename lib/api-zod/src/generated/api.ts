@@ -107,6 +107,13 @@ export const FeeTierBody = zod.object({
   "krakenSecret": zod.string()
 })
 
+export const AccountPnlBody = zod.object({
+  "krakenKey": zod.string(),
+  "krakenSecret": zod.string(),
+  "coinbaseKey": zod.string().optional(),
+  "coinbaseSecret": zod.string().optional()
+})
+
 export const FeeTierResponse = zod.object({
   "takerFeePct": zod.number().nullable(),
   "makerFeePct": zod.number().nullable(),
@@ -396,6 +403,13 @@ export const AccountPnlResponse = zod.object({
   "unrealizedHoldingsUsd": zod.number(),
   "realizedTodayUsd": zod.number(),
   "lifetimePnlUsd": zod.number(),
+  "equityChangeUsd": zod.number(),
+  "netCashFlowUsd": zod.number().nullable(),
+  "tradingPnlUsd": zod.number(),
+  "tradedFillCount": zod.number(),
+  "unrealizedPnlUsd": zod.number().nullable(),
+  "cashFlowNote": zod.string().nullable(),
+  "includesCoinbase": zod.boolean(),
   "snapshotCount": zod.number(),
   "unpricedAssets": zod.array(zod.string())
 })

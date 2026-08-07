@@ -31,6 +31,7 @@ import type {
   GetObScanParams,
   GraphExecuteRequest,
   GraphExecuteResult,
+  AccountPnlRequest,
   AccountPnlResult,
   ExecutionQualityResult,
   FeeTierRequest,
@@ -1283,23 +1284,23 @@ export function useGetGraphScan<TData = Awaited<ReturnType<typeof getGraphScan>>
   return withQueryKey(query, queryOptions.queryKey);
 }
 
-export const getAccountPnl = async (feeTierRequest: FeeTierRequest, options?: RequestInit): Promise<AccountPnlResult> =>
+export const getAccountPnl = async (accountPnlRequest: AccountPnlRequest, options?: RequestInit): Promise<AccountPnlResult> =>
   customFetch<AccountPnlResult>(`/api/arb/account-pnl`, {
     ...options,
     method: "POST",
     headers: { "Content-Type": "application/json", ...options?.headers },
-    body: JSON.stringify(feeTierRequest),
+    body: JSON.stringify(accountPnlRequest),
   });
 
-export const getGetAccountPnlQueryKey = (body: FeeTierRequest) =>
-  ["/api/arb/account-pnl", body.krakenKey] as const;
+export const getGetAccountPnlQueryKey = (body: AccountPnlRequest) =>
+  ["/api/arb/account-pnl", body.krakenKey, body.coinbaseKey ?? ""] as const;
 
 /**
  * Realized P&L from ACTUAL Kraken balances — each fetch also records a
  * snapshot server-side. Query (not mutation) so the dashboard can poll.
  */
 export function useGetAccountPnl<TData = AccountPnlResult, TError = ErrorType<unknown>>(
-  body: FeeTierRequest,
+  body: AccountPnlRequest,
   options?: { query?: Partial<UseQueryOptions<AccountPnlResult, TError, TData>>; request?: SecondParameter<typeof customFetch> },
 ): UseQueryResult<TData, TError> & { queryKey: QueryKey } {
   const queryKey = options?.query?.queryKey ?? getGetAccountPnlQueryKey(body);
