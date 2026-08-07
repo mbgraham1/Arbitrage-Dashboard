@@ -124,9 +124,15 @@ function reconnectingWs(
 // Subscribes to all 10 pairs + ETH/SOL in a single connection.
 // Kraken v2 WS uses the same "PAIR/USD" notation as our canonical PAIRS.
 
-function startKrakenWs(): void {
-  // All 10 pairs + ETH/SOL + SOL/BTC for triangular arb
-  const symbols = [...PAIRS as readonly string[], "ETH/SOL", "SOL/BTC"];
+function startKrakenWs(includeEthSol: boolean): void {
+  // All 10 pairs + SOL/BTC for triangular arb; ETH/SOL only when confirmed live by REST check
+  const crossPairs: string[] = ["SOL/BTC"];
+  if (includeEthSol) crossPairs.push("ETH/SOL");
+  const symbols = [...PAIRS as readonly string[], ...crossPairs];
+  console.log(
+    `[price-cache] Kraken WS subscribing to ${PAIRS.length} main pairs + cross-pairs: ${crossPairs.join(", ") || "(none)"}` +
+    (!includeEthSol ? " (ETH/SOL skipped — pair not listed on Kraken)" : "")
+  );
 
   reconnectingWs(
     "wss://ws.kraken.com/v2",
@@ -270,37 +276,42 @@ let initialized = false;
 export function initPriceFeeds(): void {
   if (initialized) return;
   initialized = true;
-  startKrakenWs();
   startCoinbasePoll();
   startRestPollers();
   console.log("[price-cache] Price feeds initialised for 10 pairs (BTC, ETH, SOL, AVAX, DOT, POL, LINK, UNI, ATOM, ADA)");
-  void checkKrakenEthSolAvailability();
+  // Check ETH/SOL availability before opening the WS so we only subscribe to confirmed pairs
+  void checkKrakenEthSolAvailability().then(ethSolAvailable => {
+    startKrakenWs(ethSolAvailable);
+  });
   void verifyPairAvailability();
 }
 
 /**
- * REST poll at startup to confirm Kraken has a live ETH/SOL direct market.
- * Logs the result so operators know whether triangular scans will use direct
- * prices or fall back to synthetic cross rates.
+ * REST check at startup to confirm Kraken has a live ETH/SOL direct market.
+ * Returns true when the pair is confirmed available (WS subscription should include it).
+ * Returns false when Kraken returns an error or empty result — WS will skip ETH/SOL
+ * and triangular scans will use synthetic cross rates instead.
  */
-async function checkKrakenEthSolAvailability(): Promise<void> {
+async function checkKrakenEthSolAvailability(): Promise<boolean> {
   try {
     const r = await fetch("https://api.kraken.com/0/public/Ticker?pair=ETHSOL", {
       signal: AbortSignal.timeout(8_000),
     });
     const data = await r.json() as { error?: string[]; result?: Record<string, unknown> };
     if (data.error?.length) {
-      console.warn(`[price-cache] Kraken ETH/SOL REST check: pair not available (${data.error.join(", ")}) — triangular scans will use synthetic cross rates`);
-      return;
+      console.warn(`[price-cache] Kraken ETH/SOL REST check: pair not available (${data.error.join(", ")}) — ETH/SOL will be skipped from WS subscription; triangular scans will use synthetic cross rates`);
+      return false;
     }
     const keys = Object.keys(data.result ?? {});
     if (keys.length > 0) {
-      console.log(`[price-cache] Kraken ETH/SOL REST check ✓ — direct market confirmed (${keys[0]}); WS subscription active`);
-    } else {
-      console.warn("[price-cache] Kraken ETH/SOL REST check: empty result — pair may not be active; triangular scans may fall back to synthetic rates");
+      console.log(`[price-cache] Kraken ETH/SOL REST check ✓ — direct market confirmed (${keys[0]}); ETH/SOL included in WS subscription`);
+      return true;
     }
+    console.warn("[price-cache] Kraken ETH/SOL REST check: empty result — pair may not be active; ETH/SOL skipped from WS subscription; triangular scans will use synthetic cross rates");
+    return false;
   } catch (e) {
-    console.warn(`[price-cache] Kraken ETH/SOL REST check failed (${(e as Error).message}) — connectivity issue; WS subscription still attempted`);
+    console.warn(`[price-cache] Kraken ETH/SOL REST check failed (${(e as Error).message}) — connectivity issue; ETH/SOL skipped from WS subscription as a precaution`);
+    return false;
   }
 }
 
