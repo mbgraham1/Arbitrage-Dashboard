@@ -264,9 +264,12 @@ paths:
     get:
       operationId: getObScan
       tags: [arb]
-      summary: Scan triangular cycles across 21 assets using L2 order book depth (v17 port)
+      summary: Scan triangular cycles across 21 assets using L2 order book depth (v18 port)
       description: >
-        Port of Python v17 "420-Route Hunter". Fetches Kraken Depth API for all
+        Port of Python v18 "Scaling Analyzer" (v17 wide-net scan plus a scaling
+        table — the top-ranked route is re-simulated at $10/$50/$100/$500/$1,000
+        with VIABLE / HIGH_SLIPPAGE / REJECTED statuses; the min-profit threshold
+        scales with size/10). Fetches Kraken Depth API for all
         required pairs in parallel, then walks the book for each A→B permutation
         of 21 assets (up to 420 routes; only routes with a real Kraken cross pair
         are simulatable) to compute realistic fill prices at the given trade size.
@@ -286,8 +289,8 @@ paths:
           schema: {type: number, default: 0.5}
         - name: minProfitUsd
           in: query
-          description: Minimum net profit ($) required for READY status (default 0.05 — v16 "real edge")
-          schema: {type: number, default: 0.05}
+          description: Minimum net profit ($) required for READY status at $10 (default 0.02 — v18; scaled by size/10 in the scaling table)
+          schema: {type: number, default: 0.02}
         - name: maxSlippagePct
           in: query
           description: Maximum tolerated total slippage (%) for READY status (default 0.5)
@@ -664,9 +667,22 @@ components:
           description: "v15 conservative classification"
         confidencePct: {type: number, description: "v17 liquidity confidence 0-100 — avg top-of-book coverage across the 3 legs"}
 
+    ObScalingRow:
+      type: object
+      required: [sizeUsd, profitUsd, slippagePct, confidencePct, status]
+      properties:
+        sizeUsd: {type: number}
+        profitUsd: {type: number}
+        slippagePct: {type: number}
+        confidencePct: {type: number}
+        status:
+          type: string
+          enum: [VIABLE, HIGH_SLIPPAGE, REJECTED]
+          description: "v18 — VIABLE when profit > minProfitUsd×(size/10) and slippage within limit"
+
     ObScanResult:
       type: object
-      required: [cycles, tradeSizeUsd, feesPct, minProfitUsd, maxSlippagePct, readyCount, pairsScanned, pairsRequested, volatilityFilter, activeAssets, scannedAt]
+      required: [cycles, tradeSizeUsd, feesPct, minProfitUsd, maxSlippagePct, readyCount, pairsScanned, pairsRequested, volatilityFilter, activeAssets, scalingRoute, scaling, scannedAt]
       properties:
         cycles:
           type: array
@@ -684,6 +700,15 @@ components:
           type: array
           items: {type: string}
           description: "v17 — assets actually scanned after the volatility filter"
+        scalingRoute:
+          type: string
+          nullable: true
+          description: "v18 — route of the top-ranked cycle the scaling table covers (null when no cycles)"
+        scaling:
+          type: array
+          items:
+            $ref: "#/components/schemas/ObScalingRow"
+          description: "v18 — top route re-simulated at $10/$50/$100/$500/$1,000; unabsorbable sizes omitted"
         scannedAt: {type: string}
 
     TriExecuteRequest:

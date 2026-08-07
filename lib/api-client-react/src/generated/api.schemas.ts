@@ -230,6 +230,25 @@ export const ObCycleEntryStatus = {
   LOW_PROFIT: "LOW_PROFIT",
 } as const;
 
+export type ObScalingRowStatus = (typeof ObScalingRowStatus)[keyof typeof ObScalingRowStatus];
+
+// eslint-disable-next-line @typescript-eslint/no-redeclare
+export const ObScalingRowStatus = {
+  VIABLE: "VIABLE",
+  HIGH_SLIPPAGE: "HIGH_SLIPPAGE",
+  REJECTED: "REJECTED",
+} as const;
+
+/** v18 — one row of the top-route scaling table. */
+export interface ObScalingRow {
+  sizeUsd: number;
+  profitUsd: number;
+  slippagePct: number;
+  confidencePct: number;
+  /** VIABLE when profit > minProfitUsd×(size/10) and slippage within limit */
+  status: ObScalingRowStatus;
+}
+
 export interface ObScanResult {
   cycles: ObCycleEntry[];
   tradeSizeUsd: number;
@@ -248,6 +267,10 @@ export interface ObScanResult {
   volatilityFilter: boolean;
   /** v17 — assets actually scanned after the volatility filter */
   activeAssets: string[];
+  /** v18 — route of the top-ranked cycle the scaling table covers (null when no cycles) */
+  scalingRoute: string | null;
+  /** v18 — top route re-simulated at $10/$50/$100/$500/$1,000; unabsorbable sizes omitted */
+  scaling: ObScalingRow[];
   scannedAt: string;
 }
 

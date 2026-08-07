@@ -587,9 +587,23 @@ const OB_STATUS_META: Record<string, { label: string; className: string }> = {
   LOW_PROFIT:    { label: "✕ LOW PROFIT",    className: "text-muted-foreground border-border" },
 };
 
+const OB_SCALING_META: Record<string, { label: string; className: string }> = {
+  VIABLE:        { label: "✅ VIABLE",        className: "text-success border-success" },
+  HIGH_SLIPPAGE: { label: "⚠ HIGH SLIPPAGE", className: "text-amber-500 border-amber-500" },
+  REJECTED:      { label: "✕ REJECTED",      className: "text-muted-foreground border-border" },
+};
+
 function OrderBookHunterCard() {
-  const { data, isLoading } = useGetObScan(10, 0.5, 0.05, 0.5, true, {
-    query: { queryKey: getObScanQueryKey(10, 0.5, 0.05, 0.5, true), refetchInterval: 5_000, staleTime: 4_000 },
+  const [tradeSizeInput, setTradeSizeInput] = useState("10");
+  // Debounce so we don't fire a Kraken scan on every keystroke (e.g. 10→1→100)
+  const [debouncedSize, setDebouncedSize] = useState("10");
+  useEffect(() => {
+    const t = setTimeout(() => setDebouncedSize(tradeSizeInput), 500);
+    return () => clearTimeout(t);
+  }, [tradeSizeInput]);
+  const tradeSize = Math.max(1, parseFloat(debouncedSize) || 10);
+  const { data, isLoading } = useGetObScan(tradeSize, 0.5, 0.02, 0.5, true, {
+    query: { queryKey: getObScanQueryKey(tradeSize, 0.5, 0.02, 0.5, true), refetchInterval: 5_000, staleTime: 4_000 },
   });
 
   const cycles: ObCycleEntry[] = data?.cycles ?? [];
@@ -600,7 +614,18 @@ function OrderBookHunterCard() {
         <CardTitle className="text-sm flex items-center gap-2">
           <BookOpen className="h-4 w-4" /> Order Book Hunter
           <span className="text-[10px] font-mono text-muted-foreground font-normal">
-            v17 · 420-Route · $10 · 21 assets
+            v18 · Scaling Analyzer · 21 assets
+          </span>
+          <span className="flex items-center gap-1 text-[10px] font-mono font-normal text-muted-foreground">
+            $<input
+              type="number"
+              min={1}
+              step={5}
+              value={tradeSizeInput}
+              onChange={e => setTradeSizeInput(e.target.value)}
+              className="w-16 bg-transparent border border-border px-1 py-0.5 text-foreground focus:outline-none focus:border-primary"
+              aria-label="Trade size in USD"
+            /> trade size
           </span>
           {data && data.readyCount > 0 && (
             <span className="text-[9px] font-mono font-bold px-1 border border-success text-success animate-pulse">
@@ -665,9 +690,52 @@ function OrderBookHunterCard() {
                 })}
               </tbody>
             </table>
+            {data && data.scalingRoute && data.scaling.length > 0 && (
+              <div className="border-t-2 border-border">
+                <div className="px-3 py-2 text-[10px] font-mono font-bold uppercase text-muted-foreground bg-muted/50">
+                  Scaling Analysis — {data.scalingRoute} (live, re-simulated each scan)
+                </div>
+                <table className="w-full text-xs font-mono border-collapse">
+                  <thead>
+                    <tr className="border-b border-border/50">
+                      {["Size", "Profit", "Slippage", "Confidence", "Status"].map(h => (
+                        <th key={h} className="text-left px-3 py-1.5 text-[10px] uppercase font-bold text-muted-foreground">{h}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {data.scaling.map(row => {
+                      const meta = OB_SCALING_META[row.status] ?? OB_SCALING_META["REJECTED"]!;
+                      return (
+                        <tr key={row.sizeUsd} className={cn("border-b border-border/50", row.status === "VIABLE" && "bg-success/10")}>
+                          <td className="px-3 py-1.5 font-bold">${row.sizeUsd.toLocaleString()}</td>
+                          <td className={cn("px-3 py-1.5 font-bold", row.profitUsd > 0 ? "text-success" : "text-destructive")}>
+                            ${row.profitUsd.toFixed(4)}
+                          </td>
+                          <td className={cn("px-3 py-1.5", row.slippagePct > (data.maxSlippagePct ?? 0.5) ? "text-amber-500" : "text-muted-foreground")}>
+                            {row.slippagePct.toFixed(3)}%
+                          </td>
+                          <td className={cn("px-3 py-1.5", row.confidencePct >= 80 ? "text-success" : row.confidencePct >= 40 ? "text-amber-500" : "text-destructive")}>
+                            {row.confidencePct}%
+                          </td>
+                          <td className="px-3 py-1.5">
+                            <span className={cn("text-[9px] font-bold px-1 border whitespace-nowrap", meta.className)}>{meta.label}</span>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+                {data.scaling.length < 5 && (
+                  <div className="px-3 py-1.5 text-[10px] font-mono text-muted-foreground">
+                    Sizes above ${data.scaling[data.scaling.length - 1]?.sizeUsd.toLocaleString()} omitted — order book depth can't absorb them.
+                  </div>
+                )}
+              </div>
+            )}
             {data && (
               <div className="px-3 py-2 text-[10px] font-mono text-muted-foreground border-t border-border/50">
-                Trade size: ${data.tradeSizeUsd} · Fees: {data.feesPct}% · Min profit: ${data.minProfitUsd} · Max slippage: {data.maxSlippagePct}% · Volatility filter: {data.volatilityFilter ? `on (${data.activeAssets.length}/21 moving)` : "off"} · Scanned: {format(new Date(data.scannedAt), "HH:mm:ss")}
+                Trade size: ${data.tradeSizeUsd} · Fees: {data.feesPct}% · Min profit: ${data.minProfitUsd} (×size/10) · Max slippage: {data.maxSlippagePct}% · Volatility filter: {data.volatilityFilter ? `on (${data.activeAssets.length}/21 moving)` : "off"} · Scanned: {format(new Date(data.scannedAt), "HH:mm:ss")}
               </div>
             )}
           </div>

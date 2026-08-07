@@ -173,17 +173,18 @@ router.get("/arb/scan", async (_req, res): Promise<void> => {
 });
 
 // ── GET /arb/ob-scan ──────────────────────────────────────────────────────────
-// Port of Python v17 "420-Route Hunter" (21 assets, up to 420 permutations).
+// Port of Python v18 "Scaling Analyzer" (21 assets; top route re-simulated at
+// $10/$50/$100/$500/$1,000 with VIABLE / HIGH_SLIPPAGE / REJECTED statuses).
 // Fetches L2 depth from Kraken, walks the book for all simulatable cycles,
 // classifies each READY / HIGH_SLIPPAGE / LOW_PROFIT and scores liquidity
 // confidence. Optional volatility filter scans only assets moving >1.5%/24h.
 // Query params: tradeSizeUsd (default 10), feesPct (default 0.5),
-//               minProfitUsd (default 0.05), maxSlippagePct (default 0.5),
+//               minProfitUsd (default 0.02, scaled by size/10), maxSlippagePct (default 0.5),
 //               volatilityFilter (default true)
 router.get("/arb/ob-scan", async (req, res): Promise<void> => {
   const tradeSizeUsd   = Math.max(1, parseFloat(String(req.query["tradeSizeUsd"]   ?? "10"))   || 10);
   const feesPct        = Math.max(0, parseFloat(String(req.query["feesPct"]        ?? "0.5"))  || 0.5);
-  const minProfitUsd   = Math.max(0, parseFloat(String(req.query["minProfitUsd"]   ?? "0.05")) || 0.05);
+  const minProfitUsd   = Math.max(0, parseFloat(String(req.query["minProfitUsd"]   ?? "0.02")) || 0.02);
   const maxSlippagePct = Math.max(0, parseFloat(String(req.query["maxSlippagePct"] ?? "0.5"))  || 0.5);
   const volatilityFilter = String(req.query["volatilityFilter"] ?? "true") !== "false";
   try {
