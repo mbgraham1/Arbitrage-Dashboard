@@ -1,0 +1,75 @@
+From your screenshots, I think you’ve found the real bottleneck.
+
+Your engine is finding small pricing inefficiencies, but Kraken’s taker fees are larger than the edge.
+
+For example, your bot shows:
+
+* Best raw edge: +$0.0034
+* Fees: about $0.1996
+* Net: -$0.1962
+
+And on another screen:
+
+* Raw edge: +$0.0026
+* Fees: $0.1200
+* Net: -$0.1174
+
+So the algorithm is working—it just isn’t finding opportunities that are large enough to pay for three trades.
+
+Why are your fees so high?
+
+Your bot is assuming:
+
+* 0.40% per trade (per leg)
+
+A triangular arbitrage is 3 trades, so that’s:
+
+* 0.40%
+* +0.40%
+* +0.40%
+* = 1.20% total
+
+That means every opportunity has to make more than 1.2% just to break even.
+
+In real crypto markets, true triangular arbitrage opportunities are often only 0.02–0.30% before fees, so a 1.2% hurdle eliminates almost everything.
+
+What I’d check first
+
+Ask your developer to verify:
+
+1. Is 0.40% the actual fee from my Kraken account?
+    * Many accounts pay less than that, especially with volume or maker orders.
+    * If your account is actually paying 0.16–0.25%, the bot shouldn’t be modeling 0.40%.
+2. Is the bot assuming taker fees on every leg?
+    * If so, that’s the most conservative (and expensive) assumption.
+3. Is it adding an extra safety buffer on top of exchange fees?
+    * Sometimes bots add slippage and safety margins that make the effective fee look even larger.
+
+How I’d improve the engine
+
+Instead of only looking for triangles, I’d have it:
+
+* Scan Kraken.
+* Scan Coinbase.
+* Scan both together.
+* Rank every opportunity.
+* Filter by liquidity.
+* Execute only when the edge is comfortably above total costs.
+
+That gives the bot many more chances to find a real trade.
+
+One more thing
+
+Your screenshots also show trade sizes like $10 and $25.
+
+Even if a route has a 0.20% edge:
+
+* $10 trade → 2¢ gross
+* $25 trade → 5¢ gross
+* $100 trade → 20¢ gross
+
+Those are still tiny compared with a 1.2% fee assumption.
+
+My next step
+
+I would stop tweaking the strategy for a moment and verify the actual fee model. If the bot is overestimating fees, you’ll never see profitable trades no matter how good the scanner is.
