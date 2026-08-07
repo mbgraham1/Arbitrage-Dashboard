@@ -101,6 +101,25 @@ export default function Dashboard() {
 
   const summaryQuery = useGetTradeSummary();
 
+  // ── Best pair for Force Trade indicator ──────────────────────────────────────
+  // Mirrors the ranker logic: fetch all enabled pairs, sort by net edge descending,
+  // pick #1. Refreshes every 5 s independently of the bot poll loop.
+  const enabledPairsForScan = settings.enabledPairs?.length > 0 ? settings.enabledPairs : undefined;
+  const forceScanQuery = useScanAllPairs({ enabledPairs: enabledPairsForScan });
+  useEffect(() => {
+    const id = setInterval(() => { forceScanQuery.refetch(); }, 5_000);
+    return () => clearInterval(id);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  const feesAndSlip = settings.totalFees + settings.slippage;
+  const bestForcePair = React.useMemo(() => {
+    const entries = forceScanQuery.data ?? [];
+    if (entries.length === 0) return null;
+    const sorted = [...entries]
+      .filter(e => e.grossSpreadPct != null)
+      .sort((a, b) => (b.grossSpreadPct - feesAndSlip) - (a.grossSpreadPct - feesAndSlip));
+    return sorted[0] ?? null;
+  }, [forceScanQuery.data, feesAndSlip]);
+
   const toggleBot = () => {
     if (!credentials.krakenKey && !isRunning) {
       addLog("error", "Cannot start bot without API credentials. Go to Settings.");
@@ -195,17 +214,29 @@ export default function Dashboard() {
 
           {/* Force Trade — live mode only */}
           {liveMode && (
-            <Button
-              variant="outline"
-              size="lg"
-              className="border-2 border-destructive text-destructive hover:bg-destructive hover:text-destructive-foreground font-bold uppercase"
-              onClick={forceTrade}
-              disabled={isForcingTrade}
-              title="Execute immediately on Kraken/Coinbase, ignoring edge threshold"
-            >
-              <Siren className="h-4 w-4 mr-2" />
-              {isForcingTrade ? "EXECUTING..." : "FORCE MARKET TRADE"}
-            </Button>
+            <div className="flex flex-col items-center gap-1">
+              <Button
+                variant="outline"
+                size="lg"
+                className="border-2 border-destructive text-destructive hover:bg-destructive hover:text-destructive-foreground font-bold uppercase"
+                onClick={forceTrade}
+                disabled={isForcingTrade}
+                title={
+                  bestForcePair
+                    ? `Will trade ${bestForcePair.pair} · gross spread +${bestForcePair.grossSpreadPct.toFixed(3)}%`
+                    : "Execute immediately on Kraken/Coinbase, ignoring edge threshold"
+                }
+              >
+                <Siren className="h-4 w-4 mr-2" />
+                {isForcingTrade ? "EXECUTING..." : "FORCE MARKET TRADE"}
+              </Button>
+              <span className="text-[10px] font-mono text-muted-foreground leading-none">
+                {bestForcePair
+                  ? <>Best: <span className="font-bold text-foreground">{bestForcePair.pair}</span> <span className={cn(bestForcePair.grossSpreadPct >= 0 ? "text-success" : "text-destructive")}>+{bestForcePair.grossSpreadPct.toFixed(3)}%</span></>
+                  : <span className="italic">SOL/USD (fallback)</span>
+                }
+              </span>
+            </div>
           )}
 
           {/* Force Triangular — live mode only, $10 BTC/SOL test loop */}
