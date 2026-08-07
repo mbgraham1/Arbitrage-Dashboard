@@ -228,8 +228,45 @@ router.get("/arb/triangular", async (_req, res): Promise<void> => {
   }
 });
 
+// ── Triangular execution helpers ───────────────────────────────────────────────
+
+/** Attempt to cancel a limit order to unwind a partial triangular trade. */
+async function tryCancel(
+  creds: { krakenKey: string; krakenSecret: string },
+  txid: string,
+  label: string,
+  log: { info: (msg: string) => void; error: (msg: string) => void },
+): Promise<void> {
+  if (!txid) return;
+  try {
+    await krakenCancelOrder(creds, txid);
+    log.info(`[TRI·UNWIND] Cancelled ${label} (${txid})`);
+  } catch (e) {
+    log.error(`[TRI·UNWIND] Cancel ${label} (${txid}) failed — may be filled: ${(e as Error).message}`);
+  }
+}
+
+/** Place a market counter-order to unwind an already-filled leg. */
+async function tryUnwindMarket(
+  creds: { krakenKey: string; krakenSecret: string },
+  side: "buy" | "sell",
+  volume: number,
+  pair: string,
+  label: string,
+  log: { info: (msg: string) => void; error: (msg: string) => void },
+): Promise<void> {
+  if (volume <= 0) return;
+  try {
+    const r = await krakenRawMarketOrder(creds, side, volume, pair);
+    log.info(`[TRI·UNWIND] Market ${side} ${volume.toFixed(6)} ${pair} — ${label} (${r.txid[0] ?? "?"})`);
+  } catch (e) {
+    log.error(`[TRI·UNWIND] Market ${side} ${pair} failed: ${(e as Error).message}`);
+  }
+}
+
 // ── POST /arb/execute-triangular ──────────────────────────────────────────────
 // Port of Python v13 FORCE TRIANGULAR + auto-loop execution.
+// Supports both BTC loops (SOLXBT) and ETH loops (ETHSOL).
 //
 // Order types (matching Python v13 exactly):
 //   orderType="market" (default) — FORCE button: market orders, $10 test size
@@ -237,6 +274,10 @@ router.get("/arb/triangular", async (_req, res): Promise<void> => {
 //
 // Volume model (matching Python): raw division, no per-leg fee in volume.
 // Profit estimate: (gross_pct − TRI_TOTAL_FEES_PCT) × tradeUsd / 100
+//
+// Failure handling: if any leg throws after a previous leg has been placed,
+//   • limit orders — attempt cancel (may not be filled yet)
+//   • market orders — attempt a reverse market order to unwind
 router.post("/arb/execute-triangular", async (req, res): Promise<void> => {
   const parsed = ExecuteTriangularBody.safeParse(req.body);
   if (!parsed.success) {
@@ -247,40 +288,86 @@ router.post("/arb/execute-triangular", async (req, res): Promise<void> => {
   const { krakenKey, krakenSecret, loop, tradeUsd: overrideUsd, isDryRun, orderType } = parsed.data;
   const useLimit = orderType === "limit"; // limit = post-only maker (auto-loop); market = force
 
-  const VALID_LOOPS = ["USD→BTC→SOL→USD", "USD→SOL→BTC→USD"];
+  const BTC_LOOPS = ["USD→BTC→SOL→USD", "USD→SOL→BTC→USD"];
+  const ETH_LOOPS = ["USD→SOL→ETH→USD", "USD→ETH→SOL→USD"];
+  const VALID_LOOPS = [...BTC_LOOPS, ...ETH_LOOPS];
   if (!VALID_LOOPS.includes(loop)) {
     res.status(400).json({ error: `Invalid loop "${loop}". Valid: ${VALID_LOOPS.join(", ")}` });
     return;
   }
 
   const creds = { krakenKey, krakenSecret };
+  const isBtc = BTC_LOOPS.includes(loop);
 
-  // 1. Get prices — cached WS prices or fresh REST fallback
-  let prices = getBtcTriPrices();
-  if (!prices) {
-    try {
-      const r = await fetch("https://api.kraken.com/0/public/Ticker?pair=XXBTZUSD,SOLUSD,SOLXBT", {
-        signal: AbortSignal.timeout(5_000),
-      });
-      const data = await r.json() as { error?: string[]; result?: Record<string, { b: string[]; a: string[] }> };
-      if (data.error?.length || !data.result) throw new Error("Kraken REST error");
-      const res_ = data.result;
-      const btcKey    = Object.keys(res_).find(k => k.includes("XBT") && k.includes("USD"));
-      const solKey    = Object.keys(res_).find(k => k.startsWith("SOL") && k.endsWith("USD"));
-      const solBtcKey = Object.keys(res_).find(k => k.startsWith("SOL") && k.includes("XBT"));
-      if (!btcKey || !solKey || !solBtcKey) throw new Error("Missing pairs in Kraken response");
-      prices = {
-        btcBid:    parseFloat(res_[btcKey].b[0]),    btcAsk:    parseFloat(res_[btcKey].a[0]),
-        solBid:    parseFloat(res_[solKey].b[0]),     solAsk:    parseFloat(res_[solKey].a[0]),
-        solBtcBid: parseFloat(res_[solBtcKey].b[0]), solBtcAsk: parseFloat(res_[solBtcKey].a[0]),
+  // Simple log shim that delegates to pino request logger
+  const log = {
+    info:  (msg: string) => req.log.info(msg),
+    error: (msg: string) => req.log.error(msg),
+  };
+
+  // 1a. BTC loops — get prices from WS cache or fresh REST fallback
+  let btcPrices: { solBid: number; solAsk: number; btcBid: number; btcAsk: number; solBtcBid: number; solBtcAsk: number } | null = null;
+
+  // 1b. ETH loops — get prices from WS tri cache or fresh REST fallback
+  let ethPrices: { solBid: number; solAsk: number; ethBid: number; ethAsk: number; ethSolBid: number; ethSolAsk: number } | null = null;
+
+  if (isBtc) {
+    btcPrices = getBtcTriPrices();
+    if (!btcPrices) {
+      try {
+        const r = await fetch("https://api.kraken.com/0/public/Ticker?pair=XXBTZUSD,SOLUSD,SOLXBT", {
+          signal: AbortSignal.timeout(5_000),
+        });
+        const data = await r.json() as { error?: string[]; result?: Record<string, { b: string[]; a: string[] }> };
+        if (data.error?.length || !data.result) throw new Error("Kraken REST error");
+        const res_ = data.result;
+        const btcKey    = Object.keys(res_).find(k => k.includes("XBT") && k.includes("USD"));
+        const solKey    = Object.keys(res_).find(k => k.startsWith("SOL") && k.endsWith("USD"));
+        const solBtcKey = Object.keys(res_).find(k => k.startsWith("SOL") && k.includes("XBT"));
+        if (!btcKey || !solKey || !solBtcKey) throw new Error("Missing pairs in Kraken response");
+        btcPrices = {
+          btcBid:    parseFloat(res_[btcKey].b[0]),    btcAsk:    parseFloat(res_[btcKey].a[0]),
+          solBid:    parseFloat(res_[solKey].b[0]),     solAsk:    parseFloat(res_[solKey].a[0]),
+          solBtcBid: parseFloat(res_[solBtcKey].b[0]), solBtcAsk: parseFloat(res_[solBtcKey].a[0]),
+        };
+      } catch (e) {
+        res.status(500).json({ error: `BTC tri prices unavailable: ${(e as Error).message}` });
+        return;
+      }
+    }
+  } else {
+    // ETH loops — try WS cache first, fall back to REST
+    const cached = getTriPrices();
+    const krakenTri = cached.kraken;
+    if (krakenTri) {
+      ethPrices = {
+        solBid: krakenTri.solBid, solAsk: krakenTri.solAsk,
+        ethBid: krakenTri.ethBid, ethAsk: krakenTri.ethAsk,
+        ethSolBid: krakenTri.ethSolBid, ethSolAsk: krakenTri.ethSolAsk,
       };
-    } catch (e) {
-      res.status(500).json({ error: `BTC tri prices unavailable: ${(e as Error).message}` });
-      return;
+    } else {
+      try {
+        const r = await fetch("https://api.kraken.com/0/public/Ticker?pair=XETHZUSD,SOLUSD,ETHSOL", {
+          signal: AbortSignal.timeout(5_000),
+        });
+        const data = await r.json() as { error?: string[]; result?: Record<string, { b: string[]; a: string[] }> };
+        if (data.error?.length || !data.result) throw new Error("Kraken REST error");
+        const res_ = data.result;
+        const ethKey    = Object.keys(res_).find(k => k.includes("ETH") && k.includes("USD"));
+        const solKey    = Object.keys(res_).find(k => k.startsWith("SOL") && k.endsWith("USD"));
+        const ethSolKey = Object.keys(res_).find(k => k.includes("ETH") && k.includes("SOL"));
+        if (!ethKey || !solKey || !ethSolKey) throw new Error("Missing ETH pairs in Kraken response");
+        ethPrices = {
+          ethBid:    parseFloat(res_[ethKey].b[0]),    ethAsk:    parseFloat(res_[ethKey].a[0]),
+          solBid:    parseFloat(res_[solKey].b[0]),     solAsk:    parseFloat(res_[solKey].a[0]),
+          ethSolBid: parseFloat(res_[ethSolKey].b[0]), ethSolAsk: parseFloat(res_[ethSolKey].a[0]),
+        };
+      } catch (e) {
+        res.status(500).json({ error: `ETH tri prices unavailable: ${(e as Error).message}` });
+        return;
+      }
     }
   }
-
-  const { solBid, solAsk, btcBid, btcAsk, solBtcBid, solBtcAsk } = prices;
 
   // 2. Determine trade size (USD)
   // Python: force = min(usd, 10); auto-loop = min(usd * 0.2, 50)
@@ -302,21 +389,39 @@ router.post("/arb/execute-triangular", async (req, res): Promise<void> => {
 
   // 3. Compute raw volumes (no per-leg fee in amounts — Python does the same).
   //    Profit estimate uses flat fee deduction: gross − TRI_TOTAL_FEES_PCT.
-  let btcAmt: number;
-  let solAmt: number;
   let grossPct: number;
+  let leg1Vol: number; // primary asset volume for leg1/leg3
+  let leg2Vol: number; // intermediate asset volume for leg2
 
-  if (loop === "USD→BTC→SOL→USD") {
-    // USD → buy BTC → buy SOL with BTC → sell SOL for USD
-    btcAmt   = tradeUsd / btcAsk;
-    solAmt   = btcAmt / solBtcAsk;
-    grossPct = (solAmt * solBid / tradeUsd - 1) * 100;
+  if (isBtc) {
+    const { solBid, solAsk, btcBid, btcAsk, solBtcBid, solBtcAsk } = btcPrices!;
+    if (loop === "USD→BTC→SOL→USD") {
+      // USD → buy BTC → buy SOL with BTC → sell SOL for USD
+      leg1Vol  = tradeUsd / btcAsk;           // BTC amount
+      leg2Vol  = leg1Vol / solBtcAsk;          // SOL amount
+      grossPct = (leg2Vol * solBid / tradeUsd - 1) * 100;
+    } else {
+      // USD → buy SOL → sell SOL for BTC → sell BTC for USD
+      leg1Vol  = tradeUsd / solAsk;            // SOL amount
+      leg2Vol  = leg1Vol * solBtcBid;          // BTC amount
+      grossPct = (leg2Vol * btcBid / tradeUsd - 1) * 100;
+    }
   } else {
-    // USD → buy SOL → sell SOL for BTC → sell BTC for USD
-    solAmt   = tradeUsd / solAsk;
-    btcAmt   = solAmt * solBtcBid;
-    grossPct = (btcAmt * btcBid / tradeUsd - 1) * 100;
+    const { solBid, solAsk, ethBid, ethAsk, ethSolBid, ethSolAsk } = ethPrices!;
+    // ethSolBid/Ask = SOL per ETH on ETHSOL pair (ETH=base, SOL=quote)
+    if (loop === "USD→SOL→ETH→USD") {
+      // USD → buy SOL → buy ETH (pay SOL) → sell ETH for USD
+      leg1Vol  = tradeUsd / solAsk;            // SOL amount purchased
+      leg2Vol  = leg1Vol / ethSolAsk;          // ETH amount (solAmt / (SOL per ETH) = ETH)
+      grossPct = (leg2Vol * ethBid / tradeUsd - 1) * 100;
+    } else {
+      // USD → buy ETH → sell ETH for SOL → sell SOL for USD
+      leg1Vol  = tradeUsd / ethAsk;            // ETH amount purchased
+      leg2Vol  = leg1Vol * ethSolBid;          // SOL amount (ethAmt × SOL/ETH at bid = SOL)
+      grossPct = (leg2Vol * solBid / tradeUsd - 1) * 100;
+    }
   }
+
   const estimatedProfitUsd = (grossPct - TRI_TOTAL_FEES_PCT) / 100 * tradeUsd;
 
   if (isDryRun) {
@@ -325,47 +430,215 @@ router.post("/arb/execute-triangular", async (req, res): Promise<void> => {
     return;
   }
 
-  // 4. Execute 3 sequential orders:
-  //    limit (auto-loop, post-only maker) or market (force button).
-  //    Limit prices: buys at ask, sells at bid — matching Python v13.
-  try {
-    let leg1Id: string;
-    let leg2Id: string;
-    let leg3Id: string;
+  // 4. Execute 3 sequential orders.
+  //    On failure: cancel unfilled limit orders or place reverse market orders to unwind.
+  let leg1Id = "";
+  let leg2Id = "";
+  let leg3Id = "";
 
-    if (loop === "USD→BTC→SOL→USD") {
-      const r1 = useLimit
-        ? await krakenRawLimitOrder(creds, "buy",  btcAmt, btcAsk,    "XXBTZUSD")
-        : await krakenRawMarketOrder(creds, "buy",  btcAmt,            "XXBTZUSD");
-      leg1Id = r1.txid[0] ?? "";
-      const r2 = useLimit
-        ? await krakenRawLimitOrder(creds, "buy",  solAmt, solBtcAsk, "SOLXBT")
-        : await krakenRawMarketOrder(creds, "buy",  solAmt,            "SOLXBT");
-      leg2Id = r2.txid[0] ?? "";
-      const r3 = useLimit
-        ? await krakenRawLimitOrder(creds, "sell", solAmt, solBid,    "SOLUSD")
-        : await krakenRawMarketOrder(creds, "sell", solAmt,            "SOLUSD");
-      leg3Id = r3.txid[0] ?? "";
+  try {
+    // ── BTC loops ────────────────────────────────────────────────────────────
+    if (isBtc) {
+      const { solBid, solAsk, btcAsk, solBtcAsk, solBtcBid, btcBid } = btcPrices!;
+      const btcAmt = leg1Vol;
+      const solAmt = leg2Vol;
+
+      if (loop === "USD→BTC→SOL→USD") {
+        // Leg 1: buy BTC with USD
+        try {
+          const r1 = useLimit
+            ? await krakenRawLimitOrder(creds, "buy",  btcAmt, btcAsk,    "XXBTZUSD")
+            : await krakenRawMarketOrder(creds, "buy",  btcAmt,            "XXBTZUSD");
+          leg1Id = r1.txid[0] ?? "";
+        } catch (e) {
+          throw new Error(`Leg 1 failed: ${(e as Error).message}`);
+        }
+
+        // Leg 2: buy SOL with BTC
+        try {
+          const r2 = useLimit
+            ? await krakenRawLimitOrder(creds, "buy",  solAmt, solBtcAsk, "SOLXBT")
+            : await krakenRawMarketOrder(creds, "buy",  solAmt,            "SOLXBT");
+          leg2Id = r2.txid[0] ?? "";
+        } catch (e) {
+          // Unwind leg 1: cancel if limit, else sell BTC back
+          if (useLimit) await tryCancel(creds, leg1Id, "leg1 BTC buy", log);
+          else await tryUnwindMarket(creds, "sell", btcAmt, "XXBTZUSD", "sell BTC (unwind leg1)", log);
+          throw new Error(`Leg 2 failed (leg 1 unwound): ${(e as Error).message}`);
+        }
+
+        // Leg 3: sell SOL for USD
+        try {
+          const r3 = useLimit
+            ? await krakenRawLimitOrder(creds, "sell", solAmt, solBid,    "SOLUSD")
+            : await krakenRawMarketOrder(creds, "sell", solAmt,            "SOLUSD");
+          leg3Id = r3.txid[0] ?? "";
+        } catch (e) {
+          // Unwind legs 1+2: sell acquired SOL back
+          if (useLimit) {
+            await tryCancel(creds, leg2Id, "leg2 SOL buy", log);
+            await tryCancel(creds, leg1Id, "leg1 BTC buy", log);
+          } else {
+            await tryUnwindMarket(creds, "sell", solAmt, "SOLXBT", "sell SOL→BTC (unwind leg2)", log);
+            await tryUnwindMarket(creds, "sell", btcAmt, "XXBTZUSD", "sell BTC (unwind leg1)", log);
+          }
+          throw new Error(`Leg 3 failed (legs 1+2 unwound): ${(e as Error).message}`);
+        }
+      } else {
+        // USD→SOL→BTC→USD
+        const solAmt2 = leg1Vol;  // SOL
+        const btcAmt2 = leg2Vol;  // BTC
+
+        // Leg 1: buy SOL with USD
+        try {
+          const r1 = useLimit
+            ? await krakenRawLimitOrder(creds, "buy",  solAmt2, solAsk,    "SOLUSD")
+            : await krakenRawMarketOrder(creds, "buy",  solAmt2,            "SOLUSD");
+          leg1Id = r1.txid[0] ?? "";
+        } catch (e) {
+          throw new Error(`Leg 1 failed: ${(e as Error).message}`);
+        }
+
+        // Leg 2: sell SOL for BTC
+        try {
+          const r2 = useLimit
+            ? await krakenRawLimitOrder(creds, "sell", solAmt2, solBtcBid, "SOLXBT")
+            : await krakenRawMarketOrder(creds, "sell", solAmt2,            "SOLXBT");
+          leg2Id = r2.txid[0] ?? "";
+        } catch (e) {
+          if (useLimit) await tryCancel(creds, leg1Id, "leg1 SOL buy", log);
+          else await tryUnwindMarket(creds, "sell", solAmt2, "SOLUSD", "sell SOL (unwind leg1)", log);
+          throw new Error(`Leg 2 failed (leg 1 unwound): ${(e as Error).message}`);
+        }
+
+        // Leg 3: sell BTC for USD
+        try {
+          const r3 = useLimit
+            ? await krakenRawLimitOrder(creds, "sell", btcAmt2, btcBid,    "XXBTZUSD")
+            : await krakenRawMarketOrder(creds, "sell", btcAmt2,            "XXBTZUSD");
+          leg3Id = r3.txid[0] ?? "";
+        } catch (e) {
+          if (useLimit) {
+            await tryCancel(creds, leg2Id, "leg2 SOL sell", log);
+            await tryCancel(creds, leg1Id, "leg1 SOL buy", log);
+          } else {
+            await tryUnwindMarket(creds, "buy", solAmt2, "SOLXBT", "buy SOL back (unwind leg2)", log);
+            await tryUnwindMarket(creds, "sell", solAmt2, "SOLUSD", "sell SOL (unwind leg1)", log);
+          }
+          throw new Error(`Leg 3 failed (legs 1+2 unwound): ${(e as Error).message}`);
+        }
+      }
+
+    // ── ETH loops ────────────────────────────────────────────────────────────
     } else {
-      const r1 = useLimit
-        ? await krakenRawLimitOrder(creds, "buy",  solAmt, solAsk,    "SOLUSD")
-        : await krakenRawMarketOrder(creds, "buy",  solAmt,            "SOLUSD");
-      leg1Id = r1.txid[0] ?? "";
-      const r2 = useLimit
-        ? await krakenRawLimitOrder(creds, "sell", solAmt, solBtcBid, "SOLXBT")
-        : await krakenRawMarketOrder(creds, "sell", solAmt,            "SOLXBT");
-      leg2Id = r2.txid[0] ?? "";
-      const r3 = useLimit
-        ? await krakenRawLimitOrder(creds, "sell", btcAmt, btcBid,    "XXBTZUSD")
-        : await krakenRawMarketOrder(creds, "sell", btcAmt,            "XXBTZUSD");
-      leg3Id = r3.txid[0] ?? "";
+      const { solBid, solAsk, ethBid, ethAsk, ethSolBid, ethSolAsk } = ethPrices!;
+
+      // ETHSOL on Kraken: ETH = base, SOL = quote.
+      //   "buy"  ETHSOL → buy ETH (base), pay SOL  — volume in ETH
+      //   "sell" ETHSOL → sell ETH (base), receive SOL — volume in ETH
+      // ethSolAsk = SOL per ETH (ask: cost to buy 1 ETH)
+      // ethSolBid = SOL per ETH (bid: proceeds from selling 1 ETH)
+
+      if (loop === "USD→SOL→ETH→USD") {
+        // USD → buy SOL → buy ETH (pay SOL) → sell ETH for USD
+        const solAmt = leg1Vol;   // SOL purchased in leg 1
+        const ethAmt = leg2Vol;   // ETH purchased in leg 2
+
+        // Leg 1: buy SOL with USD
+        try {
+          const r1 = useLimit
+            ? await krakenRawLimitOrder(creds, "buy",  solAmt, solAsk, "SOLUSD")
+            : await krakenRawMarketOrder(creds, "buy",  solAmt,         "SOLUSD");
+          leg1Id = r1.txid[0] ?? "";
+        } catch (e) {
+          throw new Error(`Leg 1 failed: ${(e as Error).message}`);
+        }
+
+        // Leg 2: buy ETH on ETHSOL (pay SOL, receive ETH)
+        //   Order side = "buy" (buying base currency ETH); volume = ethAmt (base)
+        try {
+          const r2 = useLimit
+            ? await krakenRawLimitOrder(creds, "buy", ethAmt, ethSolAsk, "ETHSOL")
+            : await krakenRawMarketOrder(creds, "buy", ethAmt,            "ETHSOL");
+          leg2Id = r2.txid[0] ?? "";
+        } catch (e) {
+          // Unwind leg 1: still have SOL — sell it back for USD
+          if (useLimit) await tryCancel(creds, leg1Id, "leg1 SOL buy", log);
+          else await tryUnwindMarket(creds, "sell", solAmt, "SOLUSD", "sell SOL (unwind leg1)", log);
+          throw new Error(`Leg 2 failed (leg 1 unwound): ${(e as Error).message}`);
+        }
+
+        // Leg 3: sell ETH for USD
+        try {
+          const r3 = useLimit
+            ? await krakenRawLimitOrder(creds, "sell", ethAmt, ethBid, "XETHZUSD")
+            : await krakenRawMarketOrder(creds, "sell", ethAmt,         "XETHZUSD");
+          leg3Id = r3.txid[0] ?? "";
+        } catch (e) {
+          // Unwind legs 1+2: have ETH — sell directly for USD (skip SOL leg, fewer slippage steps)
+          if (useLimit) {
+            await tryCancel(creds, leg2Id, "leg2 ETH buy", log);
+            await tryCancel(creds, leg1Id, "leg1 SOL buy", log);
+          } else {
+            await tryUnwindMarket(creds, "sell", ethAmt, "XETHZUSD", "sell ETH for USD (unwind legs 1+2)", log);
+          }
+          throw new Error(`Leg 3 failed (legs 1+2 unwound): ${(e as Error).message}`);
+        }
+
+      } else {
+        // USD→ETH→SOL→USD
+        // USD → buy ETH → sell ETH for SOL → sell SOL for USD
+        const ethAmt2 = leg1Vol;  // ETH purchased in leg 1
+        const solAmt2 = leg2Vol;  // SOL received in leg 2
+
+        // Leg 1: buy ETH with USD
+        try {
+          const r1 = useLimit
+            ? await krakenRawLimitOrder(creds, "buy",  ethAmt2, ethAsk, "XETHZUSD")
+            : await krakenRawMarketOrder(creds, "buy",  ethAmt2,         "XETHZUSD");
+          leg1Id = r1.txid[0] ?? "";
+        } catch (e) {
+          throw new Error(`Leg 1 failed: ${(e as Error).message}`);
+        }
+
+        // Leg 2: sell ETH on ETHSOL (receive SOL)
+        //   Order side = "sell" (selling base currency ETH); volume = ethAmt2 (base)
+        try {
+          const r2 = useLimit
+            ? await krakenRawLimitOrder(creds, "sell", ethAmt2, ethSolBid, "ETHSOL")
+            : await krakenRawMarketOrder(creds, "sell", ethAmt2,            "ETHSOL");
+          leg2Id = r2.txid[0] ?? "";
+        } catch (e) {
+          // Unwind leg 1: still have ETH — sell back for USD
+          if (useLimit) await tryCancel(creds, leg1Id, "leg1 ETH buy", log);
+          else await tryUnwindMarket(creds, "sell", ethAmt2, "XETHZUSD", "sell ETH (unwind leg1)", log);
+          throw new Error(`Leg 2 failed (leg 1 unwound): ${(e as Error).message}`);
+        }
+
+        // Leg 3: sell SOL for USD
+        try {
+          const r3 = useLimit
+            ? await krakenRawLimitOrder(creds, "sell", solAmt2, solBid, "SOLUSD")
+            : await krakenRawMarketOrder(creds, "sell", solAmt2,         "SOLUSD");
+          leg3Id = r3.txid[0] ?? "";
+        } catch (e) {
+          // Unwind legs 1+2: have SOL — sell for USD
+          if (useLimit) {
+            await tryCancel(creds, leg2Id, "leg2 ETH sell", log);
+            await tryCancel(creds, leg1Id, "leg1 ETH buy", log);
+          } else {
+            await tryUnwindMarket(creds, "sell", solAmt2, "SOLUSD", "sell SOL for USD (unwind legs 1+2)", log);
+          }
+          throw new Error(`Leg 3 failed (legs 1+2 unwound): ${(e as Error).message}`);
+        }
+      }
     }
 
     req.log.info({ loop, tradeUsd, estimatedProfitUsd, orderType, leg1Id, leg2Id, leg3Id }, "Triangular executed");
     res.json({ success: true, isDryRun: false, estimatedProfitUsd, leg1OrderId: leg1Id, leg2OrderId: leg2Id, leg3OrderId: leg3Id });
   } catch (err) {
-    req.log.error({ err, loop, orderType }, "Triangular execution error");
-    res.status(500).json({ error: (err as Error).message });
+    req.log.error({ err, loop, orderType, leg1Id, leg2Id }, "Triangular execution error — partial state logged");
+    res.status(500).json({ error: (err as Error).message, leg1OrderId: leg1Id || null, leg2OrderId: leg2Id || null });
   }
 });
 

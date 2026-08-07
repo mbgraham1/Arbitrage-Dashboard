@@ -67,6 +67,11 @@ export interface BotContextType {
   /** Manually fire the best BTC triangular loop (market orders, $10 test) */
   forceTriangular: () => Promise<void>;
   isForcingTriangular: boolean;
+  /**
+   * True while any triangular trade (force or auto) is executing.
+   * Used by the dashboard TRI card to show EXECUTING state.
+   */
+  isExecutingTriangular: boolean;
   /** Latest triangular arb opportunities from the server-side scan */
   triOpportunities: TriangularOpportunity[];
   /** Latest cointegration mean-reversion signals from the Kalman filter scan */
@@ -164,6 +169,7 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
   const [secretsLoaded, setSecretsLoaded] = useState(false);
   const [isForcingTrade, setIsForcingTrade] = useState(false);
   const [isForcingTriangular, setIsForcingTriangular] = useState(false);
+  const [isAutoExecutingTri, setIsAutoExecutingTri] = useState(false);
   const [triOpportunities, setTriOpportunities] = useState<TriangularOpportunity[]>([]);
   const [cointSignals, setCointSignals] = useState<CointegrationSignal[]>([]);
 
@@ -227,7 +233,8 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
         );
       }
 
-      // Auto-execute best BTC loop when bot is running, live mode, edge clears threshold
+      // Auto-execute best opportunity when bot is running, live mode, edge clears threshold.
+      // Priority: BTC loops first (liquid SOLXBT market), then ETH loops.
       const s = settingsRef.current;
       const creds = credentialsRef.current;
       const now = Date.now();
@@ -236,24 +243,33 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
         isRunning &&
         liveModeRef.current &&
         !emergencyStopRef.current &&
+        !isAutoExecutingTri &&
         now - lastTriTradeTimeRef.current >= cooldownMs
       ) {
-        const bestBtc = opps
-          .filter(o => o.variant === "btc" && o.profitPct >= s.minNetEdge)
-          .sort((a, b) => b.profitPct - a.profitPct)[0];
+        // Pick best opportunity above threshold: prefer BTC variant, then ETH
+        const qualified = opps.filter(o => o.profitPct >= s.minNetEdge);
+        const bestBtc = qualified.filter(o => o.variant === "btc").sort((a, b) => b.profitPct - a.profitPct)[0];
+        const bestEth = qualified.filter(o => o.variant !== "btc").sort((a, b) => b.profitPct - a.profitPct)[0];
+        const best = bestBtc ?? bestEth;
 
-        if (bestBtc) {
+        if (best) {
+          const tag = best.variant === "btc" ? "TRI·BTC·AUTO" : "TRI·ETH·AUTO";
           lastTriTradeTimeRef.current = now;
-          addLog("trade", `[TRI·BTC·AUTO] ${bestBtc.loop} | +${bestBtc.profitPct.toFixed(3)}% — firing`);
+          setIsAutoExecutingTri(true);
+          addLog("trade", `[${tag}] ${best.loop} | +${best.profitPct.toFixed(3)}% — firing`);
           executeTriangularMutation.mutate(
-            // auto-loop: limit (post-only maker, ~0.16%×3 = 0.48% fees), Python v13 behaviour
-            { data: { krakenKey: creds.krakenKey, krakenSecret: creds.krakenSecret, loop: bestBtc.loop, isDryRun: false, orderType: "limit" } },
+            // auto-loop: market orders ensure immediate fills; taker fees already in TRI_TOTAL_FEES_PCT
+            { data: { krakenKey: creds.krakenKey, krakenSecret: creds.krakenSecret, loop: best.loop, isDryRun: false, orderType: "market" } },
             {
               onSuccess: (r) => {
-                if (r.success) addLog("success", `[TRI·BTC·AUTO] Done — est. $${r.estimatedProfitUsd.toFixed(2)}`);
-                else addLog("error", `[TRI·BTC·AUTO] Failed: ${r.error}`);
+                setIsAutoExecutingTri(false);
+                if (r.success) addLog("success", `[${tag}] Done — est. $${r.estimatedProfitUsd.toFixed(2)}`);
+                else addLog("error", `[${tag}] Failed: ${r.error}`);
               },
-              onError: (e) => addLog("error", `[TRI·BTC·AUTO] Exception: ${e instanceof Error ? e.message : "Unknown"}`),
+              onError: (e) => {
+                setIsAutoExecutingTri(false);
+                addLog("error", `[${tag}] Exception: ${e instanceof Error ? e.message : "Unknown"}`);
+              },
             }
           );
         }
@@ -606,6 +622,8 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isRunning]);
 
+  const isExecutingTriangular = isForcingTriangular || isAutoExecutingTri || executeTriangularMutation.isPending;
+
   const value: BotContextType = {
     credentials,
     setCredentials,
@@ -633,6 +651,7 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
     isForcingTrade,
     forceTriangular,
     isForcingTriangular,
+    isExecutingTriangular,
     triOpportunities,
     cointSignals,
   };

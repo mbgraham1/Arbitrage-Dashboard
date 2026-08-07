@@ -77,11 +77,11 @@ export default function Dashboard() {
     settings, credentials, addLog,
     forceTrade, isForcingTrade,
     forceTriangular, isForcingTriangular,
+    isExecutingTriangular,
     emergencyStop, setEmergencyStop,
     startTime, failedTrades, sessionTradeCount, apiLatencyMs,
     triOpportunities,
   } = useBotContext();
-
   const [uptimeStr, setUptimeStr] = useState("0h 0m");
   useEffect(() => {
     if (!startTime) { setUptimeStr("0h 0m"); return; }
@@ -90,7 +90,7 @@ export default function Dashboard() {
       setUptimeStr(`${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`);
     };
     tick();
-    const id = setInterval(tick, 1_000);
+    const id = setInterval(tick, 60_000);
     return () => clearInterval(id);
   }, [startTime]);
 
@@ -476,7 +476,7 @@ export default function Dashboard() {
       <MultiCoinRankerCard settings={settings} />
 
       {/* Triangular Arb Opportunities */}
-      <TriangularCard opportunities={triOpportunities} isRunning={isRunning} />
+      <TriangularCard opportunities={triOpportunities} isRunning={isRunning} isExecutingTri={isExecutingTriangular} />
       <OrderBookHunterCard />
 
       {/* Trade History Table */}
@@ -679,19 +679,27 @@ function OrderBookHunterCard() {
 function TriangularCard({
   opportunities,
   isRunning,
+  isExecutingTri,
 }: {
   opportunities: Array<{ exchange: string; loop: string; profitPct: number; solUsd: number; ethUsd: number; ethSol: number; variant?: string; timestamp: string }>;
   isRunning: boolean;
+  isExecutingTri?: boolean;
 }) {
   return (
     <Card>
       <CardHeader className="py-3 flex flex-row items-center justify-between space-y-0">
         <CardTitle className="text-sm flex items-center gap-2">
-          <RefreshCw className="h-4 w-4" /> Triangular Arbitrage
+          <RefreshCw className={cn("h-4 w-4", isExecutingTri && "animate-spin text-yellow-500")} />
+          Triangular Arbitrage
           <span className="text-[9px] font-mono font-bold px-1 border border-primary text-primary">TRI</span>
           <span className="text-[10px] font-mono text-muted-foreground">Same-exchange loops</span>
+          {isExecutingTri && (
+            <span className="text-[9px] font-mono font-bold px-1.5 py-0.5 rounded bg-yellow-500/20 text-yellow-500 border border-yellow-500/50 animate-pulse">
+              EXECUTING
+            </span>
+          )}
         </CardTitle>
-        {isRunning && (
+        {isRunning && !isExecutingTri && (
           <span className="text-[10px] font-mono text-muted-foreground">scanning…</span>
         )}
       </CardHeader>
