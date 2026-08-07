@@ -752,21 +752,21 @@ export function useGetAllPairSnapshots<TData = Awaited<ReturnType<typeof getAllP
 
 
 
-export const getScanAllPairsUrl = () => {
-
-
-
-
-  return `/api/arb/scan`
+export const getScanAllPairsUrl = (params?: { enabledPairs?: string[] }) => {
+  const url = `/api/arb/scan`;
+  if (params?.enabledPairs && params.enabledPairs.length > 0) {
+    return `${url}?enabledPairs=${params.enabledPairs.map(encodeURIComponent).join(",")}`;
+  }
+  return url;
 }
 
 /**
  * Port of Python scan_all_coins(). Fetches bid/ask for all 10 configured pairs from Kraken and Coinbase and returns them sorted by gross spread (best direction per pair) descending. Net edge = grossSpreadPct minus the client's fee + slippage settings.
  * @summary Scan all 10 pairs and rank by cross-exchange gross spread
  */
-export const scanAllPairs = async ( options?: RequestInit): Promise<PairScanEntry[]> => {
+export const scanAllPairs = async (params?: { enabledPairs?: string[] }, options?: RequestInit): Promise<PairScanEntry[]> => {
 
-  return customFetch<PairScanEntry[]>(getScanAllPairsUrl(),
+  return customFetch<PairScanEntry[]>(getScanAllPairsUrl(params),
   {
     ...options,
     method: 'GET'
@@ -779,23 +779,24 @@ export const scanAllPairs = async ( options?: RequestInit): Promise<PairScanEntr
 
 
 
-export const getScanAllPairsQueryKey = () => {
+export const getScanAllPairsQueryKey = (params?: { enabledPairs?: string[] }) => {
     return [
-    `/api/arb/scan`
+    `/api/arb/scan`,
+    ...(params?.enabledPairs && params.enabledPairs.length > 0 ? [{ enabledPairs: params.enabledPairs }] : [])
     ] as const;
     }
 
 
-export const getScanAllPairsQueryOptions = <TData = Awaited<ReturnType<typeof scanAllPairs>>, TError = ErrorType<ErrorResponse>>( options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof scanAllPairs>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+export const getScanAllPairsQueryOptions = <TData = Awaited<ReturnType<typeof scanAllPairs>>, TError = ErrorType<ErrorResponse>>(params?: { enabledPairs?: string[] }, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof scanAllPairs>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
 ) => {
 
 const {query: queryOptions, request: requestOptions} = options ?? {};
 
-  const queryKey =  queryOptions?.queryKey ?? getScanAllPairsQueryKey();
+  const queryKey =  queryOptions?.queryKey ?? getScanAllPairsQueryKey(params);
 
 
 
-    const queryFn: QueryFunction<Awaited<ReturnType<typeof scanAllPairs>>> = ({ signal }) => scanAllPairs({ signal, ...requestOptions });
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof scanAllPairs>>> = ({ signal }) => scanAllPairs(params, { signal, ...(requestOptions as RequestInit) });
 
 
 
@@ -813,11 +814,12 @@ export type ScanAllPairsQueryError = ErrorType<ErrorResponse>
  */
 
 export function useScanAllPairs<TData = Awaited<ReturnType<typeof scanAllPairs>>, TError = ErrorType<ErrorResponse>>(
+  params?: { enabledPairs?: string[] },
   options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof scanAllPairs>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
 
  ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
 
-  const queryOptions = getScanAllPairsQueryOptions(options)
+  const queryOptions = getScanAllPairsQueryOptions(params, options)
 
   const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
 

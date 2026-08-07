@@ -616,11 +616,16 @@ export interface PairScanEntry {
 
 /**
  * Port of Python scan_all_coins().
- * Fetches prices for all 10 pairs and returns them sorted by gross spread
- * (Kraken ↔ Coinbase, best direction) descending.
+ * Fetches prices for all 10 pairs (or a filtered subset) and returns them
+ * sorted by gross spread (Kraken ↔ Coinbase, best direction) descending.
+ *
+ * @param enabledPairs - optional allow-list of pair symbols; scans all when omitted or empty
  */
-export async function scanAllPairs(): Promise<PairScanEntry[]> {
-  const allPrices = await Promise.all(PAIRS.map(p => getPairPrices(p)));
+export async function scanAllPairs(enabledPairs?: string[]): Promise<PairScanEntry[]> {
+  const pairsToScan: Pair[] = enabledPairs && enabledPairs.length > 0
+    ? PAIRS.filter(p => enabledPairs.includes(p))
+    : [...PAIRS];
+  const allPrices = await Promise.all(pairsToScan.map(p => getPairPrices(p)));
   const scannedAt = new Date().toISOString();
   const results: PairScanEntry[] = [];
 

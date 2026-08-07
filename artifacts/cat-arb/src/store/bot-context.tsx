@@ -609,7 +609,7 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
 
       try {
         addLog("info", "[FORCE] Scanning all pairs for best spread...");
-        const entries = await scanAllPairs();
+        const entries = await scanAllPairs({ enabledPairs: settingsRef.current.enabledPairs });
 
         const best = entries && entries.length > 0 ? entries[0] : null;
 

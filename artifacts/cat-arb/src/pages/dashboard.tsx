@@ -650,8 +650,9 @@ function AllPairsCard({ activePair }: { activePair: string | null }) {
 
 // ── Multi-Coin Opportunity Ranker ─────────────────────────────────────────────
 
-function MultiCoinRankerCard({ settings }: { settings: { totalFees: number; slippage: number; minNetEdge: number } }) {
-  const scanQuery = useScanAllPairs();
+function MultiCoinRankerCard({ settings }: { settings: { totalFees: number; slippage: number; minNetEdge: number; enabledPairs?: string[] } }) {
+  const enabledPairs = settings.enabledPairs && settings.enabledPairs.length > 0 ? settings.enabledPairs : undefined;
+  const scanQuery = useScanAllPairs({ enabledPairs });
   // Refresh every 5 s independently of the bot poll loop
   useEffect(() => {
     const id = setInterval(() => { scanQuery.refetch(); }, 5_000);

@@ -182,9 +182,19 @@ router.get("/prices/all-pairs", (_req, res): void => {
 });
 
 // ── GET /arb/scan — all 10 pairs ranked by gross spread ───────────────────────
-router.get("/arb/scan", async (_req, res): Promise<void> => {
+// Optional query param: enabledPairs (comma-separated or repeated) — same filter
+// as the /prices POST so disabled pairs don't appear in scan results.
+router.get("/arb/scan", async (req, res): Promise<void> => {
   try {
-    const entries = await scanAllPairs();
+    // Accept enabledPairs as a comma-separated string or repeated query params
+    const raw = req.query["enabledPairs"];
+    let enabledPairs: string[] | undefined;
+    if (raw != null) {
+      const vals = Array.isArray(raw) ? raw.map(String) : String(raw).split(",");
+      const filtered = vals.map(v => v.trim()).filter(Boolean);
+      if (filtered.length > 0) enabledPairs = filtered;
+    }
+    const entries = await scanAllPairs(enabledPairs);
     res.json(entries);
   } catch (err) {
     res.status(500).json({ error: (err as Error).message });
