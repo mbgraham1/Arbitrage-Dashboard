@@ -760,12 +760,14 @@ components:
 
     ObCycleEntry:
       type: object
-      required: [route, assetA, assetB, estimatedProfitUsd, profitPct, avgPriceA, avgCrossRate, avgPriceB, volumeA, slippagePct, status, confidencePct]
+      required: [route, assetA, assetB, estimatedProfitUsd, profitPct, grossProfitUsd, feeUsd, avgPriceA, avgCrossRate, avgPriceB, volumeA, slippagePct, status, confidencePct]
       properties:
         route: {type: string, description: "e.g. USD→SOL→ETH→USD"}
         assetA: {type: string}
         assetB: {type: string}
         estimatedProfitUsd: {type: number}
+        grossProfitUsd: {type: number, description: "raw triangle edge ($) before fees, slippage included"}
+        feeUsd: {type: number, description: "total 3-leg fee drag ($) at the scan's per-leg fee rate"}
         profitPct: {type: number, description: "profit as % of tradeSizeUsd"}
         avgPriceA: {type: number, description: "average USD fill price for leg 1"}
         avgCrossRate: {type: number, description: "average B-per-A cross rate"}

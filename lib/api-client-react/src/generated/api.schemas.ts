@@ -227,6 +227,10 @@ export interface ObCycleEntry {
   estimatedProfitUsd: number;
   /** profit as % of tradeSizeUsd */
   profitPct: number;
+  /** raw triangle edge ($) before fees, slippage included */
+  grossProfitUsd: number;
+  /** total 3-leg fee drag ($) at the scan's per-leg fee rate */
+  feeUsd: number;
   /** average USD fill price for leg 1 */
   avgPriceA: number;
   /** average B-per-A cross rate */

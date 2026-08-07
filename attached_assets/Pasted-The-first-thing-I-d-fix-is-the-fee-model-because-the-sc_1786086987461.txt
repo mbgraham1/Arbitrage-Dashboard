@@ -1,0 +1,106 @@
+The first thing I’d fix is the fee model, because the screenshot is basically screaming that the bot is subtracting about 1.2% from every route.
+
+That pattern is too consistent:
+
+-1.203%
+-1.207%
+-1.212%
+-1.214%
+-1.216%
+
+That looks very much like:
+
+~0.40% Kraken fee × 3 trades = ~1.20%
+
+So the scanner may actually be doing the math correctly — but it also means 3-leg triangular arbitrage with taker orders is almost impossible at that fee tier.
+
+What I would change
+
+First, make the analyzer separate these numbers instead of hiding everything inside “net”:
+
+RAW TRIANGLE EDGE      +0.034%
+LEG 1 FEE              -0.400%
+LEG 2 FEE              -0.400%
+LEG 3 FEE              -0.400%
+ORDER-BOOK SLIPPAGE    -0.018%
+--------------------------------
+FINAL NET              -1.184%
+
+That immediately tells you whether you’re fighting the market or a coding bug.
+
+Then I’d verify the fee calculation is structured like this:
+
+amount = starting_usd
+
+# leg 1
+amount_after_leg1 = leg1_output * (Decimal("1") - fee_rate)
+
+# leg 2
+amount_after_leg2 = leg2_output * (Decimal("1") - fee_rate)
+
+# leg 3
+final_usd = leg3_output * (Decimal("1") - fee_rate)
+
+profit = final_usd - starting_usd
+profit_pct = profit / starting_usd * Decimal("100")
+
+Not this:
+
+profit_pct = raw_profit_pct - combined_fee
+
+unless combined_fee is explicitly the correct total for all three legs.
+
+Also make sure you’re not doing both:
+
+price_with_fee = ...
+
+and later:
+
+profit -= fees
+
+because that would double-count the fees.
+
+The bigger issue
+
+If your actual Kraken taker fee really is around 0.40% per leg, the bot needs roughly:
+
+1.20%+ raw triangular mispricing
+
+just to break even before spread/slippage.
+
+That’s enormous for BTC/ETH/XRP-type liquid markets. You can make the scanner technically perfect and it still won’t produce many profitable taker triangles.
+
+So I’d build CAT_ARB around two modes:
+TAKER MODE
+Fast execution
+Three taker fees
+Requires a very large edge
+MAKER MODE 
+Lower fees
+Much smaller required edge
+But orders may not fill and the triangle can disappear
+
+And I’d have the dashboard automatically use your actual Kraken fee tier, rather than a guessed fee.
+
+One other thing I’d add immediately
+
+Put a diagnostic box above your routes:
+
+KRAKEN FEE DIAGNOSTIC
+
+Fee per leg:       0.400%
+3-leg fee drag:    1.195%
+Avg spread drag:   0.014%
+Break-even edge:   1.209%
+
+Best raw edge now: 0.027%
+
+RESULT:
+No executable triangle
+
+Then you’ll instantly know why everything is red.
+
+So I would not try to “fix” this by lowering the fee number. I would first confirm whether that ~1.2% is genuinely three Kraken fees. If it is, then the real problem is the economics of using three taker orders—not your scanner.
+
+If you paste the function that calculates NET PROFIT for those triangular routes, I can inspect the math and tell you whether the -1.2% is legitimate or a fee-calculation bug.
+

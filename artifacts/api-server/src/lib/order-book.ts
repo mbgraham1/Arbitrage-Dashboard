@@ -221,6 +221,10 @@ export interface ObCycleEntry {
   assetB: string;
   estimatedProfitUsd: number;
   profitPct: number;
+  /** Raw triangle edge in $ before fees (order-book slippage already included) */
+  grossProfitUsd: number;
+  /** Total 3-leg fee drag in $ at the scan's per-leg fee rate */
+  feeUsd: number;
   /** Average fill price for leg 1: USD per A */
   avgPriceA: number;
   /** Average fill rate for leg 2: B per A (cross rate) */
@@ -296,7 +300,7 @@ function simulateCycle(
   startUsd: number,
   orderbooks: Map<string, OrderBook>,
   feesPct: number,
-): { profitUsd: number; avg1: number; avg2: number; avg3: number; volA: number; slippagePct: number; confidencePct: number } | null {
+): { profitUsd: number; grossProfitUsd: number; feeUsd: number; avg1: number; avg2: number; avg3: number; volA: number; slippagePct: number; confidencePct: number } | null {
   const usdPairA = OB_USD_PAIRS[assetA];
   const usdPairB = OB_USD_PAIRS[assetB];
   const cross    = CROSS_LOOKUP.get(`${assetA}-${assetB}`);
@@ -406,7 +410,7 @@ function simulateCycle(
   const cov3 = coverage(obBUsd.bids[0]?.[1], bAmt);                       // leg 3: B units
   const confidencePct = Math.round(((cov1 + cov2 + cov3) / 3) * 100);
 
-  return { profitUsd: netProfit, avg1, avg2, avg3, volA: aAmt, slippagePct, confidencePct };
+  return { profitUsd: netProfit, grossProfitUsd: grossProfit, feeUsd, avg1, avg2, avg3, volA: aAmt, slippagePct, confidencePct };
 }
 
 // ── v18: manual execution pre-flight ─────────────────────────────────────────
@@ -546,6 +550,8 @@ export async function scanOrderBookCycles(
           assetA,
           assetB,
           estimatedProfitUsd:  r.profitUsd,
+          grossProfitUsd:      r.grossProfitUsd,
+          feeUsd:              r.feeUsd,
           profitPct:           (r.profitUsd / tradeSizeUsd) * 100,
           avgPriceA:           r.avg1,
           avgCrossRate:        r.avg2,

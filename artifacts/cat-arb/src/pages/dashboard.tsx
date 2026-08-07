@@ -826,6 +826,18 @@ function OrderBookHunterCard() {
             ⚠ Top route {topCycle.route} profit ${topCycle.estimatedProfitUsd.toFixed(4)} is below your ${minProfit.toFixed(2)} minimum — pre-flight will reject unless the edge improves.
           </div>
         )}
+        {data && topCycle && (
+          <div className="px-3 py-2 text-[10px] font-mono border-b border-border/50 bg-muted/30 grid grid-cols-2 sm:grid-cols-5 gap-x-4 gap-y-0.5">
+            <span className="col-span-2 sm:col-span-5 font-bold uppercase text-muted-foreground">Kraken Fee Diagnostic</span>
+            <span className="text-muted-foreground">Fee/leg: <span className="text-foreground">{data.feesPct.toFixed(2)}%</span></span>
+            <span className="text-muted-foreground">3-leg drag: <span className="text-foreground">${topCycle.feeUsd.toFixed(4)} ({((topCycle.feeUsd / tradeSize) * 100).toFixed(3)}%)</span></span>
+            <span className="text-muted-foreground">Break-even edge: <span className="text-foreground">{((topCycle.feeUsd / tradeSize) * 100).toFixed(3)}%</span></span>
+            <span className="text-muted-foreground">Best raw edge: <span className={topCycle.grossProfitUsd > 0 ? "text-success" : "text-destructive"}>${topCycle.grossProfitUsd.toFixed(4)} ({((topCycle.grossProfitUsd / tradeSize) * 100).toFixed(3)}%)</span></span>
+            <span className={cn("font-bold", topCycle.estimatedProfitUsd > minProfit ? "text-success" : "text-destructive")}>
+              {topCycle.estimatedProfitUsd > minProfit ? "✅ EXECUTABLE TRIANGLE" : "✕ NO EXECUTABLE TRIANGLE"}
+            </span>
+          </div>
+        )}
         {cycles.length === 0 ? (
           <div className="p-6 text-center text-sm font-mono text-muted-foreground">
             {isLoading
@@ -839,7 +851,7 @@ function OrderBookHunterCard() {
             <table className="w-full text-xs font-mono border-collapse">
               <thead>
                 <tr className="border-b-2 border-border bg-muted/50">
-                  {["#", "Route", "Net Profit", "Profit %", "Slippage", "Confidence", "Status", "Vol A"].map(h => (
+                  {["#", "Route", "Raw Edge", "Fees", "Net Profit", "Profit %", "Slippage", "Confidence", "Status", "Vol A"].map(h => (
                     <th key={h} className="text-left px-3 py-2 text-[10px] uppercase font-bold text-muted-foreground whitespace-nowrap">{h}</th>
                   ))}
                 </tr>
@@ -854,6 +866,12 @@ function OrderBookHunterCard() {
                     )}>
                       <td className="px-3 py-1.5 text-muted-foreground">{i + 1}</td>
                       <td className="px-3 py-1.5 font-bold text-foreground whitespace-nowrap">{c.route}</td>
+                      <td className={cn("px-3 py-1.5", c.grossProfitUsd > 0 ? "text-success" : "text-destructive")}>
+                        ${c.grossProfitUsd.toFixed(4)}
+                      </td>
+                      <td className="px-3 py-1.5 text-muted-foreground">
+                        -${c.feeUsd.toFixed(4)}
+                      </td>
                       <td className={cn("px-3 py-1.5 font-bold", c.estimatedProfitUsd > 0 ? "text-success" : "text-destructive")}>
                         ${c.estimatedProfitUsd.toFixed(4)}
                       </td>
