@@ -156,11 +156,33 @@ export interface TriangularOpportunity {
   profitPct: number;
   /** SOL/USD mid price used */
   solUsd: number;
-  /** ETH/USD mid price used */
+  /** ETH/USD or BTC/USD mid price used (see variant) */
   ethUsd: number;
-  /** ETH/SOL mid price used */
+  /** ETH/SOL or SOL/BTC mid price used (see variant) */
   ethSol: number;
+  /** 'eth' for ETH/SOL loops, 'btc' for BTC/SOL loops (v13) */
+  variant?: string;
   timestamp: string;
+}
+
+export interface TriExecuteRequest {
+  krakenKey: string;
+  krakenSecret: string;
+  /** USD→BTC→SOL→USD or USD→SOL→BTC→USD */
+  loop: string;
+  /** Override trade size in USD. Auto-sized when omitted. */
+  tradeUsd?: number;
+  isDryRun?: boolean;
+}
+
+export interface TriExecuteResult {
+  success: boolean;
+  isDryRun: boolean;
+  estimatedProfitUsd: number;
+  leg1OrderId?: string | null;
+  leg2OrderId?: string | null;
+  leg3OrderId?: string | null;
+  error?: string | null;
 }
 
 /**

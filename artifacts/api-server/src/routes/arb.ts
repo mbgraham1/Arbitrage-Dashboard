@@ -7,6 +7,7 @@ import {
   TestKrakenBody,
   TestCoinbaseBody,
   ExecuteTradeBody,
+  ExecuteTriangularBody,
   ListTradesQueryParams,
 } from "@workspace/api-zod";
 import {
@@ -14,6 +15,7 @@ import {
   getKrakenBalances,
   krakenMarketOrder,
   krakenLimitOrder,
+  krakenRawMarketOrder,
   krakenOrderFilled,
   krakenFillPrice,
   krakenCancelOrder,
@@ -26,7 +28,7 @@ import {
   PAIRS,
   type Pair,
 } from "../lib/exchange";
-import { getBestPairPrices, getTriPrices, scanAllPairs } from "../lib/price-cache";
+import { getBestPairPrices, getTriPrices, getBtcTriPrices, scanAllPairs } from "../lib/price-cache";
 
 // ── Triangular arb helpers ─────────────────────────────────────────────────────
 
@@ -38,8 +40,9 @@ interface TriOpp {
   loop: string;
   profitPct: number;
   solUsd: number;
-  ethUsd: number;
-  ethSol: number;
+  ethUsd: number;   // for BTC variant: holds BTC/USD mid
+  ethSol: number;   // for BTC variant: holds SOL/BTC mid
+  variant?: "eth" | "btc";
   timestamp: string;
 }
 
@@ -83,6 +86,45 @@ function computeTriLoops(
   return result;
 }
 
+/**
+ * Port of Python v13 scan_triangular(): BTC/SOL/USD loops on Kraken.
+ * Uses SOLXBT (SOL/BTC) direct market alongside BTC/USD and SOL/USD.
+ *
+ * Loop 1: USD → BTC → SOL → USD
+ *   product = solBid×(1–f) / (btcAsk×(1+f) × solBtcAsk×(1+f))
+ *
+ * Loop 2: USD → SOL → BTC → USD
+ *   product = solBtcBid×(1–f) × btcBid×(1–f) / (solAsk×(1+f))
+ */
+function computeBtcTriLoops(
+  solBid: number, solAsk: number,
+  btcBid: number, btcAsk: number,
+  solBtcBid: number, solBtcAsk: number,
+): TriOpp[] {
+  const f = TRI_FEE_PER_LEG;
+  const ts = new Date().toISOString();
+  const solUsdMid = (solBid + solAsk) / 2;
+  const btcUsdMid = (btcBid + btcAsk) / 2;
+  const solBtcMid = (solBtcBid + solBtcAsk) / 2;
+  const result: TriOpp[] = [];
+
+  // Loop 1: USD → BTC → SOL → USD
+  const product1 = (solBid * (1 - f)) / (btcAsk * (1 + f) * solBtcAsk * (1 + f));
+  const profit1 = (product1 - 1) * 100;
+  if (profit1 >= TRI_MIN_PROFIT_PCT) {
+    result.push({ exchange: "Kraken", loop: "USD→BTC→SOL→USD", profitPct: profit1, solUsd: solUsdMid, ethUsd: btcUsdMid, ethSol: solBtcMid, variant: "btc", timestamp: ts });
+  }
+
+  // Loop 2: USD → SOL → BTC → USD
+  const product2 = (solBtcBid * (1 - f) * btcBid * (1 - f)) / (solAsk * (1 + f));
+  const profit2 = (product2 - 1) * 100;
+  if (profit2 >= TRI_MIN_PROFIT_PCT) {
+    result.push({ exchange: "Kraken", loop: "USD→SOL→BTC→USD", profitPct: profit2, solUsd: solUsdMid, ethUsd: btcUsdMid, ethSol: solBtcMid, variant: "btc", timestamp: ts });
+  }
+
+  return result;
+}
+
 const router: IRouter = Router();
 
 // ── GET /arb/scan — all 10 pairs ranked by gross spread ───────────────────────
@@ -114,8 +156,135 @@ router.get("/arb/triangular", async (_req, res): Promise<void> => {
       opportunities.push(...computeTriLoops("Coinbase", solBid, solAsk, ethBid, ethAsk, ethSolBid, ethSolAsk));
     }
 
+    // BTC triangular loops (v13 Python port — Kraken SOLXBT market)
+    const btcPrices = getBtcTriPrices();
+    if (btcPrices) {
+      const { solBid, solAsk, btcBid, btcAsk, solBtcBid, solBtcAsk } = btcPrices;
+      prices.krakenBtc = { solBid, solAsk, btcBid, btcAsk, solBtcBid, solBtcAsk };
+      opportunities.push(...computeBtcTriLoops(solBid, solAsk, btcBid, btcAsk, solBtcBid, solBtcAsk));
+    }
+
+    // Sort all opportunities by profitPct descending
+    opportunities.sort((a, b) => b.profitPct - a.profitPct);
+
     res.json({ opportunities, prices, scannedAt: new Date().toISOString() });
   } catch (err) {
+    res.status(500).json({ error: (err as Error).message });
+  }
+});
+
+// ── POST /arb/execute-triangular ──────────────────────────────────────────────
+// Port of Python v13 FORCE TRIANGULAR + auto-loop execution.
+// Executes BTC/SOL/USD triangular loops on Kraken via 3 sequential market orders.
+// Sizing: tradeUsd override → $10 (dry/force) → 20% of USD balance capped at $50 (auto).
+router.post("/arb/execute-triangular", async (req, res): Promise<void> => {
+  const parsed = ExecuteTriangularBody.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: parsed.error.message });
+    return;
+  }
+
+  const { krakenKey, krakenSecret, loop, tradeUsd: overrideUsd, isDryRun } = parsed.data;
+
+  const VALID_LOOPS = ["USD→BTC→SOL→USD", "USD→SOL→BTC→USD"];
+  if (!VALID_LOOPS.includes(loop)) {
+    res.status(400).json({ error: `Invalid loop "${loop}". Valid: ${VALID_LOOPS.join(", ")}` });
+    return;
+  }
+
+  const creds = { krakenKey, krakenSecret };
+
+  // 1. Get prices — cached WS prices or fresh REST fallback
+  let prices = getBtcTriPrices();
+  if (!prices) {
+    try {
+      const r = await fetch("https://api.kraken.com/0/public/Ticker?pair=XXBTZUSD,SOLUSD,SOLXBT", {
+        signal: AbortSignal.timeout(5_000),
+      });
+      const data = await r.json() as { error?: string[]; result?: Record<string, { b: string[]; a: string[] }> };
+      if (data.error?.length || !data.result) throw new Error("Kraken REST error");
+      const res_ = data.result;
+      const btcKey = Object.keys(res_).find(k => k.includes("XBT") && k.includes("USD"));
+      const solKey = Object.keys(res_).find(k => k.startsWith("SOL") && k.endsWith("USD"));
+      const solBtcKey = Object.keys(res_).find(k => k.startsWith("SOL") && k.includes("XBT"));
+      if (!btcKey || !solKey || !solBtcKey) throw new Error("Missing pairs in Kraken response");
+      prices = {
+        btcBid: parseFloat(res_[btcKey].b[0]),    btcAsk: parseFloat(res_[btcKey].a[0]),
+        solBid: parseFloat(res_[solKey].b[0]),     solAsk: parseFloat(res_[solKey].a[0]),
+        solBtcBid: parseFloat(res_[solBtcKey].b[0]), solBtcAsk: parseFloat(res_[solBtcKey].a[0]),
+      };
+    } catch (e) {
+      res.status(500).json({ error: `BTC tri prices unavailable: ${(e as Error).message}` });
+      return;
+    }
+  }
+
+  const { solBid, solAsk, btcBid, btcAsk, solBtcBid, solBtcAsk } = prices;
+  const f = TRI_FEE_PER_LEG;
+
+  // 2. Determine trade size (USD)
+  let tradeUsd = overrideUsd;
+  if (tradeUsd == null) {
+    if (isDryRun) {
+      tradeUsd = 10; // standard test amount (Python: min(usd, 10))
+    } else {
+      const balances = await getKrakenBalances(creds);
+      const usdBal = balances.find(b => ["ZUSD", "USD"].includes(b.currency))?.amount ?? 0;
+      tradeUsd = Math.min(usdBal * 0.2, 50); // Python: min(usd * 0.2, 50)
+      if (tradeUsd < 1) {
+        res.json({ success: false, isDryRun: false, estimatedProfitUsd: 0, error: "Insufficient USD balance (< $5)" });
+        return;
+      }
+    }
+  }
+
+  // 3. Compute amounts and estimated profit
+  let btcAmt: number;
+  let solAmt: number;
+  let estimatedProfitUsd: number;
+
+  if (loop === "USD→BTC→SOL→USD") {
+    btcAmt  = (tradeUsd / btcAsk) * (1 - f);
+    solAmt  = (btcAmt / solBtcAsk) * (1 - f);
+    estimatedProfitUsd = solAmt * solBid * (1 - f) - tradeUsd;
+  } else {
+    solAmt  = (tradeUsd / solAsk) * (1 - f);
+    btcAmt  = solAmt * solBtcBid * (1 - f);
+    estimatedProfitUsd = btcAmt * btcBid * (1 - f) - tradeUsd;
+  }
+
+  if (isDryRun) {
+    req.log.info({ loop, tradeUsd, estimatedProfitUsd }, "Triangular dry run");
+    res.json({ success: true, isDryRun: true, estimatedProfitUsd, leg1OrderId: null, leg2OrderId: null, leg3OrderId: null });
+    return;
+  }
+
+  // 4. Execute 3 sequential market orders
+  try {
+    let leg1Id: string;
+    let leg2Id: string;
+    let leg3Id: string;
+
+    if (loop === "USD→BTC→SOL→USD") {
+      const r1 = await krakenRawMarketOrder(creds, "buy",  btcAmt, "XXBTZUSD");
+      leg1Id = r1.txid[0] ?? "";
+      const r2 = await krakenRawMarketOrder(creds, "buy",  solAmt, "SOLXBT");
+      leg2Id = r2.txid[0] ?? "";
+      const r3 = await krakenRawMarketOrder(creds, "sell", solAmt, "SOLUSD");
+      leg3Id = r3.txid[0] ?? "";
+    } else {
+      const r1 = await krakenRawMarketOrder(creds, "buy",  solAmt, "SOLUSD");
+      leg1Id = r1.txid[0] ?? "";
+      const r2 = await krakenRawMarketOrder(creds, "sell", solAmt, "SOLXBT");
+      leg2Id = r2.txid[0] ?? "";
+      const r3 = await krakenRawMarketOrder(creds, "sell", btcAmt, "XXBTZUSD");
+      leg3Id = r3.txid[0] ?? "";
+    }
+
+    req.log.info({ loop, tradeUsd, estimatedProfitUsd, leg1Id, leg2Id, leg3Id }, "Triangular executed");
+    res.json({ success: true, isDryRun: false, estimatedProfitUsd, leg1OrderId: leg1Id, leg2OrderId: leg2Id, leg3OrderId: leg3Id });
+  } catch (err) {
+    req.log.error({ err, loop }, "Triangular execution error");
     res.status(500).json({ error: (err as Error).message });
   }
 });

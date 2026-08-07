@@ -260,6 +260,42 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
 
+  /arb/execute-triangular:
+    post:
+      operationId: executeTriangular
+      tags: [trades]
+      summary: Execute a BTC/SOL/USD triangular loop on Kraken
+      description: >
+        Port of Python v13 FORCE TRIANGULAR. Places 3 sequential market orders on Kraken
+        for either the USD→BTC→SOL→USD or USD→SOL→BTC→USD loop. In dry-run mode only
+        computes the estimated profit without placing orders. Trade size defaults to 10 USD
+        (dry/force) or 20% of USD balance capped at $50 (auto-loop).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TriExecuteRequest"
+      responses:
+        "200":
+          description: Execution result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TriExecuteResult"
+        "400":
+          description: Bad request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Execution error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
   /trades/summary:
     get:
       operationId: getTradeSummary
@@ -558,6 +594,43 @@ components:
         scannedAt:
           type: string
 
+    TriExecuteRequest:
+      type: object
+      required: [krakenKey, krakenSecret, loop]
+      properties:
+        krakenKey:
+          type: string
+        krakenSecret:
+          type: string
+        loop:
+          type: string
+          description: "USD→BTC→SOL→USD or USD→SOL→BTC→USD"
+        tradeUsd:
+          type: number
+          description: "Override trade size in USD. Auto-sized when omitted."
+        isDryRun:
+          type: boolean
+          default: false
+
+    TriExecuteResult:
+      type: object
+      required: [success, isDryRun, estimatedProfitUsd]
+      properties:
+        success:
+          type: boolean
+        isDryRun:
+          type: boolean
+        estimatedProfitUsd:
+          type: number
+        leg1OrderId:
+          type: ["string", "null"]
+        leg2OrderId:
+          type: ["string", "null"]
+        leg3OrderId:
+          type: ["string", "null"]
+        error:
+          type: ["string", "null"]
+
     TriangularOpportunity:
       type: object
       required: [exchange, loop, profitPct, solUsd, ethUsd, ethSol, timestamp]
@@ -576,10 +649,13 @@ components:
           description: "SOL/USD mid price used"
         ethUsd:
           type: number
-          description: "ETH/USD mid price used"
+          description: "ETH/USD or BTC/USD mid price used (see variant)"
         ethSol:
           type: number
-          description: "ETH/SOL mid price used"
+          description: "ETH/SOL or SOL/BTC mid price used (see variant)"
+        variant:
+          type: string
+          description: "'eth' for ETH/SOL loops, 'btc' for BTC/SOL loops (v13)"
         timestamp:
           type: string
 

@@ -151,6 +151,25 @@ export async function krakenLimitOrder(
   }, creds);
 }
 
+/**
+ * Places a market order using an arbitrary raw Kraken pair symbol.
+ * Used for triangular arb legs that have no canonical Pair mapping
+ * (e.g. "SOLXBT", "XXBTZUSD").
+ */
+export async function krakenRawMarketOrder(
+  creds: KrakenCreds,
+  side: "buy" | "sell",
+  volume: number,
+  rawPair: string,
+): Promise<{ txid: string[] }> {
+  return krakenPrivateRequest<{ txid: string[] }>("/0/private/AddOrder", {
+    pair: rawPair,
+    type: side,
+    ordertype: "market",
+    volume: volume.toFixed(8),
+  }, creds);
+}
+
 interface KrakenOrderInfo { status?: string; price?: string; vol_exec?: string; }
 
 /** Returns true if the order is fully filled, false if open/partial/unknown. */

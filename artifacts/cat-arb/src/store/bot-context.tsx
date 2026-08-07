@@ -6,6 +6,7 @@ import {
   useFetchPrices,
   useFetchBalances,
   useExecuteTrade,
+  useExecuteTriangular,
   useGetPreloadedCredentials,
   useScanTriangularArb,
   getScanTriangularArbQueryKey,
@@ -61,6 +62,9 @@ export interface BotContextType {
   secretsLoaded: boolean;
   forceTrade: () => Promise<void>;
   isForcingTrade: boolean;
+  /** Manually fire the best BTC triangular loop (market orders, $10 test) */
+  forceTriangular: () => Promise<void>;
+  isForcingTriangular: boolean;
   /** Latest triangular arb opportunities from the server-side scan */
   triOpportunities: TriangularOpportunity[];
 }
@@ -155,6 +159,7 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
   const [startTime, setStartTime] = useState<number | null>(null);
   const [secretsLoaded, setSecretsLoaded] = useState(false);
   const [isForcingTrade, setIsForcingTrade] = useState(false);
+  const [isForcingTriangular, setIsForcingTriangular] = useState(false);
   const [triOpportunities, setTriOpportunities] = useState<TriangularOpportunity[]>([]);
 
   // ── Refs that give poll() always-current values without re-triggering effects ──
@@ -184,6 +189,7 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
   const fetchPricesMutation = useFetchPrices();
   const fetchBalancesMutation = useFetchBalances();
   const executeTradeMutation = useExecuteTrade();
+  const executeTriangularMutation = useExecuteTriangular();
 
   // ── Triangular arb scan — runs independently while bot is active ──────────────
   // Polls the /arb/triangular endpoint on the same interval as the cross-exchange
@@ -197,17 +203,54 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
     },
   });
 
+  const lastTriTradeTimeRef = useRef<number>(0);
+
   useEffect(() => {
     if (!triScan.data) return;
     const opps = triScan.data.opportunities;
     setTriOpportunities(opps);
     if (opps.length > 0) {
       for (const opp of opps) {
+        const variant = opp.variant === "btc" ? "BTC" : "ETH";
         addLog(
           "info",
-          `[TRI] ${opp.exchange} ${opp.loop} | Net +${opp.profitPct.toFixed(3)}% | ` +
-          `SOL/USD $${opp.solUsd.toFixed(4)} ETH/USD $${opp.ethUsd.toFixed(2)} ETH/SOL ${opp.ethSol.toFixed(4)}`
+          `[TRI·${variant}] ${opp.exchange} ${opp.loop} | Net +${opp.profitPct.toFixed(3)}% | ` +
+          `SOL/USD $${opp.solUsd.toFixed(4)} ` +
+          (opp.variant === "btc"
+            ? `BTC/USD $${opp.ethUsd.toFixed(2)} SOL/BTC ${opp.ethSol.toFixed(6)}`
+            : `ETH/USD $${opp.ethUsd.toFixed(2)} ETH/SOL ${opp.ethSol.toFixed(4)}`)
         );
+      }
+
+      // Auto-execute best BTC loop when bot is running, live mode, edge clears threshold
+      const s = settingsRef.current;
+      const creds = credentialsRef.current;
+      const now = Date.now();
+      const cooldownMs = s.cooldown * 1000;
+      if (
+        isRunning &&
+        liveModeRef.current &&
+        !emergencyStopRef.current &&
+        now - lastTriTradeTimeRef.current >= cooldownMs
+      ) {
+        const bestBtc = opps
+          .filter(o => o.variant === "btc" && o.profitPct >= s.minNetEdge)
+          .sort((a, b) => b.profitPct - a.profitPct)[0];
+
+        if (bestBtc) {
+          lastTriTradeTimeRef.current = now;
+          addLog("trade", `[TRI·BTC·AUTO] ${bestBtc.loop} | +${bestBtc.profitPct.toFixed(3)}% — firing`);
+          executeTriangularMutation.mutate(
+            { data: { krakenKey: creds.krakenKey, krakenSecret: creds.krakenSecret, loop: bestBtc.loop, isDryRun: false } },
+            {
+              onSuccess: (r) => {
+                if (r.success) addLog("success", `[TRI·BTC·AUTO] Done — est. $${r.estimatedProfitUsd.toFixed(2)}`);
+                else addLog("error", `[TRI·BTC·AUTO] Failed: ${r.error}`);
+              },
+              onError: (e) => addLog("error", `[TRI·BTC·AUTO] Exception: ${e instanceof Error ? e.message : "Unknown"}`),
+            }
+          );
+        }
       }
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -322,6 +365,39 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
     // executeTradeMutation and queryClient are stable (React Query guarantees)
     [addLog, executeTradeMutation, queryClient],
   );
+
+  // ── Force Triangular ──────────────────────────────────────────────────────────
+  // Port of Python v13 "FORCE TRIANGULAR" button: fires best BTC loop with $10 test.
+  const forceTriangular = useCallback(async () => {
+    if (executeTriangularMutation.isPending) return;
+    setIsForcingTriangular(true);
+    try {
+      const creds = credentialsRef.current;
+      const opps = triOpportunities.filter(o => o.variant === "btc").sort((a, b) => b.profitPct - a.profitPct);
+      const best = opps[0];
+      const loop = best?.loop ?? "USD→BTC→SOL→USD"; // sensible default
+
+      addLog("trade", `[TRI·FORCE] ${loop} — test $10`);
+      const r = await executeTriangularMutation.mutateAsync({
+        data: {
+          krakenKey: creds.krakenKey,
+          krakenSecret: creds.krakenSecret,
+          loop,
+          tradeUsd: 10,
+          isDryRun: !liveModeRef.current,
+        },
+      });
+      if (r.success) {
+        addLog("success", `[TRI·FORCE] Done — est. $${r.estimatedProfitUsd.toFixed(2)}${r.isDryRun ? " (dry)" : ""}`);
+      } else {
+        addLog("error", `[TRI·FORCE] Failed: ${r.error}`);
+      }
+    } catch (err) {
+      addLog("error", `[TRI·FORCE] Error: ${err instanceof Error ? err.message : "Unknown"}`);
+    } finally {
+      setIsForcingTriangular(false);
+    }
+  }, [addLog, executeTriangularMutation, triOpportunities]);
 
   // ── Force Trade ───────────────────────────────────────────────────────────────
   // Always executes on Kraken/Coinbase only — uses cached prices when available,
@@ -519,6 +595,8 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
     secretsLoaded,
     forceTrade,
     isForcingTrade,
+    forceTriangular,
+    isForcingTriangular,
     triOpportunities,
   };
 

@@ -61,7 +61,7 @@ const KUCOIN_SYMBOL: Record<Pair, string> = {
   "ADA/USD":  "ADA-USDT",
 };
 
-// ── Triangular arb cache — only ETH/SOL direct market (USD legs now in pairCache) ──
+// ── Triangular arb cache — ETH/SOL and SOL/BTC direct markets ────────────────
 interface TriEntry {
   bid: number;
   ask: number;
@@ -72,6 +72,9 @@ const triEthSol: { kraken: TriEntry | null; coinbase: TriEntry | null } = {
   kraken: null,
   coinbase: null,
 };
+
+// SOL/BTC direct market on Kraken (SOLXBT) — BTC triangular loops (v13 Python port)
+const triSolBtc: { kraken: TriEntry | null } = { kraken: null };
 
 // ── WebSocket helpers ──────────────────────────────────────────────────────────
 
@@ -122,8 +125,8 @@ function reconnectingWs(
 // Kraken v2 WS uses the same "PAIR/USD" notation as our canonical PAIRS.
 
 function startKrakenWs(): void {
-  // All 10 pairs + ETH/SOL for triangular arb
-  const symbols = [...PAIRS as readonly string[], "ETH/SOL"];
+  // All 10 pairs + ETH/SOL + SOL/BTC for triangular arb
+  const symbols = [...PAIRS as readonly string[], "ETH/SOL", "SOL/BTC"];
 
   reconnectingWs(
     "wss://ws.kraken.com/v2",
@@ -148,9 +151,14 @@ function startKrakenWs(): void {
             const mid = (bid != null && ask != null) ? (bid + ask) / 2 : (last ?? 0);
             if (mid <= 0) continue;
 
-            // ETH/SOL direct market → tri cache only
+            // ETH/SOL direct market → tri cache (ETH loops)
             if (d.symbol === "ETH/SOL") {
               triEthSol.kraken = { bid: bid ?? mid, ask: ask ?? mid, updatedAt: Date.now() };
+              continue;
+            }
+            // SOL/BTC direct market → tri cache (BTC loops — v13 Python port)
+            if (d.symbol === "SOL/BTC") {
+              triSolBtc.kraken = { bid: bid ?? mid, ask: ask ?? mid, updatedAt: Date.now() };
               continue;
             }
 
@@ -364,6 +372,37 @@ export function getTriPrices(): TriPrices {
   }
 
   return { kraken: krakenResult, coinbase: coinbaseResult };
+}
+
+// ── BTC triangular arb prices (SOL/BTC direct market, Kraken only) ────────────
+// Port of Python v13 scan_triangular() which uses XXBTZUSD, SOLUSD, SOLXBT.
+
+export interface BtcTriPrices {
+  solBid: number; solAsk: number;
+  btcBid: number; btcAsk: number;
+  solBtcBid: number; solBtcAsk: number; // SOL price denominated in BTC
+}
+
+/**
+ * Returns Kraken bid/ask for all three legs of the BTC triangular loop.
+ * SOL/USD and BTC/USD come from pairCache; SOL/BTC from the direct WS market.
+ * Returns null when any leg is stale (> 30 s).
+ */
+export function getBtcTriPrices(): BtcTriPrices | null {
+  const now = Date.now();
+  const kSol = pairCache.get("SOL/USD")!.kraken;
+  const kBtc = pairCache.get("BTC/USD")!.kraken;
+  const kSolBtc = triSolBtc.kraken;
+  if (
+    !kSol || now - kSol.updatedAt > TRI_STALE_MS ||
+    !kBtc || now - kBtc.updatedAt > TRI_STALE_MS ||
+    !kSolBtc || now - kSolBtc.updatedAt > TRI_STALE_MS
+  ) return null;
+  return {
+    solBid: kSol.bid ?? kSol.price,  solAsk: kSol.ask ?? kSol.price,
+    btcBid: kBtc.bid ?? kBtc.price,  btcAsk: kBtc.ask ?? kBtc.price,
+    solBtcBid: kSolBtc.bid,          solBtcAsk: kSolBtc.ask,
+  };
 }
 
 // ── Multi-pair cross-exchange interface ────────────────────────────────────────

@@ -35,7 +35,9 @@ import type {
   TradeRequest,
   TradeResult,
   TradeSummary,
-  TriangularScanResult
+  TriangularScanResult,
+  TriExecuteRequest,
+  TriExecuteResult,
 } from './api.schemas';
 
 import { customFetch } from '../custom-fetch';
@@ -736,6 +738,55 @@ export function useScanTriangularArb<TData = Awaited<ReturnType<typeof scanTrian
 
 
 
+
+// ── /arb/execute-triangular ───────────────────────────────────────────────────
+
+export const getExecuteTriangularUrl = () => `/api/arb/execute-triangular`;
+
+/**
+ * Port of Python v13 FORCE TRIANGULAR. Executes 3 sequential market orders on
+ * Kraken for USD→BTC→SOL→USD or USD→SOL→BTC→USD. Dry-run returns estimate only.
+ * @summary Execute a BTC/SOL/USD triangular loop on Kraken
+ */
+export const executeTriangular = async (
+  triExecuteRequest: TriExecuteRequest,
+  options?: RequestInit,
+): Promise<TriExecuteResult> => {
+  return customFetch<TriExecuteResult>(getExecuteTriangularUrl(), {
+    ...options,
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...options?.headers },
+    body: JSON.stringify(triExecuteRequest),
+  });
+};
+
+export const getExecuteTriangularMutationOptions = <
+  TError = ErrorType<ErrorResponse>,
+  TContext = unknown,
+>(
+  options?: { mutation?: UseMutationOptions<Awaited<ReturnType<typeof executeTriangular>>, TError, { data: BodyType<TriExecuteRequest> }, TContext>; request?: SecondParameter<typeof customFetch> },
+): UseMutationOptions<Awaited<ReturnType<typeof executeTriangular>>, TError, { data: BodyType<TriExecuteRequest> }, TContext> => {
+  const { mutation: mutationOptions, request: requestOptions } = options ?? {};
+  const mutationKey = ["executeTriangular"];
+  const mutationFn: MutationFunction<Awaited<ReturnType<typeof executeTriangular>>, { data: BodyType<TriExecuteRequest> }> = (props) => {
+    const { data } = props ?? {};
+    return executeTriangular(data, requestOptions);
+  };
+  return { mutationKey, mutationFn, ...mutationOptions };
+};
+
+export type ExecuteTriangularMutationResult = NonNullable<Awaited<ReturnType<typeof executeTriangular>>>;
+export type ExecuteTriangularMutationError = ErrorType<ErrorResponse>;
+
+/**
+ * @summary Execute a BTC/SOL/USD triangular loop on Kraken
+ */
+export const useExecuteTriangular = <TError = ErrorType<ErrorResponse>, TContext = unknown>(
+  options?: { mutation?: UseMutationOptions<Awaited<ReturnType<typeof executeTriangular>>, TError, { data: BodyType<TriExecuteRequest> }, TContext>; request?: SecondParameter<typeof customFetch> },
+): UseMutationResult<Awaited<ReturnType<typeof executeTriangular>>, TError, { data: BodyType<TriExecuteRequest> }, TContext> => {
+  const mutationOptions = getExecuteTriangularMutationOptions(options);
+  return useMutation(mutationOptions);
+};
 
 // ── /arb/scan ─────────────────────────────────────────────────────────────────
 

@@ -76,6 +76,7 @@ export default function Dashboard() {
     latestPriceData, cachedBalances, activityLog, sessionProfitUsd,
     settings, credentials, addLog,
     forceTrade, isForcingTrade,
+    forceTriangular, isForcingTriangular,
     emergencyStop, setEmergencyStop,
     startTime, failedTrades, sessionTradeCount, apiLatencyMs,
     triOpportunities,
@@ -205,6 +206,21 @@ export default function Dashboard() {
             >
               <Siren className="h-4 w-4 mr-2" />
               {isForcingTrade ? "EXECUTING..." : "FORCE MARKET TRADE"}
+            </Button>
+          )}
+
+          {/* Force Triangular — live mode only, $10 BTC/SOL test loop */}
+          {liveMode && (
+            <Button
+              variant="outline"
+              size="lg"
+              className="border-2 border-yellow-500 text-yellow-600 hover:bg-yellow-500 hover:text-white font-bold uppercase"
+              onClick={forceTriangular}
+              disabled={isForcingTriangular}
+              title="Fire best BTC/SOL/USD loop on Kraken with $10 test — 3 market orders"
+            >
+              <RefreshCw className={cn("h-4 w-4 mr-2", isForcingTriangular && "animate-spin")} />
+              {isForcingTriangular ? "TRI FIRING..." : "FORCE TRI"}
             </Button>
           )}
 
@@ -569,7 +585,7 @@ function TriangularCard({
   opportunities,
   isRunning,
 }: {
-  opportunities: Array<{ exchange: string; loop: string; profitPct: number; solUsd: number; ethUsd: number; ethSol: number; timestamp: string }>;
+  opportunities: Array<{ exchange: string; loop: string; profitPct: number; solUsd: number; ethUsd: number; ethSol: number; variant?: string; timestamp: string }>;
   isRunning: boolean;
 }) {
   return (
@@ -596,32 +612,43 @@ function TriangularCard({
             <table className="w-full text-xs font-mono border-collapse">
               <thead>
                 <tr className="border-b-2 border-border bg-muted/50">
-                  {["Tag", "Exchange", "Loop", "Net Profit", "SOL/USD", "ETH/USD", "ETH/SOL", "Detected"].map((h) => (
+                  {["Tag", "Exchange", "Loop", "Net Profit", "SOL/USD", "Other/USD", "Cross Rate", "Detected"].map((h) => (
                     <th key={h} className="text-left px-3 py-2 text-[10px] uppercase font-bold text-muted-foreground whitespace-nowrap">{h}</th>
                   ))}
                 </tr>
               </thead>
               <tbody>
-                {opportunities.map((opp, i) => (
-                  <tr key={`${opp.exchange}-${opp.loop}-${i}`} className={cn(
-                    "border-b border-border/50",
-                    i % 2 === 0 ? "" : "bg-muted/20",
-                    "animate-pulse-once"
-                  )}>
-                    <td className="px-3 py-1.5">
-                      <span className="text-[9px] font-mono font-bold px-1 border border-success text-success">TRI</span>
-                    </td>
-                    <td className="px-3 py-1.5 font-bold">{opp.exchange}</td>
-                    <td className="px-3 py-1.5 text-muted-foreground">{opp.loop}</td>
-                    <td className={cn("px-3 py-1.5 font-bold", opp.profitPct > 0 ? "text-success animate-pulse" : "")}>
-                      +{opp.profitPct.toFixed(3)}%
-                    </td>
-                    <td className="px-3 py-1.5">${opp.solUsd.toFixed(4)}</td>
-                    <td className="px-3 py-1.5">${opp.ethUsd.toFixed(2)}</td>
-                    <td className="px-3 py-1.5">{opp.ethSol.toFixed(4)}</td>
-                    <td className="px-3 py-1.5 text-muted-foreground whitespace-nowrap">{format(new Date(opp.timestamp), "HH:mm:ss")}</td>
-                  </tr>
-                ))}
+                {opportunities.map((opp, i) => {
+                  const isBtc = opp.variant === "btc";
+                  return (
+                    <tr key={`${opp.exchange}-${opp.loop}-${i}`} className={cn(
+                      "border-b border-border/50",
+                      i % 2 === 0 ? "" : "bg-muted/20",
+                    )}>
+                      <td className="px-3 py-1.5">
+                        <span className={cn(
+                          "text-[9px] font-mono font-bold px-1 border",
+                          isBtc ? "border-yellow-500 text-yellow-500" : "border-success text-success"
+                        )}>{isBtc ? "BTC" : "ETH"}</span>
+                      </td>
+                      <td className="px-3 py-1.5 font-bold">{opp.exchange}</td>
+                      <td className="px-3 py-1.5 text-muted-foreground">{opp.loop}</td>
+                      <td className={cn("px-3 py-1.5 font-bold", opp.profitPct > 0 ? "text-success animate-pulse" : "")}>
+                        +{opp.profitPct.toFixed(3)}%
+                      </td>
+                      <td className="px-3 py-1.5">${opp.solUsd.toFixed(4)}</td>
+                      <td className="px-3 py-1.5">
+                        <span className="text-[9px] text-muted-foreground mr-1">{isBtc ? "BTC" : "ETH"}</span>
+                        ${opp.ethUsd.toFixed(2)}
+                      </td>
+                      <td className="px-3 py-1.5">
+                        <span className="text-[9px] text-muted-foreground mr-1">{isBtc ? "SOL/BTC" : "ETH/SOL"}</span>
+                        {isBtc ? opp.ethSol.toFixed(6) : opp.ethSol.toFixed(4)}
+                      </td>
+                      <td className="px-3 py-1.5 text-muted-foreground whitespace-nowrap">{format(new Date(opp.timestamp), "HH:mm:ss")}</td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>

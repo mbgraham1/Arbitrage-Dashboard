@@ -163,6 +163,29 @@ export const ExecuteTradeResponse = zod.object({
 
 
 /**
+ * @summary Execute a BTC/SOL/USD triangular arbitrage loop on Kraken (v13 Python port)
+ */
+export const ExecuteTriangularBody = zod.object({
+  krakenKey: zod.string(),
+  krakenSecret: zod.string(),
+  /** "USD→BTC→SOL→USD" or "USD→SOL→BTC→USD" */
+  loop: zod.string(),
+  /** Override trade size in USD. Auto-sized (20% USD / max $50) when omitted. */
+  tradeUsd: zod.number().optional(),
+  isDryRun: zod.boolean().optional().default(false),
+})
+
+export const ExecuteTriangularResponse = zod.object({
+  success: zod.boolean(),
+  isDryRun: zod.boolean(),
+  estimatedProfitUsd: zod.number(),
+  leg1OrderId: zod.string().nullish(),
+  leg2OrderId: zod.string().nullish(),
+  leg3OrderId: zod.string().nullish(),
+  error: zod.string().nullish(),
+})
+
+/**
  * @summary Get trade history
  */
 export const listTradesQueryLimitDefault = 50;
