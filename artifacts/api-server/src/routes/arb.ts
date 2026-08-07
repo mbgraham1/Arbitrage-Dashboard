@@ -1,6 +1,6 @@
 import { Router, type IRouter } from "express";
 import { desc, sql, sum, count, max, avg } from "drizzle-orm";
-import { db, tradesTable } from "@workspace/db";
+import { db, tradesTable, triScanTable } from "@workspace/db";
 import {
   FetchPricesBody,
   FetchBalancesBody,
@@ -222,7 +222,52 @@ router.get("/arb/triangular", async (_req, res): Promise<void> => {
     // Sort all opportunities by profitPct descending
     opportunities.sort((a, b) => b.profitPct - a.profitPct);
 
+    // Persist detected opportunities to DB (fire-and-forget — never fail the scan response)
+    if (opportunities.length > 0) {
+      db.insert(triScanTable)
+        .values(
+          opportunities.map((opp) => ({
+            exchange: opp.exchange,
+            loop: opp.loop,
+            profitPct: String(opp.profitPct.toFixed(6)),
+            solUsd: String(opp.solUsd.toFixed(6)),
+            ethUsd: String(opp.ethUsd.toFixed(6)),
+            ethSol: String(opp.ethSol.toFixed(8)),
+            variant: opp.variant ?? null,
+            scannedAt: opp.timestamp,
+          })),
+        )
+        .catch(() => {});
+    }
+
     res.json({ opportunities, prices, scannedAt: new Date().toISOString() });
+  } catch (err) {
+    res.status(500).json({ error: (err as Error).message });
+  }
+});
+
+// ── GET /arb/triangular/history ───────────────────────────────────────────────
+router.get("/arb/triangular/history", async (req, res): Promise<void> => {
+  try {
+    const limit  = Math.min(200, Math.max(1, parseInt(String(req.query["limit"]  ?? "50"))  || 50));
+    const offset = Math.max(0,               parseInt(String(req.query["offset"] ?? "0"))   || 0);
+
+    const [items, [totalRow]] = await Promise.all([
+      db.select().from(triScanTable).orderBy(desc(triScanTable.createdAt)).limit(limit).offset(offset),
+      db.select({ total: count() }).from(triScanTable),
+    ]);
+
+    res.json({
+      items: items.map((r) => ({
+        ...r,
+        profitPct: parseFloat(r.profitPct),
+        solUsd:    parseFloat(r.solUsd),
+        ethUsd:    parseFloat(r.ethUsd),
+        ethSol:    parseFloat(r.ethSol),
+        createdAt: r.createdAt.toISOString(),
+      })),
+      total: Number(totalRow?.total ?? 0),
+    });
   } catch (err) {
     res.status(500).json({ error: (err as Error).message });
   }
