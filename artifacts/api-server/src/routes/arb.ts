@@ -43,7 +43,7 @@ import {
   type Pair,
 } from "../lib/exchange";
 import { getBestPairPrices, getTriPrices, getBtcTriPrices, scanAllPairs, getPairPrices, getAllPairSnapshots } from "../lib/price-cache";
-import { scanOrderBookCycles, preflightObCycle, OB_ASSETS, OB_USD_PAIRS, CROSS_LOOKUP, type ObAsset } from "../lib/order-book";
+import { scanOrderBookCycles, preflightObCycle, discoverCrossPairs, OB_ASSETS, OB_USD_PAIRS, CROSS_LOOKUP, type ObAsset } from "../lib/order-book";
 import { scanGraphOpportunities } from "../lib/graph-engine";
 import { createPairHistory, updatePairHistory, type PairHistory } from "../lib/kalman";
 import { waitForTriLimitFill } from "../lib/tri-fill.js";
@@ -299,7 +299,10 @@ async function runKrakenTriangle(input: TriangleExecInput, reqLog: ReqLog): Prom
     // 0. Use the account's ACTUAL taker fee tier when possible (advisor
     //    recommendation) instead of the caller's assumption. Falls back to the
     //    request's feesPct if the fee query fails (e.g. dry run with bad keys).
-    const crossPair = CROSS_LOOKUP.get(`${assetA}-${assetB}`)?.pair;
+    //    v19: use the dynamically-discovered cross map so execution works for
+    //    pairs not present in the hardcoded fallback.
+    const { lookup: activeLookup } = await discoverCrossPairs();
+    const crossPair = activeLookup.get(`${assetA}-${assetB}`)?.pair;
     const feePairs = [OB_USD_PAIRS[assetA as ObAsset], OB_USD_PAIRS[assetB as ObAsset], crossPair].filter((p): p is string => !!p);
     // All three legs are submitted POST-ONLY (limit at best bid/ask), so the
     // fee actually paid is the MAKER tier — the same tier the scanner uses in
@@ -353,7 +356,9 @@ async function runKrakenTriangle(input: TriangleExecInput, reqLog: ReqLog): Prom
     //    only reported when the position ends flat.
     const log = { info: (m: string) => reqLog.info(m), error: (m: string) => reqLog.error(m) };
     const [l1, l2, l3] = pf.legs;
-    const cross = CROSS_LOOKUP.get(`${assetA}-${assetB}`)!; // validated by pre-flight
+    // v19: use the dynamically-discovered lookup (same activeLookup from step 0)
+    // so routes found only via AssetPairs discovery execute correctly.
+    const cross = activeLookup.get(`${assetA}-${assetB}`)!; // validated by pre-flight
     const pairA = OB_USD_PAIRS[assetA as ObAsset];
     const pairB = OB_USD_PAIRS[assetB as ObAsset];
     const FILL_TOLERANCE = 0.999; // volExec must reach 99.9% of ordered volume

@@ -106,10 +106,125 @@ const OB_CROSS_MAP: Array<[ObAsset, ObAsset, string]> = [
  * Going A→B when A is the base  → we SELL the base (walk BIDS).
  */
 export interface CrossRoute { pair: string; aIsQuote: boolean; }
+
+/** Hardcoded fallback CROSS_LOOKUP — used when AssetPairs discovery fails. */
 export const CROSS_LOOKUP = new Map<string, CrossRoute>();
 for (const [a, b, pair] of OB_CROSS_MAP) {
   CROSS_LOOKUP.set(`${a}-${b}`, { pair, aIsQuote: true });   // hold quote, buy base
   CROSS_LOOKUP.set(`${b}-${a}`, { pair, aIsQuote: false });  // hold base, sell base
+}
+
+// ── Dynamic cross-pair discovery via Kraken /0/public/AssetPairs ─────────────
+
+/**
+ * Maps Kraken wsname components (e.g. "XBT", "RENDER") to our ObAsset names.
+ * The wsname field in AssetPairs uses these cleaner symbols rather than
+ * Kraken's internal codes (XXBT, XETH, etc.) or the full altnames.
+ */
+const KRAKEN_WS_TO_ASSET: Partial<Record<string, ObAsset>> = {
+  XBT:    "BTC",  ETH:    "ETH",  SOL:    "SOL",  XRP:    "XRP",
+  LINK:   "LINK", XDG:    "DOGE", DOGE:   "DOGE", AVAX:   "AVAX",
+  SUI:    "SUI",  LTC:    "LTC",  ADA:    "ADA",  DOT:    "DOT",
+  UNI:    "UNI",  AAVE:   "AAVE", NEAR:   "NEAR", ATOM:   "ATOM",
+  HBAR:   "HBAR", TON:    "TON",  BCH:    "BCH",  FIL:    "FIL",
+  ARB:    "ARB",  OP:     "OP",   PEPE:   "PEPE", WIF:    "WIF",
+  BONK:   "BONK", INJ:    "INJ",  SEI:    "SEI",  APT:    "APT",
+  LDO:    "LDO",  FET:    "FET",  RENDER: "RNDR", RNDR:   "RNDR",
+  TAO:    "TAO",  GALA:   "GALA", BEAM:   "BEAM", JUP:    "JUP",
+};
+
+/** Fiat / stablecoin quote assets to exclude when looking for crypto cross pairs. */
+const FIAT_WSNAMES = new Set([
+  "USD", "ZUSD", "EUR", "ZEUR", "GBP", "ZGBP", "CAD", "ZCAD",
+  "JPY", "ZJPY", "CHF", "ZCHF", "AUD", "ZAUD", "USDT", "USDC",
+]);
+
+interface DiscoveredCrossPairs {
+  lookup:   Map<string, CrossRoute>;
+  crossMap: Array<[ObAsset, ObAsset, string]>;
+  cachedAt: number;
+}
+
+const ASSET_PAIRS_CACHE_TTL_MS = 60 * 60 * 1_000; // 1 hour — pairs rarely change
+let crossPairsCache: DiscoveredCrossPairs | null = null;
+
+/** Exposed for tests only — clears the module-level discovery cache. */
+export function _testOnly_clearCrossCache(): void { crossPairsCache = null; }
+
+/**
+ * Queries Kraken /0/public/AssetPairs and returns a CROSS_LOOKUP covering ALL
+ * real cross pairs among OB_ASSETS.  Result is cached for 1 hour.
+ *
+ * Orientation rule (same as the hardcoded map):
+ *   entry [quoteAsset, baseAsset, altname]
+ *   → quoteAsset-baseAsset: aIsQuote=true  (buy base)
+ *   → baseAsset-quoteAsset: aIsQuote=false (sell base)
+ *
+ * Falls back to the hardcoded CROSS_LOOKUP / OB_CROSS_MAP on any error.
+ */
+export async function discoverCrossPairs(): Promise<DiscoveredCrossPairs> {
+  if (crossPairsCache && Date.now() - crossPairsCache.cachedAt < ASSET_PAIRS_CACHE_TTL_MS) {
+    return crossPairsCache;
+  }
+  try {
+    const r = await fetch("https://api.kraken.com/0/public/AssetPairs", {
+      signal: AbortSignal.timeout(6_000),
+    });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const data = await r.json() as {
+      error?: string[];
+      result?: Record<string, {
+        altname: string;
+        wsname?:  string;
+        base:     string;
+        quote:    string;
+        status:   string;
+      }>;
+    };
+    if (data.error?.length || !data.result) throw new Error("API error");
+
+    const crossMap: Array<[ObAsset, ObAsset, string]> = [];
+    const lookup   = new Map<string, CrossRoute>();
+
+    for (const pairInfo of Object.values(data.result)) {
+      if (pairInfo.status !== "online") continue;
+      const wsname = pairInfo.wsname;
+      if (!wsname) continue;
+
+      const slash = wsname.indexOf("/");
+      if (slash < 0) continue;
+      const wBase  = wsname.slice(0, slash);
+      const wQuote = wsname.slice(slash + 1);
+
+      // Skip fiat / stablecoin quotes — we want pure crypto cross pairs.
+      if (FIAT_WSNAMES.has(wBase) || FIAT_WSNAMES.has(wQuote)) continue;
+
+      const assetBase  = KRAKEN_WS_TO_ASSET[wBase];
+      const assetQuote = KRAKEN_WS_TO_ASSET[wQuote];
+      if (!assetBase || !assetQuote) continue;
+
+      // Use the REST altname as the pair symbol for order-book fetches.
+      const pairSymbol = pairInfo.altname;
+
+      // Layout: [quoteAsset, baseAsset, pairSymbol] — matches OB_CROSS_MAP convention.
+      crossMap.push([assetQuote, assetBase, pairSymbol]);
+      lookup.set(`${assetQuote}-${assetBase}`, { pair: pairSymbol, aIsQuote: true  });
+      lookup.set(`${assetBase}-${assetQuote}`, { pair: pairSymbol, aIsQuote: false });
+    }
+
+    if (lookup.size > 0) {
+      const result: DiscoveredCrossPairs = { lookup, crossMap, cachedAt: Date.now() };
+      crossPairsCache = result;
+      console.log(`[OB] AssetPairs discovery: ${crossMap.length} crypto cross pairs among OB_ASSETS`);
+      return result;
+    }
+    throw new Error("discovery returned 0 cross pairs");
+  } catch (err) {
+    console.warn("[OB] AssetPairs discovery failed — using hardcoded fallback:", err);
+    // Return a cache-skipping wrapper so each scan retries on the next call
+    // (but use the hardcoded map in the meantime).
+    return { lookup: CROSS_LOOKUP, crossMap: OB_CROSS_MAP, cachedAt: 0 };
+  }
 }
 
 // ── Order book fetch with short cache ─────────────────────────────────────────
@@ -282,6 +397,8 @@ export interface ObScanResult {
   scalingRoute: string | null;
   /** v18: top route re-simulated at $10/$50/$100/$500/$1,000; sizes the book can't absorb are omitted */
   scaling: ObScalingRow[];
+  /** v19: number of crypto cross pairs discovered via Kraken AssetPairs (0 = hardcoded fallback) */
+  crossPairsDiscovered: number;
   scannedAt: string;
 }
 
@@ -300,10 +417,11 @@ function simulateCycle(
   startUsd: number,
   orderbooks: Map<string, OrderBook>,
   feesPct: number,
+  crossLookup: Map<string, CrossRoute> = CROSS_LOOKUP,
 ): { profitUsd: number; grossProfitUsd: number; feeUsd: number; avg1: number; avg2: number; avg3: number; volA: number; slippagePct: number; confidencePct: number } | null {
   const usdPairA = OB_USD_PAIRS[assetA];
   const usdPairB = OB_USD_PAIRS[assetB];
-  const cross    = CROSS_LOOKUP.get(`${assetA}-${assetB}`);
+  const cross    = crossLookup.get(`${assetA}-${assetB}`);
   if (!cross) return null;
 
   const obAUsd  = orderbooks.get(usdPairA);
@@ -447,7 +565,10 @@ export async function preflightObCycle(
   feesPct: number,
   pricing: "maker" | "taker" = "taker",
 ): Promise<ObPreflightResult | null> {
-  const cross = CROSS_LOOKUP.get(`${assetA}-${assetB}`);
+  // v19: use the same dynamically-discovered cross map so preflight covers
+  // pairs that aren't in the hardcoded fallback.
+  const { lookup: activeLookup } = await discoverCrossPairs();
+  const cross = activeLookup.get(`${assetA}-${assetB}`);
   if (!cross) return null;
   const pairA = OB_USD_PAIRS[assetA];
   const pairB = OB_USD_PAIRS[assetB];
@@ -460,7 +581,7 @@ export async function preflightObCycle(
   if (!obA || !obX || !obB) return null;
 
   const books = new Map<string, OrderBook>([[pairA, obA], [cross.pair, obX], [pairB, obB]]);
-  const sim = simulateCycle(assetA, assetB, sizeUsd, books, feesPct);
+  const sim = simulateCycle(assetA, assetB, sizeUsd, books, feesPct, activeLookup);
   if (!sim) return null;
 
   const volumeA = sim.volA;
@@ -513,16 +634,18 @@ const VOLATILITY_THRESHOLD_PCT = 1.5; // v17: |24h change| must exceed this
 const VOLATILITY_MIN_ASSETS    = 3;   // v17: fallback to all assets below this
 
 /**
- * Port of Python v17 main loop: fetches all order books in parallel and
- * simulates all A × B permutations across 34 assets (only routes
- * only routes with a real Kraken cross pair are simulatable).
+ * v19: discovers cross pairs dynamically from Kraken AssetPairs (cached 1h),
+ * then simulates all A × B permutations across 34 assets.
  * v17: optional volatility filter — only assets that moved >1.5% in 24h are
  * scanned (falls back to ALL assets when fewer than 3 qualify).
- * All simulatable cycles are ranked (top 15) with status + confidence.
+ * All simulatable cycles are ranked (top 50) with status + confidence.
  * Sorted by estimatedProfitUsd descending.
  */
 /** v18: trade sizes for the top-route scaling analysis. */
 const SCALING_SIZES_USD = [10, 50, 100, 500, 1000];
+
+/** v19: max ranked cycles to return — raised from 15 to expose more routes. */
+const MAX_RANKED_CYCLES = 50;
 
 export async function scanOrderBookCycles(
   tradeSizeUsd   = 10,
@@ -531,6 +654,10 @@ export async function scanOrderBookCycles(
   maxSlippagePct = 0.50,
   volatilityFilter = true, // v17
 ): Promise<ObScanResult> {
+  // v19: discover cross pairs dynamically (falls back to hardcoded on error)
+  const { lookup: activeLookup, crossMap: activeCrossMap } = await discoverCrossPairs();
+  const crossPairsDiscovered = activeLookup === CROSS_LOOKUP ? 0 : activeCrossMap.length;
+
   // v17: volatility filter — restrict to assets that actually moved
   let activeAssets: readonly ObAsset[] = OB_ASSETS;
   if (volatilityFilter) {
@@ -543,7 +670,7 @@ export async function scanOrderBookCycles(
     // when the moving set can't form a single triangle (no cross pair among
     // them) — otherwise the scan would return 0 cycles despite a live market.
     const movingSet = new Set(moving);
-    const canFormCycle = OB_CROSS_MAP.some(([a, b]) => movingSet.has(a) && movingSet.has(b));
+    const canFormCycle = activeCrossMap.some(([a, b]) => movingSet.has(a) && movingSet.has(b));
     if (moving.length >= VOLATILITY_MIN_ASSETS && canFormCycle) activeAssets = moving;
   }
   const activeSet = new Set<ObAsset>(activeAssets);
@@ -551,8 +678,8 @@ export async function scanOrderBookCycles(
   // Deduplicated list of pairs needed for the active asset set
   const allPairs = [...new Set([
     ...activeAssets.map(a => OB_USD_PAIRS[a]),
-    ...OB_CROSS_MAP.filter(([a, b]) => activeSet.has(a) && activeSet.has(b))
-                   .map(([,, pair]) => pair),
+    ...activeCrossMap.filter(([a, b]) => activeSet.has(a) && activeSet.has(b))
+                     .map(([,, pair]) => pair),
   ])];
 
   // Fetch all order books in parallel (v18: depth 10 for scaling analysis)
@@ -568,7 +695,7 @@ export async function scanOrderBookCycles(
   for (const assetA of activeAssets) {
     for (const assetB of activeAssets) {
       if (assetA === assetB) continue;
-      const r = simulateCycle(assetA, assetB, tradeSizeUsd, orderbooks, feesPct);
+      const r = simulateCycle(assetA, assetB, tradeSizeUsd, orderbooks, feesPct, activeLookup);
       if (r) {
         // v15 status classification
         let status: ObCycleStatus;
@@ -600,9 +727,9 @@ export async function scanOrderBookCycles(
   }
 
   cycles.sort((a, b) => b.estimatedProfitUsd - a.estimatedProfitUsd);
-  // readyCount reflects ALL simulatable cycles, computed before top-15 truncation
+  // readyCount reflects ALL simulatable cycles, computed before truncation
   const readyCount = cycles.filter(c => c.status === "READY").length;
-  const top = cycles.slice(0, 15); // Python v15 shows top 15 ranked
+  const top = cycles.slice(0, MAX_RANKED_CYCLES); // v19: top 50 ranked
 
   // v18: re-simulate the TOP route at each scaling size using the same books.
   // Sizes the book depth can't fully absorb return null and are omitted.
@@ -610,7 +737,7 @@ export async function scanOrderBookCycles(
   const topCycle = cycles[0];
   if (topCycle) {
     for (const sizeUsd of SCALING_SIZES_USD) {
-      const r = simulateCycle(topCycle.assetA as ObAsset, topCycle.assetB as ObAsset, sizeUsd, orderbooks, feesPct);
+      const r = simulateCycle(topCycle.assetA as ObAsset, topCycle.assetB as ObAsset, sizeUsd, orderbooks, feesPct, activeLookup);
       if (!r) continue;
       const threshold = minProfitUsd * (sizeUsd / 10); // v18: scale min profit with size
       let status: ObScalingStatus;
@@ -634,6 +761,7 @@ export async function scanOrderBookCycles(
     activeAssets: [...activeAssets],
     scalingRoute: topCycle?.route ?? null,
     scaling,
+    crossPairsDiscovered,
     scannedAt: new Date().toISOString(),
   };
 }

@@ -852,7 +852,7 @@ function OrderBookHunterCard() {
         <CardTitle className="text-sm flex items-center gap-2">
           <BookOpen className="h-4 w-4" /> Order Book Hunter
           <span className="text-[10px] font-mono text-muted-foreground font-normal">
-            v18 · Scaling Analyzer · 34 assets
+            v19 · {data ? (data.crossPairsDiscovered > 0 ? `${data.crossPairsDiscovered} live crosses` : "hardcoded crosses") : "Scaling Analyzer"} · 34 assets
           </span>
           <span className="flex items-center gap-1 text-[10px] font-mono font-normal text-muted-foreground">
             $<input
@@ -896,7 +896,7 @@ function OrderBookHunterCard() {
         </CardTitle>
         <div className="flex items-center gap-2 text-[10px] font-mono text-muted-foreground">
           {isLoading && <RefreshCw className="h-3 w-3 animate-spin" />}
-          {data && `${data.activeAssets.length} active assets · ${data.pairsScanned}/${data.pairsRequested} pairs · ${data.cycles.length} cycles ranked`}
+          {data && `${data.activeAssets.length} active assets · ${data.pairsScanned}/${data.pairsRequested} pairs · ${data.cycles.length} routes ranked`}
           <Button
             size="sm"
             variant={liveMode ? "destructive" : "outline"}

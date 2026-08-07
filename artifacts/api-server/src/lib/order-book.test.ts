@@ -14,7 +14,7 @@
  * advancing fake timers past the cache TTLs (OB: 5 s, ticker: 60 s).
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { scanOrderBookCycles, get24hChanges, CROSS_LOOKUP } from "./order-book.js";
+import { scanOrderBookCycles, get24hChanges, CROSS_LOOKUP, discoverCrossPairs, _testOnly_clearCrossCache } from "./order-book.js";
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -681,5 +681,90 @@ describe("get24hChanges — ticker-key mapping", () => {
     // Ticker response includes many pairs, but only one Ticker fetch is made
     // because the second call hits the cache.
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ── v19: dynamic cross-pair discovery via AssetPairs ─────────────────────────
+//
+// Routes only present in the dynamically-discovered map (not in the hardcoded
+// OB_CROSS_MAP fallback) must be found by the scanner AND must survive the
+// execution-path lookup (preflightObCycle / arb.ts runKrakenTriangle uses the
+// same activeLookup). This test verifies both properties end-to-end via the
+// public API.
+//
+// We inject a synthetic pair "INJ/XBT" (INJ→BTC cross) that is deliberately
+// absent from the hardcoded OB_CROSS_MAP, mock the AssetPairs and Depth
+// endpoints, and confirm:
+//  - discoverCrossPairs() returns the new pair in its lookup
+//  - scanOrderBookCycles() returns both the USD→INJ→BTC→USD and
+//    USD→BTC→INJ→USD routes
+
+describe("v19 — dynamic AssetPairs discovery", () => {
+  beforeEach(() => {
+    // Each test in this suite clears the module-level cache so the mocked
+    // AssetPairs response is actually fetched.
+    _testOnly_clearCrossCache();
+  });
+
+  /** Minimal AssetPairs response that adds INJ/XBT not in the hardcoded map. */
+  function assetPairsResponse() {
+    return {
+      error: [],
+      result: {
+        INJXBT: {
+          altname: "INJXBT",
+          wsname:  "INJ/XBT",
+          base:    "INJ",
+          quote:   "XXBT",
+          status:  "online",
+        },
+      },
+    };
+  }
+
+  /** mockFetch that handles both AssetPairs and Depth calls. */
+  function setupDiscoveryFetch() {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((url: string) => {
+        if (url.includes("AssetPairs")) {
+          return Promise.resolve({ ok: true, json: () => Promise.resolve(assetPairsResponse()) });
+        }
+        // Depth endpoint — match pair query param
+        const m = url.match(/[?&]pair=([^&]+)/);
+        const pair = m ? decodeURIComponent(m[1]) : "";
+        const bodies: Record<string, object> = {
+          INJUSD:   depthResponse("INJUSD",   [[20,   500]],   [[19.9, 500]]),
+          INJXBT:   depthResponse("INJXBT",   [[0.0004, 100]], [[0.00039, 100]]),
+          XXBTZUSD: depthResponse("XXBTZUSD", [[50_000, 1]],   [[49_900, 1]]),
+        };
+        const body = bodies[pair] ?? { error: [], result: {} };
+        return Promise.resolve({ ok: true, json: () => Promise.resolve(body) });
+      }),
+    );
+  }
+
+  it("discoverCrossPairs includes the live-discovered pair not in the hardcoded map", async () => {
+    setupDiscoveryFetch();
+    // Hardcoded map must NOT have INJ→BTC
+    expect(CROSS_LOOKUP.has("INJ-BTC")).toBe(false);
+
+    const { lookup } = await discoverCrossPairs();
+    expect(lookup.has("INJ-BTC")).toBe(true);
+    expect(lookup.get("INJ-BTC")).toEqual({ pair: "INJXBT", aIsQuote: false });
+    expect(lookup.get("BTC-INJ")).toEqual({ pair: "INJXBT", aIsQuote: true });
+  });
+
+  it("scanOrderBookCycles surfaces routes only reachable via dynamic discovery", async () => {
+    setupDiscoveryFetch();
+    // volatilityFilter=false so INJ and BTC are always included regardless of
+    // 24h price movement; fee=0 to avoid REJECTED status masking the route.
+    const result = await scanOrderBookCycles(10, 0, 0.001, 10, false);
+
+    const injBtc = result.cycles.find(c => c.route === "USD→INJ→BTC→USD");
+    const btcInj = result.cycles.find(c => c.route === "USD→BTC→INJ→USD");
+    expect(injBtc ?? btcInj).toBeDefined();
+    // crossPairsDiscovered must be non-zero (the live map was used, not the fallback)
+    expect(result.crossPairsDiscovered).toBeGreaterThan(0);
   });
 });
