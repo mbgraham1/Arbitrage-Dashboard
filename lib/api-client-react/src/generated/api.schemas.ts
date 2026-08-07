@@ -253,6 +253,8 @@ export interface GraphRoute {
   profitPct: number;
   slippagePct: number;
   status: "VIABLE" | "REJECTED";
+  /** True when the live executor supports this route shape (Kraken triangle or 2-leg cross-exchange). Unsupported shapes are dry-run only. */
+  executable: boolean;
 }
 
 export interface GraphScanResult {
@@ -404,6 +406,24 @@ export interface GraphExecuteRequest {
   isDryRun?: boolean;
   /** Kraken legs: taker (market) or maker (post-only limit, no fill guarantee) */
   executionStyle?: "taker" | "maker";
+}
+
+export interface AccountPnlResult {
+  /** Total account value at the first-ever snapshot (baseline) */
+  startingValueUsd: number;
+  startedAt: string;
+  /** Fresh total account value: USD cash + holdings at live tickers */
+  currentValueUsd: number;
+  usdBalance: number;
+  /** USD value of non-cash holdings (unrealized until sold back to USD) */
+  unrealizedHoldingsUsd: number;
+  /** currentValue − first snapshot today (UTC) */
+  realizedTodayUsd: number;
+  /** currentValue − baseline snapshot */
+  lifetimePnlUsd: number;
+  snapshotCount: number;
+  /** Assets that couldn't be priced — total under-counts when non-empty */
+  unpricedAssets: string[];
 }
 
 export interface ExecutionQualityRoute {

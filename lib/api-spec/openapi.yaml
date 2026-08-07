@@ -402,6 +402,28 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ExecutionQualityResult"
+  /arb/account-pnl:
+    post:
+      operationId: getAccountPnl
+      tags: [trades]
+      summary: Realized P&L from actual Kraken account balances
+      description: >
+        Values the entire Kraken account (cash + holdings at live tickers),
+        stores a snapshot, and computes realized P&L as differences between
+        snapshots. Never estimated from scanner profit.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/FeeTierRequest"
+      responses:
+        "200":
+          description: Account P&L computed from balance snapshots
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AccountPnlResult"
   /arb/fee-tier:
     post:
       operationId: getFeeTier
@@ -1010,6 +1032,21 @@ components:
         krakenKey: { type: string }
         krakenSecret: { type: string }
 
+    AccountPnlResult:
+      type: object
+      required: [startingValueUsd, startedAt, currentValueUsd, usdBalance, unrealizedHoldingsUsd, realizedTodayUsd, lifetimePnlUsd, snapshotCount, unpricedAssets]
+      properties:
+        startingValueUsd: { type: number }
+        startedAt: { type: string }
+        currentValueUsd: { type: number }
+        usdBalance: { type: number }
+        unrealizedHoldingsUsd: { type: number }
+        realizedTodayUsd: { type: number }
+        lifetimePnlUsd: { type: number }
+        snapshotCount: { type: integer }
+        unpricedAssets:
+          type: array
+          items: { type: string }
     ExecutionQualityRoute:
       type: object
       required: [route, style, attempts, liveAttempts, liveFillRate, avgExpectedProfitUsd, avgRealizedProfitUsd, avgShortfallUsd, avgSlippagePct, totalRealizedProfitUsd, lastAttemptAt]
@@ -1057,7 +1094,7 @@ components:
 
     GraphRoute:
       type: object
-      required: [hops, description, startUsd, grossProfitUsd, feeUsd, netProfitUsd, profitPct, slippagePct, status]
+      required: [hops, description, startUsd, grossProfitUsd, feeUsd, netProfitUsd, profitPct, slippagePct, status, executable]
       properties:
         hops:
           type: array
@@ -1070,6 +1107,9 @@ components:
         profitPct: { type: number }
         slippagePct: { type: number }
         status: { type: string, enum: [VIABLE, REJECTED] }
+        executable:
+          type: boolean
+          description: "True when the live executor supports this route shape (Kraken triangle or 2-leg cross-exchange). Unsupported shapes are dry-run only."
 
     GraphScanResult:
       type: object

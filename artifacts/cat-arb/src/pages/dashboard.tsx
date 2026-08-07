@@ -9,7 +9,7 @@ import {
 } from "lucide-react";
 import { format } from "date-fns";
 import { cn } from "@/lib/utils";
-import { useGetTradeSummary, useListTrades, useScanAllPairs, useGetObScan, getGetObScanQueryKey, useObExecute, useGetAllPairSnapshots, getGetAllPairSnapshotsQueryKey, useGetGraphScan, getGetGraphScanQueryKey, useGraphExecute, useGetFeeTier, useGetExecutionQuality, TradeRecord, PairScanEntry, ObCycleEntry, AllPairSnapshot, GraphRoute, GraphRouteHop } from "@workspace/api-client-react";
+import { useGetTradeSummary, useListTrades, useScanAllPairs, useGetObScan, getGetObScanQueryKey, useObExecute, useGetAllPairSnapshots, getGetAllPairSnapshotsQueryKey, useGetGraphScan, getGetGraphScanQueryKey, useGraphExecute, useGetFeeTier, useGetExecutionQuality, useGetAccountPnl, getGetAccountPnlQueryKey, TradeRecord, PairScanEntry, ObCycleEntry, AllPairSnapshot, GraphRoute, GraphRouteHop } from "@workspace/api-client-react";
 
 // ── Small helpers ──────────────────────────────────────────────────────────────
 
@@ -540,6 +540,7 @@ export default function Dashboard() {
       <TriangularCard opportunities={triOpportunities} isRunning={isRunning} isExecutingTri={isExecutingTriangular} priceSource={triPriceSource} />
       <OrderBookHunterCard />
       <GraphEngineCard />
+      <RealizedPnlCard />
       <ExecutionQualityCard />
 
       {/* Trade History Table */}
@@ -1199,8 +1200,10 @@ function GraphEngineCard() {
   });
 
   const routes: GraphRoute[] = data?.routes ?? [];
-  const topRoute = routes[0];
-  const viable = routes.filter(r => r.status === "VIABLE");
+  // Execute Top Route must target a route the live executor SUPPORTS —
+  // the server ranks executable routes first, but guard here too.
+  const topRoute = routes.find(r => r.executable) ?? undefined;
+  const viable = routes.filter(r => r.status === "VIABLE" && r.executable);
   const breakEvenPct = topRoute
     ? ((topRoute.feeUsd / tradeSize) * 100).toFixed(3)
     : "—";
@@ -1369,7 +1372,7 @@ function GraphEngineCard() {
           <span className="text-muted-foreground">Break-even: <span className="text-foreground">{breakEvenPct}%</span></span>
           <span className="text-muted-foreground">Best raw edge: <span className={topRoute.grossProfitUsd > 0 ? "text-success" : "text-destructive"}>${topRoute.grossProfitUsd.toFixed(4)}</span></span>
           <span className={cn("font-bold", viable.length > 0 ? "text-success" : "text-destructive")}>
-            {viable.length > 0 ? `✅ ${viable.length} EXECUTABLE` : "✕ NO VIABLE ROUTE"}
+            {viable.length > 0 ? `✅ ${viable.length} EXECUTABLE` : "✕ NO EXECUTABLE ROUTE"}
           </span>
         </div>
       )}
@@ -1420,11 +1423,13 @@ function GraphEngineCard() {
                     </td>
                     <td className="px-3 py-1.5">
                       <span className={cn("text-[9px] font-bold px-1 border whitespace-nowrap",
-                        r.status === "VIABLE"
-                          ? "text-success border-success"
-                          : "text-muted-foreground border-border"
-                      )}>
-                        {r.status === "VIABLE" ? "✅ VIABLE" : "✕ REJECTED"}
+                        !r.executable
+                          ? "text-muted-foreground border-border/50 border-dashed"
+                          : r.status === "VIABLE"
+                            ? "text-success border-success"
+                            : "text-muted-foreground border-border"
+                      )} title={r.executable ? undefined : "The live executor doesn't support this route shape yet (4+ hop / mixed) — dry-run only."}>
+                        {!r.executable ? "◌ SCAN ONLY" : r.status === "VIABLE" ? "✅ VIABLE" : "✕ REJECTED"}
                       </span>
                     </td>
                   </tr>
@@ -1437,6 +1442,85 @@ function GraphEngineCard() {
           <div className="px-3 py-1.5 text-[9px] font-mono text-muted-foreground border-t border-border/50">
             Kraken {data.krakenFeesPct}%/leg (post-only maker) · Coinbase {data.coinbaseFeesPct}%/leg · Bridge edges: inventory model, no transfer fee · Scanned {format(new Date(data.scannedAt), "HH:mm:ss")}
           </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+// ── Realized P&L (balance-based, ground truth) ────────────────────────────────
+// Reads ACTUAL Kraken account value (cash + holdings at live tickers) — every
+// poll and every completed live trade records a snapshot server-side. Nothing
+// here comes from scanner estimates.
+function RealizedPnlCard() {
+  const { credentials } = useBotContext();
+  const hasCreds = !!credentials.krakenKey && !!credentials.krakenSecret;
+  const body = { krakenKey: credentials.krakenKey, krakenSecret: credentials.krakenSecret };
+  const { data, isLoading, error } = useGetAccountPnl(body, {
+    query: {
+      queryKey: getGetAccountPnlQueryKey(body),
+      enabled: hasCreds,
+      refetchInterval: 60_000,
+      staleTime: 55_000,
+    },
+  });
+  const money = (v: number, signed = false) =>
+    `${signed && v > 0 ? "+" : ""}$${v.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  const pnlClass = (v: number) => v > 0 ? "text-success" : v < 0 ? "text-destructive" : "text-muted-foreground";
+  return (
+    <Card className="mt-6">
+      <CardHeader className="py-3">
+        <CardTitle className="text-sm flex items-center gap-2">
+          <DollarSign className="h-4 w-4 text-primary" />
+          Realized P&L
+          <span className="text-[10px] font-mono text-muted-foreground font-normal">
+            from actual Kraken balances · not scanner estimates
+          </span>
+          {data && data.unpricedAssets.length > 0 && (
+            <span className="text-[10px] font-mono text-yellow-500 font-normal" title="These assets couldn't be priced — totals under-count them.">
+              ⚠ unpriced: {data.unpricedAssets.join(", ")}
+            </span>
+          )}
+        </CardTitle>
+      </CardHeader>
+      <CardContent>
+        {!hasCreds ? (
+          <div className="text-sm font-mono text-muted-foreground py-4 text-center">Add Kraken credentials in Config to track balance-based P&L.</div>
+        ) : error ? (
+          <div className="text-sm font-mono text-destructive py-4 text-center">Could not value the account — check credentials / connectivity.</div>
+        ) : isLoading || !data ? (
+          <div className="text-sm font-mono text-muted-foreground py-4 text-center">Valuing account from live balances…</div>
+        ) : (
+          <>
+            <div className="grid grid-cols-2 md:grid-cols-5 gap-3 font-mono">
+              <div className="border border-border p-3">
+                <div className="text-[10px] uppercase text-muted-foreground">Starting Value</div>
+                <div className="text-lg font-bold">{money(data.startingValueUsd)}</div>
+                <div className="text-[9px] text-muted-foreground">{format(new Date(data.startedAt), "MMM d HH:mm")}</div>
+              </div>
+              <div className="border border-border p-3">
+                <div className="text-[10px] uppercase text-muted-foreground">Current Value</div>
+                <div className="text-lg font-bold">{money(data.currentValueUsd)}</div>
+                <div className="text-[9px] text-muted-foreground">cash {money(data.usdBalance)}</div>
+              </div>
+              <div className="border border-border p-3">
+                <div className="text-[10px] uppercase text-muted-foreground">Realized Today</div>
+                <div className={cn("text-lg font-bold", pnlClass(data.realizedTodayUsd))}>{money(data.realizedTodayUsd, true)}</div>
+              </div>
+              <div className="border border-border p-3">
+                <div className="text-[10px] uppercase text-muted-foreground">Unrealized Holdings</div>
+                <div className="text-lg font-bold">{money(data.unrealizedHoldingsUsd)}</div>
+                <div className="text-[9px] text-muted-foreground">non-USD, at live tickers</div>
+              </div>
+              <div className="border border-border p-3">
+                <div className="text-[10px] uppercase text-muted-foreground">Lifetime P&L</div>
+                <div className={cn("text-lg font-bold", pnlClass(data.lifetimePnlUsd))}>{money(data.lifetimePnlUsd, true)}</div>
+              </div>
+            </div>
+            <div className="mt-2 text-[9px] font-mono text-muted-foreground">
+              {data.snapshotCount} balance snapshots recorded · a snapshot is taken on every live trade and every 60s poll · P&L = change in total account value, so market moves on held assets and any deposits/withdrawals are included
+            </div>
+          </>
         )}
       </CardContent>
     </Card>

@@ -14,3 +14,5 @@ Rule: every live-order path must (1) validate order ACCEPTANCE (txid/orderId pre
 - Depth-walked VWAP pricing: if the visible book cannot absorb the full trade size, DROP the edge entirely. A partial-depth VWAP applied to the whole size overstates the fillable edge — never fall back to top-of-book.
 - Auto-execution needs BOTH a synchronous client in-flight ref (React state lags a render) and a server-side global lease for live orders — otherwise a manual click racing an auto-fire double-spends.
 - Feedback-loop penalties must be size-normalized (shortfall as % of trade size, scaled to the current size); pooling absolute USD shortfalls across sizes mis-gates.
+- Balance-based P&L endpoints must scope snapshots per account (hash of API key) — a global snapshot table mixes baselines across credentials and leaks account values.
+- "Realized P&L" from account-value deltas includes market moves on holdings and deposits/withdrawals; label honestly or subtract cash flows via the exchange Ledgers API.

@@ -85,6 +85,22 @@ export interface GraphRoute {
   slippagePct: number;
   /** Whether the net profit exceeds a positive threshold */
   status: "VIABLE" | "REJECTED";
+  /** True when the LIVE executor supports this route shape (Kraken triangle
+   * or 2-leg cross-exchange inventory route). Unsupported shapes can still
+   * be dry-run recorded but never traded live. */
+  executable: boolean;
+}
+
+/** Mirror of the live executor's dispatch predicate — keep in lockstep with
+ * graph-execute in routes/arb.ts. */
+export function isRouteExecutable(hops: GraphRouteHop[]): boolean {
+  const asset = (node: string) => node.split(":")[1] ?? node;
+  const realHops = hops.filter(h => h.exchange !== "bridge");
+  const isKrakenTriangle = hops.length === 3 && realHops.length === 3 && realHops.every(h => h.exchange === "kraken");
+  const isCrossInventory = realHops.length === 2 && hops.length === 3 &&
+    realHops[0]!.side === "buy" && realHops[1]!.side === "sell" &&
+    asset(realHops[0]!.to) === asset(realHops[1]!.from);
+  return isKrakenTriangle || isCrossInventory;
 }
 
 export type ExecutionStyle = "taker" | "maker";
@@ -406,6 +422,7 @@ function findCycles(
           profitPct: (netProfitUsd / startUsd) * 100,
           slippagePct: newSlip,
           status: netProfitUsd > 0 ? "VIABLE" : "REJECTED",
+          executable: isRouteExecutable(hops),
         });
         continue;
       }
@@ -453,7 +470,9 @@ export async function scanGraphOpportunities(
     return true;
   });
 
-  unique.sort((a, b) => b.netProfitUsd - a.netProfitUsd);
+  // Executable routes first (the top route is what Execute Top Route fires),
+  // then by net profit within each group.
+  unique.sort((a, b) => (Number(b.executable) - Number(a.executable)) || (b.netProfitUsd - a.netProfitUsd));
 
   const assetsScanned =
     OB_ASSETS.filter(a => graph.has(`kraken:${a}`)).length +

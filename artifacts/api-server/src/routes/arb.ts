@@ -1,7 +1,8 @@
 import { Router, type IRouter } from "express";
 import { desc, sql, sum, count, max, avg } from "drizzle-orm";
-import { db, tradesTable, triScanTable, executionQualityTable } from "@workspace/db";
-import { desc as dbDesc, eq as dbEq, and as dbAnd } from "drizzle-orm";
+import { db, tradesTable, triScanTable, executionQualityTable, accountSnapshotsTable } from "@workspace/db";
+import { desc as dbDesc, eq as dbEq, and as dbAnd, gte as dbGte, count as dbCount } from "drizzle-orm";
+import { createHash } from "node:crypto";
 import {
   FetchPricesBody,
   FetchBalancesBody,
@@ -27,6 +28,7 @@ import {
   krakenFeeTiers,
   krakenFillPrice,
   krakenCancelOrder,
+  krakenAccountValueUsd,
   getCoinbaseBalances,
   coinbaseMarketOrder,
   coinbaseLimitOrder,
@@ -563,6 +565,81 @@ async function routeQualityPenalty(route: string, style: string, tradeSizeUsd: n
 /** Global lease: at most ONE live graph execution at a time (any client/tab). */
 let liveGraphExecInFlight = false;
 
+/**
+ * Snapshot the Kraken account's actual USD value into account_snapshots.
+ * Best-effort: never throws (a valuation failure must not fail a trade
+ * response). Returns the snapshot values or null.
+ */
+/** Stable, non-reversible per-account scope key from the Kraken API key. */
+function accountIdFromKey(krakenKey: string): string {
+  return createHash("sha256").update(krakenKey).digest("hex").slice(0, 16);
+}
+
+async function snapshotAccountValue(creds: { krakenKey: string; krakenSecret: string }, trigger: "poll" | "post_trade", log: { error: (o: object, m: string) => void }): Promise<{ totalUsd: number; usdBalance: number; holdingsUsd: number; unpriced: string[] } | null> {
+  try {
+    const v = await krakenAccountValueUsd(creds);
+    const accountId = accountIdFromKey(creds.krakenKey);
+    // Dedupe poll spam: skip the insert when value is unchanged vs the last
+    // snapshot (post-trade snapshots always record — they're the audit trail).
+    if (trigger === "poll") {
+      const [last] = await db.select().from(accountSnapshotsTable)
+        .where(dbEq(accountSnapshotsTable.accountId, accountId))
+        .orderBy(dbDesc(accountSnapshotsTable.id)).limit(1);
+      if (last && Math.abs(parseFloat(last.totalUsd) - v.totalUsd) < 0.01) return v;
+    }
+    await db.insert(accountSnapshotsTable).values({
+      accountId,
+      totalUsd: v.totalUsd.toFixed(6),
+      usdBalance: v.usdBalance.toFixed(6),
+      holdingsUsd: v.holdingsUsd.toFixed(6),
+      trigger,
+      hasUnpriced: v.unpriced.length > 0,
+    });
+    return v;
+  } catch (err) {
+    log.error({ err }, "account snapshot failed");
+    return null;
+  }
+}
+
+// ── POST /arb/account-pnl ─────────────────────────────────────────────────────
+// Realized P&L from ACTUAL exchange balances, never scanner estimates.
+// Takes a fresh Kraken account valuation, stores it as a snapshot, and
+// computes P&L as differences between snapshots.
+router.post("/arb/account-pnl", async (req, res): Promise<void> => {
+  const parsed = FeeTierBody.safeParse(req.body ?? {});
+  if (!parsed.success) { res.status(400).json({ error: "krakenKey and krakenSecret are required." }); return; }
+  try {
+    const now = await snapshotAccountValue({ krakenKey: parsed.data.krakenKey, krakenSecret: parsed.data.krakenSecret }, "poll", req.log);
+    if (!now) { res.status(502).json({ error: "Could not value the Kraken account (balance or ticker fetch failed)." }); return; }
+    const accountId = accountIdFromKey(parsed.data.krakenKey);
+    const scope = dbEq(accountSnapshotsTable.accountId, accountId);
+    const startOfTodayUtc = new Date(); startOfTodayUtc.setUTCHours(0, 0, 0, 0);
+    // Indexed baseline lookups — never load full history.
+    const [[first], [firstToday], [{ n: snapshotCount }]] = await Promise.all([
+      db.select().from(accountSnapshotsTable).where(scope).orderBy(accountSnapshotsTable.id).limit(1),
+      db.select().from(accountSnapshotsTable).where(dbAnd(scope, dbGte(accountSnapshotsTable.createdAt, startOfTodayUtc))).orderBy(accountSnapshotsTable.id).limit(1),
+      db.select({ n: dbCount() }).from(accountSnapshotsTable).where(scope),
+    ]);
+    if (!first) { res.status(500).json({ error: "Snapshot insert failed — no baseline available." }); return; }
+    const todayBase = firstToday ?? first;
+    res.json({
+      startingValueUsd: parseFloat(first.totalUsd),
+      startedAt: first.createdAt.toISOString(),
+      currentValueUsd: now.totalUsd,
+      usdBalance: now.usdBalance,
+      unrealizedHoldingsUsd: now.holdingsUsd,
+      realizedTodayUsd: now.totalUsd - parseFloat(todayBase.totalUsd),
+      lifetimePnlUsd: now.totalUsd - parseFloat(first.totalUsd),
+      snapshotCount,
+      unpricedAssets: now.unpriced,
+    });
+  } catch (err) {
+    req.log.error({ err }, "account-pnl error");
+    res.status(500).json({ error: (err as Error).message });
+  }
+});
+
 router.post("/arb/graph-execute", async (req, res): Promise<void> => {
   const parsed = GraphExecuteBody.safeParse(req.body);
   if (!parsed.success) {
@@ -666,6 +743,11 @@ router.post("/arb/graph-execute", async (req, res): Promise<void> => {
           slippagePct: route.slippagePct,
           note: errText || undefined,
         }, req.log);
+      }
+      // Snapshot after ANY live attempt past pre-flight — an accepted leg may
+      // have moved balances even when the run ultimately failed.
+      if (isLiveTri && !wasPreflightReject) {
+        await snapshotAccountValue({ krakenKey: parsed.data.krakenKey, krakenSecret: parsed.data.krakenSecret }, "post_trade", req.log);
       }
       res.json({ success: b["success"], isDryRun: b["isDryRun"], executed: b["executed"], route: route.description, preflightProfitUsd: b["preflightProfitUsd"], realizedProfitUsd: realizedTri, orderIds: [b["leg1OrderId"], b["leg2OrderId"], b["leg3OrderId"]].filter(Boolean), error: b["error"] ?? null });
       return;
@@ -850,6 +932,7 @@ router.post("/arb/graph-execute", async (req, res): Promise<void> => {
           route: route.description, style: executionStyle, isDryRun: false, filled: false,
           tradeSizeUsd, expectedProfitUsd: route.netProfitUsd, realizedProfitUsd: null, slippagePct: route.slippagePct, note: msg.slice(0, 300),
         }, req.log);
+        await snapshotAccountValue({ krakenKey: parsed.data.krakenKey, krakenSecret: parsed.data.krakenSecret }, "post_trade", req.log);
       }
       req.log.error({ route: route.description, buyOrderId, sellOrderId, filledVolume, err: msg }, "Graph execute LIVE — failed");
       res.json({ success: false, isDryRun: false, executed: anyAccepted, route: route.description, preflightProfitUsd: route.netProfitUsd, orderIds: [buyOrderId, sellOrderId].filter(Boolean), error: msg });
@@ -874,6 +957,7 @@ router.post("/arb/graph-execute", async (req, res): Promise<void> => {
       route: route.description, style: executionStyle, isDryRun: false, filled: true,
       tradeSizeUsd, expectedProfitUsd: route.netProfitUsd, realizedProfitUsd, slippagePct: route.slippagePct,
     }, req.log);
+    await snapshotAccountValue({ krakenKey: parsed.data.krakenKey, krakenSecret: parsed.data.krakenSecret }, "post_trade", req.log);
     req.log.info({ route: route.description, tradeSizeUsd, filledVolume, buyOrderId, sellOrderId, realizedProfitUsd }, "Graph execute LIVE — both legs confirmed filled");
     res.json({ success: true, isDryRun: false, executed: true, route: route.description, preflightProfitUsd: route.netProfitUsd, realizedProfitUsd, orderIds: [buyOrderId, sellOrderId] });
   } catch (err) {
@@ -1575,6 +1659,7 @@ router.post("/arb/execute-triangular", async (req, res): Promise<void> => {
 
     const triPriceSource = isBtc ? "direct" : ethSolSource;
     req.log.info({ loop, tradeUsd, estimatedProfitUsd, orderType, triPriceSource, leg1Id, leg2Id, leg3Id }, "Triangular executed");
+    await snapshotAccountValue(creds, "post_trade", req.log);
     res.json({
       success: true, isDryRun: false, estimatedProfitUsd,
       priceSource: triPriceSource, synthetic: triPriceSource === "synthetic",
@@ -1582,6 +1667,8 @@ router.post("/arb/execute-triangular", async (req, res): Promise<void> => {
     });
   } catch (err) {
     req.log.error({ err, loop, orderType, leg1Id, leg2Id }, "Triangular execution error — partial state logged");
+    // A leg may have been accepted before the failure — balances may have moved.
+    if (leg1Id || leg2Id || leg3Id) await snapshotAccountValue(creds, "post_trade", req.log);
     res.status(500).json({ error: (err as Error).message, leg1OrderId: leg1Id || null, leg2OrderId: leg2Id || null });
   }
 });

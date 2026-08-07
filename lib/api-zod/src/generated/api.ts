@@ -388,6 +388,18 @@ export const GraphExecuteBody = zod.object({
   "executionStyle": zod.enum(["taker", "maker"]).optional()
 })
 
+export const AccountPnlResponse = zod.object({
+  "startingValueUsd": zod.number(),
+  "startedAt": zod.string(),
+  "currentValueUsd": zod.number(),
+  "usdBalance": zod.number(),
+  "unrealizedHoldingsUsd": zod.number(),
+  "realizedTodayUsd": zod.number(),
+  "lifetimePnlUsd": zod.number(),
+  "snapshotCount": zod.number(),
+  "unpricedAssets": zod.array(zod.string())
+})
+
 export const ExecutionQualityRouteResponse = zod.object({
   "route": zod.string(),
   "style": zod.enum(["taker", "maker"]),

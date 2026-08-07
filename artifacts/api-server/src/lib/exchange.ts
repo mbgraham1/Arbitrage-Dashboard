@@ -113,6 +113,68 @@ export async function getKrakenPrice(pair: Pair = "SOL/USD"): Promise<number> {
   return parseFloat(ticker.c[0]);
 }
 
+/**
+ * Value the ENTIRE Kraken account in USD from actual balances — the ground
+ * truth for realized P&L. USD/stables count at par; every other asset is
+ * priced at the live Ticker mid. Assets we can't price are reported so the
+ * caller can surface the gap instead of silently under-counting.
+ */
+export async function krakenAccountValueUsd(creds: KrakenCreds): Promise<{
+  totalUsd: number;
+  usdBalance: number;
+  holdingsUsd: number;
+  holdings: { currency: string; amount: number; usdValue: number | null }[];
+  unpriced: string[];
+}> {
+  const balances = await getKrakenBalances(creds);
+  // Kraken legacy asset codes → ticker asset (XXBT→XBT, XETH→ETH, ZUSD→USD…)
+  const normalize = (c: string) => {
+    const stripped = c.length >= 4 && (c.startsWith("X") || c.startsWith("Z")) ? c.slice(1) : c;
+    return stripped.replace(/\.[SF]$/, ""); // staked variants like ETH2.S
+  };
+  let usdBalance = 0;
+  const toPrice: { currency: string; asset: string; amount: number }[] = [];
+  for (const b of balances) {
+    const asset = normalize(b.currency);
+    if (asset === "USD" || asset === "USDT" || asset === "USDC") usdBalance += b.amount;
+    else toPrice.push({ currency: b.currency, asset, amount: b.amount });
+  }
+  const holdings: { currency: string; amount: number; usdValue: number | null }[] = [];
+  const unpriced: string[] = [];
+  let holdingsUsd = 0;
+  if (toPrice.length > 0) {
+    const pairList = toPrice.map(t => `${t.asset}USD`).join(",");
+    let tickers: Record<string, { c: string[] }> = {};
+    try {
+      tickers = await krakenPublicRequest<Record<string, { c: string[] }>>("/0/public/Ticker", { pair: pairList });
+    } catch { /* fall through — individual lookups below */ }
+    const keys = Object.keys(tickers);
+    for (const t of toPrice) {
+      // Kraken echoes canonical pair names (XXBTZUSD for XBTUSD). Only accept
+      // EXACT canonical forms — substring guessing can silently mis-price.
+      const acceptable = new Set([`${t.asset}USD`, `${t.asset}ZUSD`, `X${t.asset}ZUSD`, `X${t.asset}USD`, `Z${t.asset}ZUSD`]);
+      const key = keys.find(k => acceptable.has(k));
+      let price: number | null = key ? parseFloat(tickers[key]!.c[0]!) : null;
+      if (price == null) {
+        try {
+          const single = await krakenPublicRequest<Record<string, { c: string[] }>>("/0/public/Ticker", { pair: `${t.asset}USD` });
+          const first = Object.values(single)[0];
+          price = first ? parseFloat(first.c[0]!) : null;
+        } catch { price = null; }
+      }
+      if (price != null && isFinite(price)) {
+        const usdValue = t.amount * price;
+        holdingsUsd += usdValue;
+        holdings.push({ currency: t.currency, amount: t.amount, usdValue });
+      } else {
+        unpriced.push(t.currency);
+        holdings.push({ currency: t.currency, amount: t.amount, usdValue: null });
+      }
+    }
+  }
+  return { totalUsd: usdBalance + holdingsUsd, usdBalance, holdingsUsd, holdings, unpriced };
+}
+
 export async function getKrakenBalances(creds: KrakenCreds): Promise<BalanceEntry[]> {
   const result = await krakenPrivateRequest<Record<string, string>>("/0/private/Balance", {}, creds);
   return Object.entries(result)
