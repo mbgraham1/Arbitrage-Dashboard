@@ -628,6 +628,18 @@ export async function preflightObCycle(
   return { profitUsd: sim.profitUsd, slippagePct: sim.slippagePct, confidencePct: sim.confidencePct, legs, volumeA, volumeB };
 }
 
+/**
+ * Fresh post-only join price for one pair (cache bypassed): buys rest at the
+ * best bid, sells at the best ask. Used to re-price a maker leg after a
+ * fill-timer expiry. Returns null when the book can't be fetched.
+ */
+export async function freshJoinPrice(pair: string, side: "buy" | "sell"): Promise<number | null> {
+  obCache.delete(pair);
+  const ob = await fetchOrderBook(pair, 10);
+  if (!ob) return null;
+  return (side === "buy" ? ob.bids[0]?.[0] : ob.asks[0]?.[0]) ?? null;
+}
+
 // ── Full scan ─────────────────────────────────────────────────────────────────
 
 const VOLATILITY_THRESHOLD_PCT = 1.5; // v17: |24h change| must exceed this

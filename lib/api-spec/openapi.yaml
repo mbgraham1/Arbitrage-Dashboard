@@ -242,6 +242,16 @@ paths:
         pairs from Kraken and Coinbase and returns them sorted by gross spread
         (best direction per pair) descending. Net edge = grossSpreadPct minus
         the client's fee + slippage settings.
+      parameters:
+        - name: enabledPairs
+          in: query
+          required: false
+          style: form
+          explode: false
+          schema:
+            type: array
+            items: { type: string }
+          description: "Optional allow-list of pair symbols to scan (comma-separated). Scans all pairs when omitted."
       responses:
         "200":
           description: All pairs ranked by gross spread descending
@@ -402,6 +412,22 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ExecutionQualityResult"
+  /arb/execution-status:
+    get:
+      operationId: getExecutionStatus
+      tags: [trades]
+      summary: Live per-leg status of the currently executing triangle
+      description: >
+        In-memory snapshot updated by the maker-leg fill machinery — current
+        leg, order ID, elapsed time, filled percent, per-leg fill timer, and
+        retry attempt. Idle (active=false) when nothing is executing.
+      responses:
+        "200":
+          description: Current execution status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ExecutionStatusResult"
   /arb/account-pnl:
     post:
       operationId: getAccountPnl
@@ -617,6 +643,9 @@ components:
           items:
             type: string
           description: "Optional allow-list of pair symbols to scan (e.g. ['SOL/USD', 'BTC/USD']). Scans all pairs when omitted."
+        pair:
+          type: string
+          description: "Active trading pair (e.g. BTC/USD). When provided, base-asset balances for that pair are included in the response."
 
     WsStatus:
       type: object
@@ -705,6 +734,13 @@ components:
         usdOnCoinbase:
           type: number
         suggestedVolume:
+          type: number
+        baseAsset:
+          type: string
+          description: "Base asset of the requested pair (e.g. BTC); SOL when no pair given"
+        baseAssetOnKraken:
+          type: number
+        baseAssetOnCoinbase:
           type: number
 
     PreloadedCredentials:
@@ -921,7 +957,7 @@ components:
 
     ObScanResult:
       type: object
-      required: [cycles, tradeSizeUsd, feesPct, minProfitUsd, maxSlippagePct, readyCount, pairsScanned, pairsRequested, volatilityFilter, activeAssets, scalingRoute, scaling, scannedAt]
+      required: [cycles, tradeSizeUsd, feesPct, minProfitUsd, maxSlippagePct, readyCount, pairsScanned, pairsRequested, volatilityFilter, activeAssets, scalingRoute, scaling, scannedAt, crossPairsDiscovered]
       properties:
         cycles:
           type: array
@@ -949,6 +985,7 @@ components:
             $ref: "#/components/schemas/ObScalingRow"
           description: "v18 — top route re-simulated at $10/$50/$100/$500/$1,000; unabsorbable sizes omitted"
         scannedAt: {type: string}
+        crossPairsDiscovered: {type: number, description: "v19 — cross pairs discovered dynamically via Kraken AssetPairs (0 when using the hardcoded fallback)"}
 
     CointegrationSignal:
       type: object
@@ -1096,6 +1133,24 @@ components:
           type: array
           items: { $ref: "#/components/schemas/ExecutionQualityRoute" }
         totalRecords: { type: integer }
+    ExecutionStatusResult:
+      type: object
+      required: [active, route, leg, legLabel, pair, orderId, attempt, maxAttempts, startedAtMs, timeoutMs, filledPct, phase, elapsedMs, updatedAtMs]
+      properties:
+        active: { type: boolean }
+        route: { type: string, nullable: true }
+        leg: { type: integer, nullable: true }
+        legLabel: { type: string, nullable: true }
+        pair: { type: string, nullable: true }
+        orderId: { type: string, nullable: true }
+        attempt: { type: integer, nullable: true }
+        maxAttempts: { type: integer, nullable: true }
+        startedAtMs: { type: number, nullable: true }
+        timeoutMs: { type: number, nullable: true }
+        filledPct: { type: number, nullable: true }
+        phase: { type: string, nullable: true }
+        elapsedMs: { type: number, nullable: true }
+        updatedAtMs: { type: number }
     FeeTierResult:
       type: object
       required: [takerFeePct, makerFeePct, source]

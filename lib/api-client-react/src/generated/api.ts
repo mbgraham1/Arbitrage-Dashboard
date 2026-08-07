@@ -20,6 +20,8 @@ import type {
 } from '@tanstack/react-query';
 
 import type {
+  AccountPnlRequest,
+  AccountPnlResult,
   AllPairSnapshot,
   BalanceData,
   CoinbaseCredentials,
@@ -27,15 +29,14 @@ import type {
   ConnectionTestResult,
   ErrorResponse,
   ExchangeCredentials,
+  ExecutionQualityResult,
+  ExecutionStatusResult,
+  FeeTierRequest,
+  FeeTierResult,
   GetGraphScanParams,
   GetObScanParams,
   GraphExecuteRequest,
   GraphExecuteResult,
-  AccountPnlRequest,
-  AccountPnlResult,
-  ExecutionQualityResult,
-  FeeTierRequest,
-  FeeTierResult,
   GraphScanResult,
   HealthStatus,
   KrakenCredentials,
@@ -46,6 +47,7 @@ import type {
   PairScanEntry,
   PreloadedCredentials,
   PriceData,
+  ScanAllPairsParams,
   TradeRecord,
   TradeRequest,
   TradeResult,
@@ -754,19 +756,26 @@ export function useGetAllPairSnapshots<TData = Awaited<ReturnType<typeof getAllP
 
 
 
-export const getScanAllPairsUrl = (params?: { enabledPairs?: string[] }) => {
-  const url = `/api/arb/scan`;
-  if (params?.enabledPairs && params.enabledPairs.length > 0) {
-    return `${url}?enabledPairs=${params.enabledPairs.map(encodeURIComponent).join(",")}`;
-  }
-  return url;
+export const getScanAllPairsUrl = (params?: ScanAllPairsParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/arb/scan?${stringifiedParams}` : `/api/arb/scan`
 }
 
 /**
  * Port of Python scan_all_coins(). Fetches bid/ask for all 10 configured pairs from Kraken and Coinbase and returns them sorted by gross spread (best direction per pair) descending. Net edge = grossSpreadPct minus the client's fee + slippage settings.
  * @summary Scan all 10 pairs and rank by cross-exchange gross spread
  */
-export const scanAllPairs = async (params?: { enabledPairs?: string[] }, options?: RequestInit): Promise<PairScanEntry[]> => {
+export const scanAllPairs = async (params?: ScanAllPairsParams, options?: RequestInit): Promise<PairScanEntry[]> => {
 
   return customFetch<PairScanEntry[]>(getScanAllPairsUrl(params),
   {
@@ -781,15 +790,14 @@ export const scanAllPairs = async (params?: { enabledPairs?: string[] }, options
 
 
 
-export const getScanAllPairsQueryKey = (params?: { enabledPairs?: string[] }) => {
+export const getScanAllPairsQueryKey = (params?: ScanAllPairsParams,) => {
     return [
-    `/api/arb/scan`,
-    ...(params?.enabledPairs && params.enabledPairs.length > 0 ? [{ enabledPairs: params.enabledPairs }] : [])
+    `/api/arb/scan`, ...(params ? [params] : [])
     ] as const;
     }
 
 
-export const getScanAllPairsQueryOptions = <TData = Awaited<ReturnType<typeof scanAllPairs>>, TError = ErrorType<ErrorResponse>>(params?: { enabledPairs?: string[] }, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof scanAllPairs>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+export const getScanAllPairsQueryOptions = <TData = Awaited<ReturnType<typeof scanAllPairs>>, TError = ErrorType<ErrorResponse>>(params?: ScanAllPairsParams, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof scanAllPairs>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
 ) => {
 
 const {query: queryOptions, request: requestOptions} = options ?? {};
@@ -798,7 +806,7 @@ const {query: queryOptions, request: requestOptions} = options ?? {};
 
 
 
-    const queryFn: QueryFunction<Awaited<ReturnType<typeof scanAllPairs>>> = ({ signal }) => scanAllPairs(params, { signal, ...(requestOptions as RequestInit) });
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof scanAllPairs>>> = ({ signal }) => scanAllPairs(params, { signal, ...requestOptions });
 
 
 
@@ -816,12 +824,11 @@ export type ScanAllPairsQueryError = ErrorType<ErrorResponse>
  */
 
 export function useScanAllPairs<TData = Awaited<ReturnType<typeof scanAllPairs>>, TError = ErrorType<ErrorResponse>>(
-  params?: { enabledPairs?: string[] },
-  options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof scanAllPairs>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+ params?: ScanAllPairsParams, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof scanAllPairs>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
 
  ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
 
-  const queryOptions = getScanAllPairsQueryOptions(params, options)
+  const queryOptions = getScanAllPairsQueryOptions(params,options)
 
   const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
 
@@ -1147,6 +1154,474 @@ export const useObExecute = <TError = ErrorType<ErrorResponse>,
       return useMutation(getObExecuteMutationOptions(options));
     }
 
+export const getGetExecutionQualityUrl = () => {
+
+
+
+
+  return `/api/arb/execution-quality`
+}
+
+/**
+ * @summary Per-route execution quality aggregates (fill rate, expected vs realized profit)
+ */
+export const getExecutionQuality = async ( options?: RequestInit): Promise<ExecutionQualityResult> => {
+
+  return customFetch<ExecutionQualityResult>(getGetExecutionQualityUrl(),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getGetExecutionQualityQueryKey = () => {
+    return [
+    `/api/arb/execution-quality`
+    ] as const;
+    }
+
+
+export const getGetExecutionQualityQueryOptions = <TData = Awaited<ReturnType<typeof getExecutionQuality>>, TError = ErrorType<unknown>>( options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getExecutionQuality>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getGetExecutionQualityQueryKey();
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof getExecutionQuality>>> = ({ signal }) => getExecutionQuality({ signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof getExecutionQuality>>, TError, TData> & { queryKey: QueryKey }
+}
+
+export type GetExecutionQualityQueryResult = NonNullable<Awaited<ReturnType<typeof getExecutionQuality>>>
+export type GetExecutionQualityQueryError = ErrorType<unknown>
+
+
+/**
+ * @summary Per-route execution quality aggregates (fill rate, expected vs realized profit)
+ */
+
+export function useGetExecutionQuality<TData = Awaited<ReturnType<typeof getExecutionQuality>>, TError = ErrorType<unknown>>(
+  options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getExecutionQuality>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+
+ ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+
+  const queryOptions = getGetExecutionQualityQueryOptions(options)
+
+  const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+
+export const getGetExecutionStatusUrl = () => {
+
+
+
+
+  return `/api/arb/execution-status`
+}
+
+/**
+ * In-memory snapshot updated by the maker-leg fill machinery — current leg, order ID, elapsed time, filled percent, per-leg fill timer, and retry attempt. Idle (active=false) when nothing is executing.
+ * @summary Live per-leg status of the currently executing triangle
+ */
+export const getExecutionStatus = async ( options?: RequestInit): Promise<ExecutionStatusResult> => {
+
+  return customFetch<ExecutionStatusResult>(getGetExecutionStatusUrl(),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getGetExecutionStatusQueryKey = () => {
+    return [
+    `/api/arb/execution-status`
+    ] as const;
+    }
+
+
+export const getGetExecutionStatusQueryOptions = <TData = Awaited<ReturnType<typeof getExecutionStatus>>, TError = ErrorType<unknown>>( options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getExecutionStatus>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getGetExecutionStatusQueryKey();
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof getExecutionStatus>>> = ({ signal }) => getExecutionStatus({ signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof getExecutionStatus>>, TError, TData> & { queryKey: QueryKey }
+}
+
+export type GetExecutionStatusQueryResult = NonNullable<Awaited<ReturnType<typeof getExecutionStatus>>>
+export type GetExecutionStatusQueryError = ErrorType<unknown>
+
+
+/**
+ * @summary Live per-leg status of the currently executing triangle
+ */
+
+export function useGetExecutionStatus<TData = Awaited<ReturnType<typeof getExecutionStatus>>, TError = ErrorType<unknown>>(
+  options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getExecutionStatus>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+
+ ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+
+  const queryOptions = getGetExecutionStatusQueryOptions(options)
+
+  const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+
+export const getGetAccountPnlUrl = () => {
+
+
+
+
+  return `/api/arb/account-pnl`
+}
+
+/**
+ * Values the Kraken account (plus Coinbase when creds provided) at live tickers, stores a snapshot, and decomposes the equity change into external cash flows (Kraken Ledgers), trading P&L (sum of per-trade realized fills), and unrealized drift. Never estimated from scanner profit.
+ * @summary Ground-truth P&L from actual exchange balances
+ */
+export const getAccountPnl = async (accountPnlRequest: AccountPnlRequest, options?: RequestInit): Promise<AccountPnlResult> => {
+
+  return customFetch<AccountPnlResult>(getGetAccountPnlUrl(),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(accountPnlRequest)
+  }
+);}
+
+
+
+
+
+export const getGetAccountPnlQueryKey = (accountPnlRequest?: BodyType<AccountPnlRequest>,) => {
+    return [
+    'POST', `/api/arb/account-pnl`, accountPnlRequest
+    ] as const;
+    }
+
+
+export const getGetAccountPnlQueryOptions = <TData = Awaited<ReturnType<typeof getAccountPnl>>, TError = ErrorType<unknown>>(accountPnlRequest: BodyType<AccountPnlRequest>, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getAccountPnl>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getGetAccountPnlQueryKey(accountPnlRequest);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof getAccountPnl>>> = ({ signal }) => getAccountPnl(accountPnlRequest, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof getAccountPnl>>, TError, TData> & { queryKey: QueryKey }
+}
+
+export type GetAccountPnlQueryResult = NonNullable<Awaited<ReturnType<typeof getAccountPnl>>>
+export type GetAccountPnlQueryError = ErrorType<unknown>
+
+
+/**
+ * @summary Ground-truth P&L from actual exchange balances
+ */
+
+export function useGetAccountPnl<TData = Awaited<ReturnType<typeof getAccountPnl>>, TError = ErrorType<unknown>>(
+ accountPnlRequest: BodyType<AccountPnlRequest>, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getAccountPnl>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+
+ ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+
+  const queryOptions = getGetAccountPnlQueryOptions(accountPnlRequest,options)
+
+  const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+
+export const getGetFeeTierUrl = () => {
+
+
+
+
+  return `/api/arb/fee-tier`
+}
+
+/**
+ * Queries Kraken /0/private/TradeVolume for the caller's real taker fee on major pairs (max across pairs). Returns null when the query fails (bad keys, network) so callers can fall back to their configured assumption.
+ * @summary Look up the account's actual Kraken taker fee tier
+ */
+export const getFeeTier = async (feeTierRequest: FeeTierRequest, options?: RequestInit): Promise<FeeTierResult> => {
+
+  return customFetch<FeeTierResult>(getGetFeeTierUrl(),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(feeTierRequest)
+  }
+);}
+
+
+
+
+
+export const getGetFeeTierQueryKey = (feeTierRequest?: BodyType<FeeTierRequest>,) => {
+    return [
+    'POST', `/api/arb/fee-tier`, feeTierRequest
+    ] as const;
+    }
+
+
+export const getGetFeeTierQueryOptions = <TData = Awaited<ReturnType<typeof getFeeTier>>, TError = ErrorType<ErrorResponse>>(feeTierRequest: BodyType<FeeTierRequest>, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getFeeTier>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getGetFeeTierQueryKey(feeTierRequest);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof getFeeTier>>> = ({ signal }) => getFeeTier(feeTierRequest, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof getFeeTier>>, TError, TData> & { queryKey: QueryKey }
+}
+
+export type GetFeeTierQueryResult = NonNullable<Awaited<ReturnType<typeof getFeeTier>>>
+export type GetFeeTierQueryError = ErrorType<ErrorResponse>
+
+
+/**
+ * @summary Look up the account's actual Kraken taker fee tier
+ */
+
+export function useGetFeeTier<TData = Awaited<ReturnType<typeof getFeeTier>>, TError = ErrorType<ErrorResponse>>(
+ feeTierRequest: BodyType<FeeTierRequest>, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getFeeTier>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+
+ ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+
+  const queryOptions = getGetFeeTierQueryOptions(feeTierRequest,options)
+
+  const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+
+export const getGetGraphScanUrl = (params?: GetGraphScanParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/arb/graph-scan?${stringifiedParams}` : `/api/arb/graph-scan`
+}
+
+/**
+ * Builds a directed graph over Kraken (34 assets + verified cross pairs) and Coinbase (shared assets), DFS-searches all USD→…→USD cycles up to maxHops, and ranks routes by net profit after per-leg fees.
+ * @summary Multi-exchange graph opportunity scan
+ */
+export const getGraphScan = async (params?: GetGraphScanParams, options?: RequestInit): Promise<GraphScanResult> => {
+
+  return customFetch<GraphScanResult>(getGetGraphScanUrl(params),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getGetGraphScanQueryKey = (params?: GetGraphScanParams,) => {
+    return [
+    `/api/arb/graph-scan`, ...(params ? [params] : [])
+    ] as const;
+    }
+
+
+export const getGetGraphScanQueryOptions = <TData = Awaited<ReturnType<typeof getGraphScan>>, TError = ErrorType<ErrorResponse>>(params?: GetGraphScanParams, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getGraphScan>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getGetGraphScanQueryKey(params);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof getGraphScan>>> = ({ signal }) => getGraphScan(params, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof getGraphScan>>, TError, TData> & { queryKey: QueryKey }
+}
+
+export type GetGraphScanQueryResult = NonNullable<Awaited<ReturnType<typeof getGraphScan>>>
+export type GetGraphScanQueryError = ErrorType<ErrorResponse>
+
+
+/**
+ * @summary Multi-exchange graph opportunity scan
+ */
+
+export function useGetGraphScan<TData = Awaited<ReturnType<typeof getGraphScan>>, TError = ErrorType<ErrorResponse>>(
+ params?: GetGraphScanParams, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getGraphScan>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+
+ ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+
+  const queryOptions = getGetGraphScanQueryOptions(params,options)
+
+  const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+
+export const getGraphExecuteUrl = () => {
+
+
+
+
+  return `/api/arb/graph-execute`
+}
+
+/**
+ * Re-runs a fresh graph scan (pre-flight), locates the requested route (or the top route), and gates on fresh net profit > minProfitUsd. Kraken-only triangles reuse the ob-execute 3-leg post-only limit machinery (fill confirm + unwind); 2-leg cross-exchange inventory routes place both market orders in parallel (requires inventory on both venues). Other shapes execute as dry-run only.
+ * @summary Manually execute an Opportunity Engine route
+ */
+export const graphExecute = async (graphExecuteRequest: GraphExecuteRequest, options?: RequestInit): Promise<GraphExecuteResult> => {
+
+  return customFetch<GraphExecuteResult>(getGraphExecuteUrl(),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(graphExecuteRequest)
+  }
+);}
+
+
+
+
+
+export const getGraphExecuteMutationOptions = <TError = ErrorType<ErrorResponse>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof graphExecute>>, TError,{data: BodyType<GraphExecuteRequest>}, TContext>, request?: SecondParameter<typeof customFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof graphExecute>>, TError,{data: BodyType<GraphExecuteRequest>}, TContext> => {
+
+const mutationKey = ['graphExecute'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof graphExecute>>, {data: BodyType<GraphExecuteRequest>}> = (props) => {
+          const {data} = props ?? {};
+
+          return  graphExecute(data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type GraphExecuteMutationResult = NonNullable<Awaited<ReturnType<typeof graphExecute>>>
+    export type GraphExecuteMutationBody = BodyType<GraphExecuteRequest>
+    export type GraphExecuteMutationError = ErrorType<ErrorResponse>
+
+    /**
+ * @summary Manually execute an Opportunity Engine route
+ */
+export const useGraphExecute = <TError = ErrorType<ErrorResponse>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof graphExecute>>, TError,{data: BodyType<GraphExecuteRequest>}, TContext>, request?: SecondParameter<typeof customFetch>}
+ ): UseMutationResult<
+        Awaited<ReturnType<typeof graphExecute>>,
+        TError,
+        {data: BodyType<GraphExecuteRequest>},
+        TContext
+      > => {
+      return useMutation(getGraphExecuteMutationOptions(options));
+    }
+
 export const getExecuteTriangularUrl = () => {
 
 
@@ -1244,138 +1719,6 @@ export const getTradeSummary = async ( options?: RequestInit): Promise<TradeSumm
 
 
 
-
-// ── Graph Opportunity Engine ──────────────────────────────────────────────────
-
-export const getGraphScanUrl = (params?: GetGraphScanParams) => {
-  const p = new URLSearchParams();
-  if (params?.tradeSizeUsd    != null) p.set("tradeSizeUsd",    String(params.tradeSizeUsd));
-  if (params?.krakenFeesPct   != null) p.set("krakenFeesPct",   String(params.krakenFeesPct));
-  if (params?.coinbaseFeesPct != null) p.set("coinbaseFeesPct", String(params.coinbaseFeesPct));
-  if (params?.maxHops         != null) p.set("maxHops",         String(params.maxHops));
-  if (params?.executionStyle  != null) p.set("executionStyle",  params.executionStyle);
-  const qs = p.toString();
-  return `/api/arb/graph-scan${qs ? `?${qs}` : ""}`;
-};
-
-export const getGraphScan = async (params?: GetGraphScanParams, options?: RequestInit): Promise<GraphScanResult> =>
-  customFetch<GraphScanResult>(getGraphScanUrl(params), { ...options, method: "GET" });
-
-export const getGetGraphScanQueryKey = (params?: GetGraphScanParams) =>
-  ["/api/arb/graph-scan", params?.tradeSizeUsd, params?.krakenFeesPct, params?.coinbaseFeesPct, params?.maxHops, params?.executionStyle] as const;
-
-export const getGetGraphScanQueryOptions = <TData = Awaited<ReturnType<typeof getGraphScan>>, TError = ErrorType<unknown>>(
-  params?: GetGraphScanParams,
-  options?: { query?: UseQueryOptions<Awaited<ReturnType<typeof getGraphScan>>, TError, TData>; request?: SecondParameter<typeof customFetch> },
-) => {
-  const { query: queryOptions, request: requestOptions } = options ?? {};
-  const queryKey = queryOptions?.queryKey ?? getGetGraphScanQueryKey(params);
-  const queryFn: QueryFunction<Awaited<ReturnType<typeof getGraphScan>>> = ({ signal }) =>
-    getGraphScan(params, { signal, ...requestOptions });
-  return { queryKey, queryFn, ...queryOptions } as UseQueryOptions<Awaited<ReturnType<typeof getGraphScan>>, TError, TData> & { queryKey: QueryKey };
-};
-
-export function useGetGraphScan<TData = Awaited<ReturnType<typeof getGraphScan>>, TError = ErrorType<unknown>>(
-  params?: GetGraphScanParams,
-  options?: { query?: UseQueryOptions<Awaited<ReturnType<typeof getGraphScan>>, TError, TData>; request?: SecondParameter<typeof customFetch> },
-): UseQueryResult<TData, TError> & { queryKey: QueryKey } {
-  const queryOptions = getGetGraphScanQueryOptions(params, options);
-  const query = useQuery(queryOptions) as UseQueryResult<TData, TError> & { queryKey: QueryKey };
-  return withQueryKey(query, queryOptions.queryKey);
-}
-
-export const getAccountPnl = async (accountPnlRequest: AccountPnlRequest, options?: RequestInit): Promise<AccountPnlResult> =>
-  customFetch<AccountPnlResult>(`/api/arb/account-pnl`, {
-    ...options,
-    method: "POST",
-    headers: { "Content-Type": "application/json", ...options?.headers },
-    body: JSON.stringify(accountPnlRequest),
-  });
-
-export const getGetAccountPnlQueryKey = (body: AccountPnlRequest) =>
-  ["/api/arb/account-pnl", body.krakenKey, body.coinbaseKey ?? ""] as const;
-
-/**
- * Realized P&L from ACTUAL Kraken balances — each fetch also records a
- * snapshot server-side. Query (not mutation) so the dashboard can poll.
- */
-export function useGetAccountPnl<TData = AccountPnlResult, TError = ErrorType<unknown>>(
-  body: AccountPnlRequest,
-  options?: { query?: Partial<UseQueryOptions<AccountPnlResult, TError, TData>>; request?: SecondParameter<typeof customFetch> },
-): UseQueryResult<TData, TError> & { queryKey: QueryKey } {
-  const queryKey = options?.query?.queryKey ?? getGetAccountPnlQueryKey(body);
-  const query = useQuery({
-    queryKey,
-    queryFn: ({ signal }) => getAccountPnl(body, { signal, ...options?.request }),
-    ...options?.query,
-  } as UseQueryOptions<AccountPnlResult, TError, TData>) as UseQueryResult<TData, TError> & { queryKey: QueryKey };
-  return withQueryKey(query, queryKey);
-}
-
-export const getExecutionQuality = async (options?: RequestInit): Promise<ExecutionQualityResult> =>
-  customFetch<ExecutionQualityResult>(`/api/arb/execution-quality`, { ...options, method: "GET" });
-
-export const getGetExecutionQualityQueryKey = () => ["/api/arb/execution-quality"] as const;
-
-/** Per-route execution quality: fill rate + expected vs realized profit. */
-export function useGetExecutionQuality<TData = ExecutionQualityResult, TError = ErrorType<unknown>>(
-  options?: { query?: Partial<UseQueryOptions<ExecutionQualityResult, TError, TData>>; request?: SecondParameter<typeof customFetch> },
-): UseQueryResult<TData, TError> & { queryKey: QueryKey } {
-  const queryKey = options?.query?.queryKey ?? getGetExecutionQualityQueryKey();
-  const query = useQuery({
-    queryKey,
-    queryFn: ({ signal }) => getExecutionQuality({ signal, ...options?.request }),
-    ...options?.query,
-  } as UseQueryOptions<ExecutionQualityResult, TError, TData>) as UseQueryResult<TData, TError> & { queryKey: QueryKey };
-  return withQueryKey(query, queryKey);
-}
-
-export const getFeeTier = async (feeTierRequest: FeeTierRequest, options?: RequestInit): Promise<FeeTierResult> =>
-  customFetch<FeeTierResult>(`/api/arb/fee-tier`, {
-    ...options,
-    method: "POST",
-    headers: { "Content-Type": "application/json", ...options?.headers },
-    body: JSON.stringify(feeTierRequest),
-  });
-
-export const getGetFeeTierQueryKey = (body: FeeTierRequest) =>
-  ["/api/arb/fee-tier", body.krakenKey] as const;
-
-/**
- * Actual Kraken taker fee tier for the account. Query (not mutation) so
- * multiple cards share one cached lookup; pass `enabled` when creds exist.
- */
-export function useGetFeeTier<TData = FeeTierResult, TError = ErrorType<unknown>>(
-  body: FeeTierRequest,
-  options?: { query?: Partial<UseQueryOptions<FeeTierResult, TError, TData>>; request?: SecondParameter<typeof customFetch> },
-): UseQueryResult<TData, TError> & { queryKey: QueryKey } {
-  const queryKey = options?.query?.queryKey ?? getGetFeeTierQueryKey(body);
-  const query = useQuery({
-    queryKey,
-    queryFn: ({ signal }) => getFeeTier(body, { signal, ...options?.request }),
-    ...options?.query,
-  } as UseQueryOptions<FeeTierResult, TError, TData>) as UseQueryResult<TData, TError> & { queryKey: QueryKey };
-  return withQueryKey(query, queryKey);
-}
-
-export const graphExecute = async (graphExecuteRequest: GraphExecuteRequest, options?: RequestInit): Promise<GraphExecuteResult> =>
-  customFetch<GraphExecuteResult>(`/api/arb/graph-execute`, {
-    ...options,
-    method: "POST",
-    headers: { "Content-Type": "application/json", ...options?.headers },
-    body: JSON.stringify(graphExecuteRequest),
-  });
-
-export const useGraphExecute = <TError = ErrorType<ErrorResponse>, TContext = unknown>(
-  options?: { mutation?: UseMutationOptions<Awaited<ReturnType<typeof graphExecute>>, TError, { data: BodyType<GraphExecuteRequest> }, TContext>; request?: SecondParameter<typeof customFetch> },
-): UseMutationResult<Awaited<ReturnType<typeof graphExecute>>, TError, { data: BodyType<GraphExecuteRequest> }, TContext> => {
-  const { mutation: mutationOptions, request: requestOptions } = options ?? {};
-  const mutationFn: MutationFunction<Awaited<ReturnType<typeof graphExecute>>, { data: BodyType<GraphExecuteRequest> }> = (props) => {
-    const { data } = props ?? {};
-    return graphExecute(data, requestOptions);
-  };
-  return useMutation({ mutationKey: ['graphExecute'], mutationFn, ...mutationOptions });
-};
 
 export const getGetTradeSummaryQueryKey = () => {
     return [

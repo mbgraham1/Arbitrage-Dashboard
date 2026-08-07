@@ -37,6 +37,11 @@ export default defineConfig({
           path: path.resolve(apiClientReactSrc, "custom-fetch.ts"),
           name: "customFetch",
         },
+        operations: {
+          // POST endpoints consumed as polling queries by the dashboard.
+          getAccountPnl: { query: { useQuery: true } },
+          getFeeTier: { query: { useQuery: true } },
+        },
       },
     },
   },

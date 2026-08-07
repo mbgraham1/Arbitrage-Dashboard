@@ -5,6 +5,7 @@
  * CAT Arbitrage Dashboard API
  * OpenAPI spec version: 0.1.0
  */
+import type { TriExecuteResultPriceSource } from './triExecuteResultPriceSource';
 
 export interface TriExecuteResult {
   success: boolean;
@@ -18,4 +19,8 @@ export interface TriExecuteResult {
   leg3OrderId?: string | null;
   /** @nullable */
   error?: string | null;
+  /** "direct" = live ETHSOL WS market was used for leg 2; "synthetic" = ETH/USD ÷ SOL/USD cross rate was used. Only present for ETH loops; absent for BTC loops. */
+  priceSource?: TriExecuteResultPriceSource;
+  /** True when the ETH/SOL leg used a synthetic cross rate instead of the direct ETHSOL order-book market. Live execution is blocked when true. */
+  synthetic?: boolean;
 }

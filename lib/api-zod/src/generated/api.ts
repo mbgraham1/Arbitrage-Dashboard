@@ -25,7 +25,8 @@ export const FetchPricesBody = zod.object({
   "krakenSecret": zod.string(),
   "coinbaseKey": zod.string(),
   "coinbaseSecret": zod.string(),
-  "enabledPairs": zod.array(zod.string()).optional().describe('Optional allow-list of pair symbols to scan (e.g. [\'SOL\/USD\', \'BTC\/USD\']). Scans all pairs when omitted.')
+  "enabledPairs": zod.array(zod.string()).optional().describe('Optional allow-list of pair symbols to scan (e.g. [\'SOL\/USD\', \'BTC\/USD\']). Scans all pairs when omitted.'),
+  "pair": zod.string().optional().describe('Active trading pair (e.g. BTC\/USD). When provided, base-asset balances for that pair are included in the response.')
 })
 
 export const FetchPricesResponse = zod.object({
@@ -65,7 +66,7 @@ export const FetchBalancesBody = zod.object({
   "coinbaseKey": zod.string(),
   "coinbaseSecret": zod.string(),
   "enabledPairs": zod.array(zod.string()).optional().describe('Optional allow-list of pair symbols to scan (e.g. [\'SOL\/USD\', \'BTC\/USD\']). Scans all pairs when omitted.'),
-  "pair": zod.string().optional().describe('Active trading pair (e.g. BTC/USD). When provided, base-asset balances for that pair are included in the response.')
+  "pair": zod.string().optional().describe('Active trading pair (e.g. BTC\/USD). When provided, base-asset balances for that pair are included in the response.')
 })
 
 export const FetchBalancesResponse = zod.object({
@@ -81,7 +82,7 @@ export const FetchBalancesResponse = zod.object({
   "solOnCoinbase": zod.number().optional(),
   "usdOnCoinbase": zod.number().optional(),
   "suggestedVolume": zod.number().optional(),
-  "baseAsset": zod.string().optional(),
+  "baseAsset": zod.string().optional().describe('Base asset of the requested pair (e.g. BTC); SOL when no pair given'),
   "baseAssetOnKraken": zod.number().optional(),
   "baseAssetOnCoinbase": zod.number().optional()
 })
@@ -102,24 +103,6 @@ export const GetPreloadedCredentialsResponse = zod.object({
 /**
  * @summary Test Kraken connection
  */
-export const FeeTierBody = zod.object({
-  "krakenKey": zod.string(),
-  "krakenSecret": zod.string()
-})
-
-export const AccountPnlBody = zod.object({
-  "krakenKey": zod.string(),
-  "krakenSecret": zod.string(),
-  "coinbaseKey": zod.string().optional(),
-  "coinbaseSecret": zod.string().optional()
-})
-
-export const FeeTierResponse = zod.object({
-  "takerFeePct": zod.number().nullable(),
-  "makerFeePct": zod.number().nullable(),
-  "source": zod.enum(["account", "unavailable"])
-})
-
 export const TestKrakenBody = zod.object({
   "krakenKey": zod.string(),
   "krakenSecret": zod.string()
@@ -236,6 +219,10 @@ export const GetAllPairSnapshotsResponse = zod.array(GetAllPairSnapshotsResponse
  * Port of Python scan_all_coins(). Fetches bid/ask for all 10 configured pairs from Kraken and Coinbase and returns them sorted by gross spread (best direction per pair) descending. Net edge = grossSpreadPct minus the client's fee + slippage settings.
  * @summary Scan all 10 pairs and rank by cross-exchange gross spread
  */
+export const ScanAllPairsQueryParams = zod.object({
+  "enabledPairs": zod.array(zod.coerce.string()).optional().describe('Optional allow-list of pair symbols to scan (comma-separated). Scans all pairs when omitted.')
+})
+
 export const ScanAllPairsResponseItem = zod.object({
   "coin": zod.string().describe('Short coin symbol, e.g. BTC, ETH, SOL'),
   "pair": zod.string().describe('Canonical pair, e.g. BTC\/USD'),
@@ -321,6 +308,8 @@ export const GetObScanResponse = zod.object({
   "assetA": zod.string(),
   "assetB": zod.string(),
   "estimatedProfitUsd": zod.number(),
+  "grossProfitUsd": zod.number().describe('raw triangle edge ($) before fees, slippage included'),
+  "feeUsd": zod.number().describe('total 3-leg fee drag ($) at the scan\'s per-leg fee rate'),
   "profitPct": zod.number().describe('profit as % of tradeSizeUsd'),
   "avgPriceA": zod.number().describe('average USD fill price for leg 1'),
   "avgCrossRate": zod.number().describe('average B-per-A cross rate'),
@@ -347,7 +336,8 @@ export const GetObScanResponse = zod.object({
   "confidencePct": zod.number(),
   "status": zod.enum(['VIABLE', 'HIGH_SLIPPAGE', 'REJECTED']).describe('v18 — VIABLE when profit > minProfitUsd×(size\/10) and slippage within limit')
 })).describe('v18 — top route re-simulated at $10\/$50\/$100\/$500\/$1,000; unabsorbable sizes omitted'),
-  "scannedAt": zod.string()
+  "scannedAt": zod.string(),
+  "crossPairsDiscovered": zod.number().describe('v19 — cross pairs discovered dynamically via Kraken AssetPairs (0 when using the hardcoded fallback)')
 })
 
 
@@ -371,79 +361,6 @@ export const ObExecuteBody = zod.object({
   "isDryRun": zod.boolean().default(obExecuteBodyIsDryRunDefault)
 })
 
-/**
- * Execute the top (or a named) Opportunity Engine route. Re-runs a fresh graph
- * scan (pre-flight); only executes when fresh net profit clears minProfitUsd.
- * Kraken-only triangles reuse the ob-execute 3-leg limit machinery; cross-exchange
- * inventory routes (buy on one venue, sell on the other) place both market orders.
- * @summary Manually execute an Opportunity Engine route
- */
-export const graphExecuteBodyTradeSizeUsdDefault = 10;
-export const graphExecuteBodyIsDryRunDefault = true;
-
-export const GraphExecuteBody = zod.object({
-  "krakenKey": zod.string(),
-  "krakenSecret": zod.string(),
-  "coinbaseKey": zod.string().optional(),
-  "coinbaseSecret": zod.string().optional(),
-  "routeDescription": zod.string().optional().describe('Exact route description to execute; omitted = fresh top route'),
-  "tradeSizeUsd": zod.number().default(graphExecuteBodyTradeSizeUsdDefault),
-  "krakenFeesPct": zod.number().default(0.16),
-  "coinbaseFeesPct": zod.number().default(0.4),
-  "minProfitUsd": zod.number().default(0.02),
-  "isDryRun": zod.boolean().default(graphExecuteBodyIsDryRunDefault),
-  "executionStyle": zod.enum(["taker", "maker"]).optional()
-})
-
-export const AccountPnlResponse = zod.object({
-  "startingValueUsd": zod.number(),
-  "startedAt": zod.string(),
-  "currentValueUsd": zod.number(),
-  "usdBalance": zod.number(),
-  "unrealizedHoldingsUsd": zod.number(),
-  "realizedTodayUsd": zod.number(),
-  "lifetimePnlUsd": zod.number(),
-  "equityChangeUsd": zod.number(),
-  "netCashFlowUsd": zod.number().nullable(),
-  "tradingPnlUsd": zod.number(),
-  "tradedFillCount": zod.number(),
-  "unrealizedPnlUsd": zod.number().nullable(),
-  "cashFlowNote": zod.string().nullable(),
-  "includesCoinbase": zod.boolean(),
-  "snapshotCount": zod.number(),
-  "unpricedAssets": zod.array(zod.string())
-})
-
-export const ExecutionQualityRouteResponse = zod.object({
-  "route": zod.string(),
-  "style": zod.enum(["taker", "maker"]),
-  "attempts": zod.number(),
-  "liveAttempts": zod.number(),
-  "liveFillRate": zod.number().nullable(),
-  "avgExpectedProfitUsd": zod.number().nullable(),
-  "avgRealizedProfitUsd": zod.number().nullable(),
-  "avgShortfallUsd": zod.number().nullable(),
-  "avgSlippagePct": zod.number().nullable(),
-  "totalRealizedProfitUsd": zod.number().nullable(),
-  "lastAttemptAt": zod.string()
-})
-
-export const ExecutionQualityResponse = zod.object({
-  "routes": zod.array(ExecutionQualityRouteResponse),
-  "totalRecords": zod.number()
-})
-
-export const GraphExecuteResponse = zod.object({
-  "success": zod.boolean(),
-  "isDryRun": zod.boolean(),
-  "executed": zod.boolean(),
-  "route": zod.string(),
-  "preflightProfitUsd": zod.number().nullish(),
-  "realizedProfitUsd": zod.number().nullish(),
-  "orderIds": zod.array(zod.string()).nullish(),
-  "error": zod.string().nullish()
-})
-
 export const ObExecuteResponse = zod.object({
   "success": zod.boolean(),
   "isDryRun": zod.boolean(),
@@ -453,6 +370,184 @@ export const ObExecuteResponse = zod.object({
   "leg1OrderId": zod.string().nullish(),
   "leg2OrderId": zod.string().nullish(),
   "leg3OrderId": zod.string().nullish(),
+  "error": zod.string().nullish()
+})
+
+
+/**
+ * @summary Per-route execution quality aggregates (fill rate, expected vs realized profit)
+ */
+export const GetExecutionQualityResponse = zod.object({
+  "routes": zod.array(zod.object({
+  "route": zod.string(),
+  "style": zod.enum(['taker', 'maker']),
+  "attempts": zod.number(),
+  "liveAttempts": zod.number(),
+  "liveFillRate": zod.number().nullable(),
+  "avgExpectedProfitUsd": zod.number().nullable(),
+  "avgRealizedProfitUsd": zod.number().nullable(),
+  "avgShortfallUsd": zod.number().nullable(),
+  "avgSlippagePct": zod.number().nullable(),
+  "totalRealizedProfitUsd": zod.number().nullable(),
+  "lastAttemptAt": zod.string()
+})),
+  "totalRecords": zod.number()
+})
+
+
+/**
+ * In-memory snapshot updated by the maker-leg fill machinery — current leg, order ID, elapsed time, filled percent, per-leg fill timer, and retry attempt. Idle (active=false) when nothing is executing.
+ * @summary Live per-leg status of the currently executing triangle
+ */
+export const GetExecutionStatusResponse = zod.object({
+  "active": zod.boolean(),
+  "route": zod.string().nullable(),
+  "leg": zod.number().nullable(),
+  "legLabel": zod.string().nullable(),
+  "pair": zod.string().nullable(),
+  "orderId": zod.string().nullable(),
+  "attempt": zod.number().nullable(),
+  "maxAttempts": zod.number().nullable(),
+  "startedAtMs": zod.number().nullable(),
+  "timeoutMs": zod.number().nullable(),
+  "filledPct": zod.number().nullable(),
+  "phase": zod.string().nullable(),
+  "elapsedMs": zod.number().nullable(),
+  "updatedAtMs": zod.number()
+})
+
+
+/**
+ * Values the Kraken account (plus Coinbase when creds provided) at live tickers, stores a snapshot, and decomposes the equity change into external cash flows (Kraken Ledgers), trading P&L (sum of per-trade realized fills), and unrealized drift. Never estimated from scanner profit.
+ * @summary Ground-truth P&L from actual exchange balances
+ */
+export const GetAccountPnlBody = zod.object({
+  "krakenKey": zod.string(),
+  "krakenSecret": zod.string(),
+  "coinbaseKey": zod.string().optional(),
+  "coinbaseSecret": zod.string().optional()
+})
+
+export const GetAccountPnlResponse = zod.object({
+  "startingValueUsd": zod.number(),
+  "startedAt": zod.string(),
+  "currentValueUsd": zod.number(),
+  "usdBalance": zod.number(),
+  "unrealizedHoldingsUsd": zod.number(),
+  "realizedTodayUsd": zod.number(),
+  "lifetimePnlUsd": zod.number(),
+  "equityChangeUsd": zod.number().describe('Total change in everything owned since baseline (current − starting)'),
+  "netCashFlowUsd": zod.number().nullable().describe('External deposits − withdrawals since baseline (Kraken Ledgers); null when unknowable (ledger unavailable\/incomplete, or Coinbase included) — attribution withheld'),
+  "tradingPnlUsd": zod.number().describe('Sum of per-trade realized profits from live filled executions'),
+  "tradedFillCount": zod.number(),
+  "unrealizedPnlUsd": zod.number().nullable().describe('Residual: equityChange − cashFlow − tradingPnl ≈ price drift on held coins; null when cash flows are unknowable'),
+  "cashFlowNote": zod.string().nullable(),
+  "includesCoinbase": zod.boolean(),
+  "snapshotCount": zod.number(),
+  "unpricedAssets": zod.array(zod.string())
+})
+
+
+/**
+ * Queries Kraken /0/private/TradeVolume for the caller's real taker fee on major pairs (max across pairs). Returns null when the query fails (bad keys, network) so callers can fall back to their configured assumption.
+ * @summary Look up the account's actual Kraken taker fee tier
+ */
+export const GetFeeTierBody = zod.object({
+  "krakenKey": zod.string(),
+  "krakenSecret": zod.string()
+})
+
+export const GetFeeTierResponse = zod.object({
+  "takerFeePct": zod.number().nullable(),
+  "makerFeePct": zod.number().nullable(),
+  "source": zod.enum(['account', 'unavailable'])
+})
+
+
+/**
+ * Builds a directed graph over Kraken (34 assets + verified cross pairs) and Coinbase (shared assets), DFS-searches all USD→…→USD cycles up to maxHops, and ranks routes by net profit after per-leg fees.
+ * @summary Multi-exchange graph opportunity scan
+ */
+export const getGraphScanQueryTradeSizeUsdDefault = 10;
+export const getGraphScanQueryKrakenFeesPctDefault = 0.16;
+export const getGraphScanQueryCoinbaseFeesPctDefault = 0.4;
+export const getGraphScanQueryMaxHopsDefault = 4;
+export const getGraphScanQueryExecutionStyleDefault = `taker`;
+
+export const GetGraphScanQueryParams = zod.object({
+  "tradeSizeUsd": zod.coerce.number().default(getGraphScanQueryTradeSizeUsdDefault),
+  "krakenFeesPct": zod.coerce.number().default(getGraphScanQueryKrakenFeesPctDefault),
+  "coinbaseFeesPct": zod.coerce.number().default(getGraphScanQueryCoinbaseFeesPctDefault),
+  "maxHops": zod.coerce.number().default(getGraphScanQueryMaxHopsDefault),
+  "executionStyle": zod.enum(['taker', 'maker']).default(getGraphScanQueryExecutionStyleDefault)
+})
+
+export const GetGraphScanResponse = zod.object({
+  "executionStyle": zod.enum(['taker', 'maker']),
+  "routes": zod.array(zod.object({
+  "hops": zod.array(zod.object({
+  "from": zod.string(),
+  "to": zod.string(),
+  "exchange": zod.enum(['kraken', 'coinbase', 'bridge']),
+  "pair": zod.string(),
+  "side": zod.enum(['buy', 'sell', 'bridge']),
+  "amountIn": zod.number(),
+  "amountOut": zod.number(),
+  "feePct": zod.number(),
+  "limitPrice": zod.number()
+})),
+  "description": zod.string(),
+  "startUsd": zod.number(),
+  "grossProfitUsd": zod.number(),
+  "feeUsd": zod.number(),
+  "netProfitUsd": zod.number(),
+  "profitPct": zod.number(),
+  "slippagePct": zod.number(),
+  "status": zod.enum(['VIABLE', 'REJECTED']),
+  "executable": zod.boolean().describe('True when the live executor supports this route shape (Kraken triangle or 2-leg cross-exchange). Unsupported shapes are dry-run only.')
+})),
+  "tradeSizeUsd": zod.number(),
+  "krakenFeesPct": zod.number(),
+  "coinbaseFeesPct": zod.number(),
+  "assetsScanned": zod.number(),
+  "routesEvaluated": zod.number(),
+  "scannedAt": zod.coerce.date()
+})
+
+
+/**
+ * Re-runs a fresh graph scan (pre-flight), locates the requested route (or the top route), and gates on fresh net profit > minProfitUsd. Kraken-only triangles reuse the ob-execute 3-leg post-only limit machinery (fill confirm + unwind); 2-leg cross-exchange inventory routes place both market orders in parallel (requires inventory on both venues). Other shapes execute as dry-run only.
+ * @summary Manually execute an Opportunity Engine route
+ */
+export const graphExecuteBodyTradeSizeUsdDefault = 10;
+export const graphExecuteBodyKrakenFeesPctDefault = 0.16;
+export const graphExecuteBodyCoinbaseFeesPctDefault = 0.4;
+export const graphExecuteBodyMinProfitUsdDefault = 0.02;
+export const graphExecuteBodyIsDryRunDefault = true;
+export const graphExecuteBodyExecutionStyleDefault = `taker`;
+
+export const GraphExecuteBody = zod.object({
+  "krakenKey": zod.string(),
+  "krakenSecret": zod.string(),
+  "coinbaseKey": zod.string().optional(),
+  "coinbaseSecret": zod.string().optional(),
+  "routeDescription": zod.string().optional().describe('Exact route description to execute; omitted = fresh top route'),
+  "tradeSizeUsd": zod.number().default(graphExecuteBodyTradeSizeUsdDefault),
+  "krakenFeesPct": zod.number().default(graphExecuteBodyKrakenFeesPctDefault),
+  "coinbaseFeesPct": zod.number().default(graphExecuteBodyCoinbaseFeesPctDefault),
+  "minProfitUsd": zod.number().default(graphExecuteBodyMinProfitUsdDefault),
+  "isDryRun": zod.boolean().default(graphExecuteBodyIsDryRunDefault),
+  "executionStyle": zod.enum(['taker', 'maker']).default(graphExecuteBodyExecutionStyleDefault)
+})
+
+export const GraphExecuteResponse = zod.object({
+  "success": zod.boolean(),
+  "isDryRun": zod.boolean(),
+  "executed": zod.boolean(),
+  "route": zod.string(),
+  "preflightProfitUsd": zod.number().nullish(),
+  "realizedProfitUsd": zod.number().nullish().describe('Actual USD profit from confirmed fills (cost\/fee accounting); null when unknown'),
+  "orderIds": zod.array(zod.string()).nullish(),
   "error": zod.string().nullish()
 })
 
@@ -481,10 +576,8 @@ export const ExecuteTriangularResponse = zod.object({
   "leg2OrderId": zod.string().nullish(),
   "leg3OrderId": zod.string().nullish(),
   "error": zod.string().nullish(),
-  /** "direct" = live ETHSOL WS market; "synthetic" = computed cross rate. Only present for ETH loops. */
-  "priceSource": zod.enum(["direct", "synthetic"]).optional(),
-  /** True when the ETH/SOL leg used a synthetic cross rate instead of the direct ETHSOL market. */
-  "synthetic": zod.boolean().optional()
+  "priceSource": zod.enum(['direct', 'synthetic']).optional().describe('\"direct\" = live ETHSOL WS market was used for leg 2; \"synthetic\" = ETH\/USD ÷ SOL\/USD cross rate was used. Only present for ETH loops; absent for BTC loops.\n'),
+  "synthetic": zod.boolean().optional().describe('True when the ETH\/SOL leg used a synthetic cross rate instead of the direct ETHSOL order-book market. Live execution is blocked when true.\n')
 })
 
 

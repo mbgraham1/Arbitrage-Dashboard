@@ -76,11 +76,9 @@ export interface BalanceData {
   solOnCoinbase?: number;
   usdOnCoinbase?: number;
   suggestedVolume?: number;
-  /** Base asset symbol for the active pair (e.g. "BTC" when pair is BTC/USD). Defaults to "SOL". */
+  /** Base asset of the requested pair (e.g. BTC); SOL when no pair given */
   baseAsset?: string;
-  /** Balance of the base asset on Kraken (e.g. BTC balance when pair is BTC/USD). */
   baseAssetOnKraken?: number;
-  /** Balance of the base asset on Coinbase (e.g. BTC balance when pair is BTC/USD). */
   baseAssetOnCoinbase?: number;
 }
 
@@ -227,60 +225,18 @@ export const ObCycleEntryStatus = {
   LOW_PROFIT: 'LOW_PROFIT',
 } as const;
 
-// ── Graph Opportunity Engine ──────────────────────────────────────────────────
-
-export type GraphExchangeLabel = "kraken" | "coinbase" | "bridge";
-
-export interface GraphRouteHop {
-  from: string;
-  to: string;
-  exchange: GraphExchangeLabel;
-  pair: string;
-  side: "buy" | "sell" | "bridge";
-  amountIn: number;
-  amountOut: number;
-  feePct: number;
-  limitPrice: number;
-}
-
-export interface GraphRoute {
-  hops: GraphRouteHop[];
-  description: string;
-  startUsd: number;
-  grossProfitUsd: number;
-  feeUsd: number;
-  netProfitUsd: number;
-  profitPct: number;
-  slippagePct: number;
-  status: "VIABLE" | "REJECTED";
-  /** True when the live executor supports this route shape (Kraken triangle or 2-leg cross-exchange). Unsupported shapes are dry-run only. */
-  executable: boolean;
-}
-
-export interface GraphScanResult {
-  routes: GraphRoute[];
-  tradeSizeUsd: number;
-  krakenFeesPct: number;
-  coinbaseFeesPct: number;
-  /** Fee model applied to Kraken legs */
-  executionStyle: "taker" | "maker";
-  assetsScanned: number;
-  routesEvaluated: number;
-  scannedAt: string;
-}
-
 export interface ObCycleEntry {
   /** e.g. USD→SOL→ETH→USD */
   route: string;
   assetA: string;
   assetB: string;
   estimatedProfitUsd: number;
-  /** profit as % of tradeSizeUsd */
-  profitPct: number;
   /** raw triangle edge ($) before fees, slippage included */
   grossProfitUsd: number;
   /** total 3-leg fee drag ($) at the scan's per-leg fee rate */
   feeUsd: number;
+  /** profit as % of tradeSizeUsd */
+  profitPct: number;
   /** average USD fill price for leg 1 */
   avgPriceA: number;
   /** average B-per-A cross rate */
@@ -340,9 +296,9 @@ export interface ObScanResult {
   scalingRoute: string | null;
   /** v18 — top route re-simulated at $10/$50/$100/$500/$1,000; unabsorbable sizes omitted */
   scaling: ObScalingRow[];
-  /** v19 — crypto cross pairs discovered via Kraken AssetPairs (0 = hardcoded fallback) */
-  crossPairsDiscovered: number;
   scannedAt: string;
+  /** v19 — cross pairs discovered dynamically via Kraken AssetPairs (0 when using the hardcoded fallback) */
+  crossPairsDiscovered: number;
 }
 
 export type CointegrationSignalDirection = typeof CointegrationSignalDirection[keyof typeof CointegrationSignalDirection];
@@ -381,11 +337,17 @@ export interface CointegrationScanResult {
   scannedAt: string;
 }
 
-export interface AccountPnlRequest {
+export interface ObExecuteRequest {
   krakenKey: string;
   krakenSecret: string;
-  coinbaseKey?: string;
-  coinbaseSecret?: string;
+  /** Asset A of the displayed top route (server re-verifies via fresh pre-flight) */
+  assetA: string;
+  assetB: string;
+  tradeSizeUsd?: number;
+  feesPct?: number;
+  /** Min net profit ($) at $10; pre-flight gate scales it by size/10 */
+  minProfitUsd?: number;
+  isDryRun?: boolean;
 }
 
 export interface FeeTierRequest {
@@ -393,13 +355,172 @@ export interface FeeTierRequest {
   krakenSecret: string;
 }
 
-export interface FeeTierResult {
-  /** Actual taker fee percent per leg, or null if the lookup failed */
-  takerFeePct: number | null;
-  /** Actual maker (post-only) fee percent per leg, or null if unavailable */
-  makerFeePct: number | null;
-  source: "account" | "unavailable";
+export interface AccountPnlRequest {
+  krakenKey: string;
+  krakenSecret: string;
+  coinbaseKey?: string;
+  coinbaseSecret?: string;
 }
+
+export interface AccountPnlResult {
+  startingValueUsd: number;
+  startedAt: string;
+  currentValueUsd: number;
+  usdBalance: number;
+  unrealizedHoldingsUsd: number;
+  realizedTodayUsd: number;
+  lifetimePnlUsd: number;
+  /** Total change in everything owned since baseline (current − starting) */
+  equityChangeUsd: number;
+  /** External deposits − withdrawals since baseline (Kraken Ledgers); null when unknowable (ledger unavailable/incomplete, or Coinbase included) — attribution withheld */
+  netCashFlowUsd: number | null;
+  /** Sum of per-trade realized profits from live filled executions */
+  tradingPnlUsd: number;
+  tradedFillCount: number;
+  /** Residual: equityChange − cashFlow − tradingPnl ≈ price drift on held coins; null when cash flows are unknowable */
+  unrealizedPnlUsd: number | null;
+  cashFlowNote: string | null;
+  includesCoinbase: boolean;
+  snapshotCount: number;
+  unpricedAssets: string[];
+}
+
+export type ExecutionQualityRouteStyle = typeof ExecutionQualityRouteStyle[keyof typeof ExecutionQualityRouteStyle];
+
+
+export const ExecutionQualityRouteStyle = {
+  taker: 'taker',
+  maker: 'maker',
+} as const;
+
+export interface ExecutionQualityRoute {
+  route: string;
+  style: ExecutionQualityRouteStyle;
+  attempts: number;
+  liveAttempts: number;
+  liveFillRate: number | null;
+  avgExpectedProfitUsd: number | null;
+  avgRealizedProfitUsd: number | null;
+  avgShortfallUsd: number | null;
+  avgSlippagePct: number | null;
+  totalRealizedProfitUsd: number | null;
+  lastAttemptAt: string;
+}
+
+export interface ExecutionQualityResult {
+  routes: ExecutionQualityRoute[];
+  totalRecords: number;
+}
+
+export interface ExecutionStatusResult {
+  active: boolean;
+  route: string | null;
+  leg: number | null;
+  legLabel: string | null;
+  pair: string | null;
+  orderId: string | null;
+  attempt: number | null;
+  maxAttempts: number | null;
+  startedAtMs: number | null;
+  timeoutMs: number | null;
+  filledPct: number | null;
+  phase: string | null;
+  elapsedMs: number | null;
+  updatedAtMs: number;
+}
+
+export type FeeTierResultSource = typeof FeeTierResultSource[keyof typeof FeeTierResultSource];
+
+
+export const FeeTierResultSource = {
+  account: 'account',
+  unavailable: 'unavailable',
+} as const;
+
+export interface FeeTierResult {
+  takerFeePct: number | null;
+  makerFeePct: number | null;
+  source: FeeTierResultSource;
+}
+
+export type GraphRouteHopExchange = typeof GraphRouteHopExchange[keyof typeof GraphRouteHopExchange];
+
+
+export const GraphRouteHopExchange = {
+  kraken: 'kraken',
+  coinbase: 'coinbase',
+  bridge: 'bridge',
+} as const;
+
+export type GraphRouteHopSide = typeof GraphRouteHopSide[keyof typeof GraphRouteHopSide];
+
+
+export const GraphRouteHopSide = {
+  buy: 'buy',
+  sell: 'sell',
+  bridge: 'bridge',
+} as const;
+
+export interface GraphRouteHop {
+  from: string;
+  to: string;
+  exchange: GraphRouteHopExchange;
+  pair: string;
+  side: GraphRouteHopSide;
+  amountIn: number;
+  amountOut: number;
+  feePct: number;
+  limitPrice: number;
+}
+
+export type GraphRouteStatus = typeof GraphRouteStatus[keyof typeof GraphRouteStatus];
+
+
+export const GraphRouteStatus = {
+  VIABLE: 'VIABLE',
+  REJECTED: 'REJECTED',
+} as const;
+
+export interface GraphRoute {
+  hops: GraphRouteHop[];
+  description: string;
+  startUsd: number;
+  grossProfitUsd: number;
+  feeUsd: number;
+  netProfitUsd: number;
+  profitPct: number;
+  slippagePct: number;
+  status: GraphRouteStatus;
+  /** True when the live executor supports this route shape (Kraken triangle or 2-leg cross-exchange). Unsupported shapes are dry-run only. */
+  executable: boolean;
+}
+
+export type GraphScanResultExecutionStyle = typeof GraphScanResultExecutionStyle[keyof typeof GraphScanResultExecutionStyle];
+
+
+export const GraphScanResultExecutionStyle = {
+  taker: 'taker',
+  maker: 'maker',
+} as const;
+
+export interface GraphScanResult {
+  executionStyle: GraphScanResultExecutionStyle;
+  routes: GraphRoute[];
+  tradeSizeUsd: number;
+  krakenFeesPct: number;
+  coinbaseFeesPct: number;
+  assetsScanned: number;
+  routesEvaluated: number;
+  scannedAt: string;
+}
+
+export type GraphExecuteRequestExecutionStyle = typeof GraphExecuteRequestExecutionStyle[keyof typeof GraphExecuteRequestExecutionStyle];
+
+
+export const GraphExecuteRequestExecutionStyle = {
+  taker: 'taker',
+  maker: 'maker',
+} as const;
 
 export interface GraphExecuteRequest {
   krakenKey: string;
@@ -413,59 +534,7 @@ export interface GraphExecuteRequest {
   coinbaseFeesPct?: number;
   minProfitUsd?: number;
   isDryRun?: boolean;
-  /** Kraken legs: taker (market) or maker (post-only limit, no fill guarantee) */
-  executionStyle?: "taker" | "maker";
-}
-
-export interface AccountPnlResult {
-  /** Total account value at the first-ever snapshot (baseline) */
-  startingValueUsd: number;
-  startedAt: string;
-  /** Fresh total account value: USD cash + holdings at live tickers */
-  currentValueUsd: number;
-  usdBalance: number;
-  /** USD value of non-cash holdings (unrealized until sold back to USD) */
-  unrealizedHoldingsUsd: number;
-  /** currentValue − first snapshot today (UTC) */
-  realizedTodayUsd: number;
-  /** currentValue − baseline snapshot */
-  lifetimePnlUsd: number;
-  /** Total change in everything owned since baseline (current − starting) */
-  equityChangeUsd: number;
-  /** External deposits − withdrawals since baseline (Kraken Ledgers); null when unknowable — attribution withheld */
-  netCashFlowUsd: number | null;
-  /** Sum of per-trade realized profits from live filled executions */
-  tradingPnlUsd: number;
-  tradedFillCount: number;
-  /** Residual: equityChange − cashFlow − tradingPnl ≈ price drift on held coins; null when cash flows are unknowable */
-  unrealizedPnlUsd: number | null;
-  cashFlowNote: string | null;
-  includesCoinbase: boolean;
-  snapshotCount: number;
-  /** Assets that couldn't be priced — total under-counts when non-empty */
-  unpricedAssets: string[];
-}
-
-export interface ExecutionQualityRoute {
-  route: string;
-  style: "taker" | "maker";
-  attempts: number;
-  liveAttempts: number;
-  /** Share of live attempts where every leg confirmed filled; null with no live attempts */
-  liveFillRate: number | null;
-  avgExpectedProfitUsd: number | null;
-  avgRealizedProfitUsd: number | null;
-  /** expected − realized (positive = scanner overestimates this route) */
-  avgShortfallUsd: number | null;
-  /** Avg depth-walked slippage % across recorded attempts (0 for maker joins) */
-  avgSlippagePct: number | null;
-  totalRealizedProfitUsd: number | null;
-  lastAttemptAt: string;
-}
-
-export interface ExecutionQualityResult {
-  routes: ExecutionQualityRoute[];
-  totalRecords: number;
+  executionStyle?: GraphExecuteRequestExecutionStyle;
 }
 
 export interface GraphExecuteResult {
@@ -478,19 +547,6 @@ export interface GraphExecuteResult {
   realizedProfitUsd?: number | null;
   orderIds?: string[] | null;
   error?: string | null;
-}
-
-export interface ObExecuteRequest {
-  krakenKey: string;
-  krakenSecret: string;
-  /** Asset A of the displayed top route (server re-verifies via fresh pre-flight) */
-  assetA: string;
-  assetB: string;
-  tradeSizeUsd?: number;
-  feesPct?: number;
-  /** Min net profit ($) at $10; pre-flight gate scales it by size/10 */
-  minProfitUsd?: number;
-  isDryRun?: boolean;
 }
 
 export interface ObExecuteResult {
@@ -537,6 +593,17 @@ export interface TriExecuteRequest {
   orderType?: TriExecuteRequestOrderType;
 }
 
+/**
+ * "direct" = live ETHSOL WS market was used for leg 2; "synthetic" = ETH/USD ÷ SOL/USD cross rate was used. Only present for ETH loops; absent for BTC loops.
+ */
+export type TriExecuteResultPriceSource = typeof TriExecuteResultPriceSource[keyof typeof TriExecuteResultPriceSource];
+
+
+export const TriExecuteResultPriceSource = {
+  direct: 'direct',
+  synthetic: 'synthetic',
+} as const;
+
 export interface TriExecuteResult {
   success: boolean;
   isDryRun: boolean;
@@ -549,9 +616,9 @@ export interface TriExecuteResult {
   leg3OrderId?: string | null;
   /** @nullable */
   error?: string | null;
-  /** "direct" = live ETHSOL WS market; "synthetic" = computed cross rate from USD legs. Only present for ETH loops. */
-  priceSource?: "direct" | "synthetic";
-  /** True when the ETH/SOL leg used a synthetic cross rate (ethUsd ÷ solUsd) instead of the direct ETHSOL market. */
+  /** "direct" = live ETHSOL WS market was used for leg 2; "synthetic" = ETH/USD ÷ SOL/USD cross rate was used. Only present for ETH loops; absent for BTC loops. */
+  priceSource?: TriExecuteResultPriceSource;
+  /** True when the ETH/SOL leg used a synthetic cross rate instead of the direct ETHSOL order-book market. Live execution is blocked when true. */
   synthetic?: boolean;
 }
 
@@ -607,12 +674,11 @@ limit?: number;
 offset?: number;
 };
 
-export type GetGraphScanParams = {
-  tradeSizeUsd?: number;
-  krakenFeesPct?: number;
-  coinbaseFeesPct?: number;
-  maxHops?: number;
-  executionStyle?: "taker" | "maker";
+export type ScanAllPairsParams = {
+/**
+ * Optional allow-list of pair symbols to scan (comma-separated). Scans all pairs when omitted.
+ */
+enabledPairs?: string[];
 };
 
 export type GetObScanParams = {
@@ -637,4 +703,20 @@ maxSlippagePct?: number;
  */
 volatilityFilter?: boolean;
 };
+
+export type GetGraphScanParams = {
+tradeSizeUsd?: number;
+krakenFeesPct?: number;
+coinbaseFeesPct?: number;
+maxHops?: number;
+executionStyle?: GetGraphScanExecutionStyle;
+};
+
+export type GetGraphScanExecutionStyle = typeof GetGraphScanExecutionStyle[keyof typeof GetGraphScanExecutionStyle];
+
+
+export const GetGraphScanExecutionStyle = {
+  taker: 'taker',
+  maker: 'maker',
+} as const;
 

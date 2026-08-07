@@ -7,8 +7,8 @@ import {
   FetchPricesBody,
   FetchBalancesBody,
   TestKrakenBody,
-  FeeTierBody,
-  AccountPnlBody,
+  GetFeeTierBody,
+  GetAccountPnlBody,
   TestCoinbaseBody,
   ExecuteTradeBody,
   ExecuteTriangularBody,
@@ -45,7 +45,7 @@ import {
   type Pair,
 } from "../lib/exchange";
 import { getBestPairPrices, getTriPrices, getBtcTriPrices, scanAllPairs, getPairPrices, getAllPairSnapshots } from "../lib/price-cache";
-import { scanOrderBookCycles, preflightObCycle, discoverCrossPairs, OB_ASSETS, OB_USD_PAIRS, CROSS_LOOKUP, type ObAsset } from "../lib/order-book";
+import { scanOrderBookCycles, preflightObCycle, discoverCrossPairs, freshJoinPrice, OB_ASSETS, OB_USD_PAIRS, CROSS_LOOKUP, type ObAsset } from "../lib/order-book";
 import { scanGraphOpportunities } from "../lib/graph-engine";
 import { createPairHistory, updatePairHistory, type PairHistory } from "../lib/kalman";
 import { waitForTriLimitFill } from "../lib/tri-fill.js";
@@ -322,6 +322,57 @@ router.post("/arb/ob-execute", async (req, res): Promise<void> => {
   res.json(out.body);
 });
 
+// ── Live execution status (per-leg maker fill timers) ────────────────────────
+// In-memory snapshot of the currently-executing triangle, updated by the leg
+// fill machinery and polled by the dashboard (GET /arb/execution-status).
+interface ExecStatus {
+  active: boolean;
+  route: string | null;
+  leg: number | null;          // 1..3
+  legLabel: string | null;     // e.g. "leg2: buy SOL/BTC"
+  pair: string | null;
+  orderId: string | null;
+  attempt: number | null;
+  maxAttempts: number | null;
+  startedAtMs: number | null;  // current attempt start (server clock)
+  timeoutMs: number | null;    // per-leg fill timer
+  filledPct: number | null;    // 0..100 of the leg's target volume
+  phase: string | null;        // "waiting fill" | "retrying — fresh book + pre-flight" | ...
+  updatedAtMs: number;
+}
+const idleExecStatus = (): ExecStatus => ({
+  active: false, route: null, leg: null, legLabel: null, pair: null, orderId: null,
+  attempt: null, maxAttempts: null, startedAtMs: null, timeoutMs: null,
+  filledPct: null, phase: null, updatedAtMs: Date.now(),
+});
+let execStatus: ExecStatus = idleExecStatus();
+function setExecStatus(patch: Partial<ExecStatus>): void {
+  execStatus = { ...execStatus, ...patch, updatedAtMs: Date.now() };
+}
+
+// Single-flight lock for LIVE order placement. One process, one live triangle
+// at a time: prevents two executions (AUTO + manual, two browser tabs) from
+// interleaving orders, corrupting each other's execStatus, or double-spending
+// the same balance. Dry runs and pre-flights are not serialized.
+let liveExecLockHeld = false;
+
+/** Cancel confirmed only by a TERMINAL Kraken order status — a cancel ack is
+ *  not proof: the order may still fill in the race. Thrown when we cannot
+ *  confirm; callers must NOT retry or unwind on assumed volumes. */
+class IndeterminateOrderError extends Error {
+  constructor(public readonly txid: string, label: string) {
+    super(`${label}: order ${txid} state INDETERMINATE after cancel — no automatic retry/unwind performed; verify on Kraken before trading again.`);
+  }
+}
+
+router.get("/arb/execution-status", (_req, res): void => {
+  const s = execStatus;
+  res.json({
+    ...s,
+    elapsedMs: s.active && s.startedAtMs != null ? Date.now() - s.startedAtMs : null,
+  });
+});
+
 // Shared core for ob-execute and graph-execute (Kraken-only triangles).
 interface TriangleExecInput {
   krakenKey: string; krakenSecret: string;
@@ -340,6 +391,7 @@ async function runKrakenTriangle(input: TriangleExecInput, reqLog: ReqLog): Prom
   const { krakenKey, krakenSecret, assetA, assetB, tradeSizeUsd, feesPct, minProfitUsd, isDryRun } = input;
   const creds = { krakenKey, krakenSecret };
   const route = `USD→${assetA}→${assetB}→USD`;
+  let ownsLiveLock = false;
 
   if (!(OB_ASSETS as readonly string[]).includes(assetA) || !(OB_ASSETS as readonly string[]).includes(assetB)) {
     return { badRequest: `Unknown asset(s): ${assetA}/${assetB}` };
@@ -404,6 +456,13 @@ async function runKrakenTriangle(input: TriangleExecInput, reqLog: ReqLog): Prom
     //    the execution aborts and unwinds the ACTUAL residual positions
     //    (queried from the exchange, never assumed from the plan). Success is
     //    only reported when the position ends flat.
+    // Single-flight: only one LIVE triangle may run in this process.
+    if (liveExecLockHeld) {
+      return { body: { success: false, isDryRun, executed: false, route, preflightProfitUsd: pf.profitUsd, error: "Another live execution is already in progress — wait for it to finish." } };
+    }
+    liveExecLockHeld = true;
+    ownsLiveLock = true;
+
     const log = { info: (m: string) => reqLog.info(m), error: (m: string) => reqLog.error(m) };
     const [l1, l2, l3] = pf.legs;
     // v19: use the dynamically-discovered lookup (same activeLookup from step 0)
@@ -419,59 +478,136 @@ async function runKrakenTriangle(input: TriangleExecInput, reqLog: ReqLog): Prom
       catch { return { status: "unknown", volExec: 0, price: 0, cost: 0, fee: 0 }; }
     };
 
-    // Poll QueryOrders until closed. Limit (post-only) orders may rest in the
-    // book a while; we poll for up to 90 s before cancelling and aborting.
-    // 1.5s interval — QueryOrders counts against Kraken's private rate limit
-    // (500ms polling helped exhaust it and lock the account out mid-session).
-    // WALL-CLOCK deadline (not iteration count): limiter queuing/backoff can
-    // stretch each iteration, and a resting order must not outlive its window.
-    const LIMIT_POLL_DEADLINE_MS = 90_000;
-    const waitFill = async (txid: string, label: string) => {
-      const deadline = Date.now() + LIMIT_POLL_DEADLINE_MS;
-      while (Date.now() < deadline) {
-        await new Promise(r => setTimeout(r, 1_500));
-        const info = await safeInfo(txid);
-        if (info.status === "closed" || info.status === "canceled" || info.status === "expired") return info;
+    // ── Per-leg maker fill timers ─────────────────────────────────────────────
+    // A post-only leg gets MAKER_LEG_TIMEOUT_MS to fill. On expiry: cancel,
+    // read the ACTUAL final fill (it may have filled in the cancel race),
+    // refresh the order book, re-check, and retry the REMAINDER at the fresh
+    // join price — up to MAX_LEG_ATTEMPTS. No order ever waits indefinitely.
+    // Poll at 1s — QueryOrders counts against Kraken's private rate limit.
+    // Deadlines are WALL-CLOCK: limiter queuing/backoff stretches iterations.
+    const MAKER_LEG_TIMEOUT_MS = 8_000;
+    const MAX_LEG_ATTEMPTS = 3;
+    interface AggFill { volExec: number; cost: number; fee: number; txid: string }
+    const isFinal = (s: string) => s === "closed" || s === "canceled" || s === "expired";
+
+    /**
+     * Place a post-only leg and drive it to completion under the fill timer.
+     * `beforeRetry` re-prices the leg from a FRESH order book (and, for leg 1,
+     * re-runs the full pre-flight gate); returning null stops retries and the
+     * caller's tolerance check + unwind takes over. Aggregates partial fills
+     * across attempts. Throws only when NOTHING was placed/filled at all.
+     */
+    const fillLeg = async (
+      legIndex: number, label: string,
+      spec: { pair: string; side: "buy" | "sell"; volume: number; limitPrice: number },
+      beforeRetry: () => Promise<number | null>,
+    ): Promise<AggFill> => {
+      let remaining = spec.volume;
+      let limit = spec.limitPrice;
+      const agg: AggFill = { volExec: 0, cost: 0, fee: 0, txid: "" };
+      const pctOf = (v: number) => Math.min(100, (v / spec.volume) * 100);
+      for (let attempt = 1; attempt <= MAX_LEG_ATTEMPTS; attempt++) {
+        setExecStatus({
+          active: true, route, leg: legIndex, legLabel: `${label}: ${spec.side} ${spec.pair}`,
+          pair: spec.pair, orderId: null, attempt, maxAttempts: MAX_LEG_ATTEMPTS,
+          startedAtMs: Date.now(), timeoutMs: MAKER_LEG_TIMEOUT_MS,
+          filledPct: pctOf(agg.volExec), phase: "placing order",
+        });
+        let txid = "";
+        try {
+          const r = await krakenRawLimitOrder(creds, spec.side, remaining, limit, spec.pair);
+          txid = r.txid[0] ?? "";
+        } catch (e) {
+          // Post-only rejection (price moved through our limit) is routine —
+          // re-price from a fresh book and retry instead of giving up.
+          if (attempt < MAX_LEG_ATTEMPTS) {
+            setExecStatus({ phase: "order rejected — refreshing book" });
+            const freshPx = await beforeRetry();
+            if (freshPx != null) { limit = freshPx; continue; }
+          }
+          if (agg.volExec > 0) return agg; // caller's tolerance check unwinds
+          throw new Error(`${label} failed (no order placed): ${(e as Error).message}`);
+        }
+        agg.txid = txid;
+        setExecStatus({ orderId: txid, phase: "waiting for fill" });
+        const deadline = Date.now() + MAKER_LEG_TIMEOUT_MS;
+        let info = await safeInfo(txid);
+        while (!isFinal(info.status) && Date.now() < deadline) {
+          await new Promise(r => setTimeout(r, 1_000));
+          info = await safeInfo(txid);
+          setExecStatus({ filledPct: pctOf(agg.volExec + info.volExec) });
+        }
+        if (!isFinal(info.status)) {
+          setExecStatus({ phase: "fill timer expired — cancelling" });
+          await tryCancel(creds, txid, label, log);
+          // A cancel ACK is not terminal — the order can still fill in the
+          // race. Poll until Kraken reports a TERMINAL status; if we can't
+          // confirm, fail closed: no retry, no unwind on assumed volumes.
+          const confirmDeadline = Date.now() + 10_000;
+          info = await safeInfo(txid);
+          while (!isFinal(info.status) && Date.now() < confirmDeadline) {
+            await new Promise(r => setTimeout(r, 1_000));
+            info = await safeInfo(txid);
+          }
+          if (!isFinal(info.status)) throw new IndeterminateOrderError(txid, label);
+        }
+        agg.volExec += info.volExec; agg.cost += info.cost; agg.fee += info.fee;
+        remaining = spec.volume - agg.volExec;
+        setExecStatus({ filledPct: pctOf(agg.volExec) });
+        if (agg.volExec >= spec.volume * FILL_TOLERANCE) return agg; // filled
+        if (attempt >= MAX_LEG_ATTEMPTS) return agg;
+        setExecStatus({ phase: "retrying — fresh book + pre-flight" });
+        const freshPx = await beforeRetry();
+        if (freshPx == null) {
+          log.info(`${label}: retry abandoned (fresh book/pre-flight says no) — ${agg.volExec.toFixed(8)}/${spec.volume.toFixed(8)} filled`);
+          return agg; // caller's tolerance check + unwind takes over
+        }
+        limit = freshPx;
       }
-      await tryCancel(creds, txid, label, log); // timed out — cancel, then read final state
-      return safeInfo(txid);
+      return agg;
     };
 
     let leg1Id = "", leg2Id = "", leg3Id = "";
     let usdSpent = 0, usdReceived = 0, totalFees = 0;
 
     // ── Leg 1: buy A with USD. Post-only limit at best bid → maker fee ────────
+    // Retry gate: nothing is held yet, so a retry must survive a FULL fresh
+    // pre-flight (route still profitable at the new prices), not just re-price.
     let aHeld = 0;
-    try {
-      const r1 = await krakenRawLimitOrder(creds, l1.side, l1.volume, l1.limitPrice, l1.pair);
-      leg1Id = r1.txid[0] ?? "";
-    } catch (e) {
-      throw new Error(`Leg 1 failed (no order placed): ${(e as Error).message}`);
-    }
     {
-      const f1 = await waitFill(leg1Id, "leg1");
+      const f1 = await fillLeg(1, "leg1", l1, async () => {
+        const fresh = await preflightObCycle(assetA as ObAsset, assetB as ObAsset, tradeSizeUsd, effectiveFeesPct, "maker");
+        if (!fresh || fresh.profitUsd <= threshold) return null; // edge gone — stop retrying
+        return fresh.legs[0].limitPrice;
+      });
+      leg1Id = f1.txid;
       aHeld = f1.volExec;
       usdSpent = f1.cost + f1.fee;
       totalFees += f1.fee;
       if (aHeld < l1.volume * FILL_TOLERANCE) {
         if (aHeld > 0) await tryUnwindMarket(creds, "sell", aHeld, pairA, `sell ${assetA} (unwind partial leg1)`, log);
-        throw new Error(`Leg 1 did not fully fill (${aHeld.toFixed(8)}/${l1.volume.toFixed(8)} ${assetA}); partial position unwound.`);
+        throw new Error(`Leg 1 did not fill within ${MAX_LEG_ATTEMPTS}×${MAKER_LEG_TIMEOUT_MS / 1000}s maker windows (${aHeld.toFixed(8)}/${l1.volume.toFixed(8)} ${assetA}); partial position unwound.`);
       }
     }
 
     // ── Leg 2: convert A → B on cross. Post-only limit at best bid/ask ───────
+    // We already hold A, so retries just re-join the fresh top of book —
+    // abandoning here means unwinding at market, which costs the spread anyway.
     const l2Volume = l2.volume * (aHeld / pf.volumeA); // scale to actual leg-1 fill
     let bHeld = 0;
+    let f2: AggFill;
     try {
-      const r2 = await krakenRawLimitOrder(creds, l2.side, l2Volume, l2.limitPrice, l2.pair);
-      leg2Id = r2.txid[0] ?? "";
+      f2 = await fillLeg(2, "leg2", { ...l2, volume: l2Volume }, () => freshJoinPrice(l2.pair, l2.side));
+      leg2Id = f2.txid;
     } catch (e) {
-      // Order never placed — we hold all of A; sell it back.
+      // Indeterminate order state: the order may still be live/filling —
+      // do NOT unwind on assumed volumes; surface for manual review.
+      if (e instanceof IndeterminateOrderError) throw e;
+      // Nothing placed/filled — we hold all of A; sell it back.
       await tryUnwindMarket(creds, "sell", aHeld, pairA, `sell ${assetA} (unwind after leg2 rejection)`, log);
       throw new Error(`Leg 2 failed (${assetA} position sold back): ${(e as Error).message}`);
     }
     {
-      const f2 = await waitFill(leg2Id, "leg2");
       // aIsQuote → bought base B: volExec = B acquired, cost+fee = A consumed.
       // else     → sold base A:   volExec = A consumed, cost−fee = B received.
       const aConsumed = cross.aIsQuote ? f2.cost + f2.fee : f2.volExec;
@@ -493,15 +629,18 @@ async function runKrakenTriangle(input: TriangleExecInput, reqLog: ReqLog): Prom
     }
 
     // ── Leg 3: sell B for USD. Post-only limit at best ask → maker fee ───────
+    let f3: AggFill;
     try {
-      const r3 = await krakenRawLimitOrder(creds, l3.side, bHeld, l3.limitPrice, l3.pair);
-      leg3Id = r3.txid[0] ?? "";
+      f3 = await fillLeg(3, "leg3", { ...l3, volume: bHeld }, () => freshJoinPrice(l3.pair, l3.side));
+      leg3Id = f3.txid;
     } catch (e) {
+      // Indeterminate order state: do NOT unwind on assumed volumes.
+      if (e instanceof IndeterminateOrderError) throw e;
+      // Nothing placed/filled — sell all of B via unwind.
       await tryUnwindMarket(creds, "sell", bHeld, pairB, `sell ${assetB} (unwind after leg3 rejection)`, log);
       throw new Error(`Leg 3 failed (${assetB} position sold via unwind): ${(e as Error).message}`);
     }
     {
-      const f3 = await waitFill(leg3Id, "leg3");
       usdReceived = Math.max(0, f3.cost - f3.fee);
       totalFees += f3.fee;
       const bResidual = Math.max(0, bHeld - f3.volExec);
@@ -533,6 +672,13 @@ async function runKrakenTriangle(input: TriangleExecInput, reqLog: ReqLog): Prom
   } catch (err) {
     reqLog.error({ err, route }, "OB manual execute error");
     return { body: { success: false, isDryRun, executed: false, route, preflightProfitUsd: null, error: (err as Error).message } };
+  } finally {
+    // Only the execution that HOLDS the lock may reset shared state —
+    // otherwise a rejected second request would clobber the live one's status.
+    if (ownsLiveLock) {
+      liveExecLockHeld = false;
+      execStatus = idleExecStatus(); // never leave a stale "executing" status behind
+    }
   }
 }
 
@@ -701,7 +847,7 @@ async function snapshotAccountValue(creds: { krakenKey: string; krakenSecret: st
 // decomposes the equity change into three separately-attributable numbers:
 //   equity change = external cash flows + trading P&L + unrealized drift
 router.post("/arb/account-pnl", async (req, res): Promise<void> => {
-  const parsed = AccountPnlBody.safeParse(req.body ?? {});
+  const parsed = GetAccountPnlBody.safeParse(req.body ?? {});
   if (!parsed.success) { res.status(400).json({ error: "krakenKey and krakenSecret are required." }); return; }
   // Coinbase creds are all-or-nothing — a lone key must not fork the baseline.
   const hasCoinbase = !!(parsed.data.coinbaseKey && parsed.data.coinbaseSecret);
@@ -2007,7 +2153,7 @@ router.post("/balances", async (req, res): Promise<void> => {
 // ── POST /fee-tier ────────────────────────────────────────────────────────────
 // Actual Kraken taker fee tier for the account (max across major pairs).
 router.post("/arb/fee-tier", async (req, res): Promise<void> => {
-  const parsed = FeeTierBody.safeParse(req.body);
+  const parsed = GetFeeTierBody.safeParse(req.body);
   if (!parsed.success) {
     res.status(400).json({ error: parsed.error.message });
     return;

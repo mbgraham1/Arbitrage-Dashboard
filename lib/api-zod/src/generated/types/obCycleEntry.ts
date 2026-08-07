@@ -13,6 +13,10 @@ export interface ObCycleEntry {
   assetA: string;
   assetB: string;
   estimatedProfitUsd: number;
+  /** raw triangle edge ($) before fees, slippage included */
+  grossProfitUsd: number;
+  /** total 3-leg fee drag ($) at the scan's per-leg fee rate */
+  feeUsd: number;
   /** profit as % of tradeSizeUsd */
   profitPct: number;
   /** average USD fill price for leg 1 */

@@ -18,3 +18,9 @@ Rule: every live-order path must (1) validate order ACCEPTANCE (txid/orderId pre
 - "Realized P&L" from account-value deltas includes market moves on holdings and deposits/withdrawals; label honestly or subtract cash flows via the exchange Ledgers API.
 
 **Preflight must price the way orders execute.** Post-only (maker) legs fill at their join limit prices — simulating them with a taker depth-walk understates the edge by the spread, and using the taker fee tier instead of maker overstated fees (~2x). Scanner, ranking, and executor preflight must share one fee + price model per execution style, and fee tiers must come from the route's actual pairs, not a hardcoded sample.
+
+## Cancel is not terminal
+A Kraken CancelOrder ACK is not proof the order stopped — it can still fill in the race. After cancelling, poll QueryOrders until a TERMINAL status (closed/canceled/expired); if unconfirmable, fail closed (no retry, no unwind on assumed volumes — surface for manual review).
+
+## Single-flight live execution
+Only one live multi-leg execution per process: a module-level lock prevents AUTO + manual (or two tabs) from interleaving orders or double-spending the same balance. Any shared execution-status snapshot must be reset only by the lock owner.

@@ -9,7 +9,7 @@ import {
 } from "lucide-react";
 import { format } from "date-fns";
 import { cn } from "@/lib/utils";
-import { useGetTradeSummary, useListTrades, useScanAllPairs, useGetObScan, getGetObScanQueryKey, useObExecute, useGetAllPairSnapshots, getGetAllPairSnapshotsQueryKey, useGetGraphScan, getGetGraphScanQueryKey, useGraphExecute, useGetFeeTier, useGetExecutionQuality, useGetAccountPnl, getGetAccountPnlQueryKey, TradeRecord, PairScanEntry, ObCycleEntry, AllPairSnapshot, GraphRoute, GraphRouteHop } from "@workspace/api-client-react";
+import { useGetTradeSummary, useListTrades, useScanAllPairs, useGetObScan, getGetObScanQueryKey, useObExecute, useGetAllPairSnapshots, getGetAllPairSnapshotsQueryKey, useGetGraphScan, getGetGraphScanQueryKey, useGraphExecute, useGetFeeTier, getGetFeeTierQueryKey, useGetExecutionQuality, getGetExecutionQualityQueryKey, useGetExecutionStatus, getGetExecutionStatusQueryKey, useGetAccountPnl, getGetAccountPnlQueryKey, TradeRecord, PairScanEntry, ObCycleEntry, AllPairSnapshot, GraphRoute, GraphRouteHop } from "@workspace/api-client-react";
 
 // ── Small helpers ──────────────────────────────────────────────────────────────
 
@@ -773,7 +773,7 @@ function useActualKrakenFees(): { taker: number | null; maker: number | null } {
   const hasCreds = !!credentials.krakenKey && !!credentials.krakenSecret;
   const { data } = useGetFeeTier(
     { krakenKey: credentials.krakenKey, krakenSecret: credentials.krakenSecret },
-    { query: { enabled: hasCreds, staleTime: 10 * 60_000, refetchInterval: 10 * 60_000 } },
+    { query: { queryKey: getGetFeeTierQueryKey({ krakenKey: credentials.krakenKey, krakenSecret: credentials.krakenSecret }), enabled: hasCreds, staleTime: 10 * 60_000, refetchInterval: 10 * 60_000 } },
   );
   return { taker: data?.takerFeePct ?? null, maker: data?.makerFeePct ?? null };
 }
@@ -1239,6 +1239,12 @@ function HopBadge({ hop }: { hop: GraphRouteHop }) {
 function GraphEngineCard() {
   const { settings, credentials, liveMode, addLog } = useBotContext();
   const executeMutation = useGraphExecute();
+  // Live per-leg fill status — polled at 1s only while an execution is in
+  // flight (or the server still reports an active leg), idle otherwise.
+  const { data: execStatus } = useGetExecutionStatus({
+    query: { queryKey: getGetExecutionStatusQueryKey(), refetchInterval: q => (executeMutation.isPending || q.state.data?.active ? 1_000 : false) },
+  });
+  const legStatus = execStatus?.active ? execStatus : null;
   const [execResult, setExecResult] = useState<string | null>(null);
   const [thinEdgePending, setThinEdgePending] = useState(false);
   const [minProfitInput, setMinProfitInput] = useState("0.10");
@@ -1484,6 +1490,26 @@ function GraphEngineCard() {
           </Button>
         </div>
       </CardHeader>
+
+      {legStatus && (
+        <div className="px-3 py-2 border-b border-primary/50 bg-primary/5 text-[10px] font-mono flex flex-wrap items-center gap-x-4 gap-y-1">
+          <span className="font-bold text-primary animate-pulse">⚡ LIVE EXECUTION</span>
+          <span>{legStatus.route}</span>
+          <span className="font-bold">Leg {legStatus.leg}/3</span>
+          <span>{legStatus.legLabel}</span>
+          <span className="text-muted-foreground">order {legStatus.orderId ?? "—"}</span>
+          <span>
+            {legStatus.elapsedMs != null && legStatus.timeoutMs != null
+              ? `${(legStatus.elapsedMs / 1000).toFixed(1)}s / ${(legStatus.timeoutMs / 1000).toFixed(0)}s fill timer`
+              : "—"}
+          </span>
+          <span className={cn("font-bold", (legStatus.filledPct ?? 0) >= 99.9 ? "text-success" : "text-amber-500")}>
+            filled {(legStatus.filledPct ?? 0).toFixed(1)}%
+          </span>
+          <span className="text-muted-foreground">attempt {legStatus.attempt}/{legStatus.maxAttempts}</span>
+          <span className="text-muted-foreground italic">{legStatus.phase}</span>
+        </div>
+      )}
 
       {thinEdgePending && topRoute && (
         <div className="px-3 py-3 border-b-2 border-amber-500 bg-amber-500/10 flex flex-col gap-2">
@@ -1754,7 +1780,7 @@ function RealizedPnlCard() {
 // recorded execution attempt. This is what separates routes that LOOK
 // profitable from routes that actually PAY.
 function ExecutionQualityCard() {
-  const { data } = useGetExecutionQuality({ query: { refetchInterval: 30_000, staleTime: 25_000 } });
+  const { data } = useGetExecutionQuality({ query: { queryKey: getGetExecutionQualityQueryKey(), refetchInterval: 30_000, staleTime: 25_000 } });
   const rows = data?.routes ?? [];
   if (rows.length === 0) return null;
   return (

@@ -30,7 +30,7 @@ export interface ObScanResult {
   scalingRoute: string | null;
   /** v18 — top route re-simulated at $10/$50/$100/$500/$1,000; unabsorbable sizes omitted */
   scaling: ObScalingRow[];
-  /** v19 — crypto cross pairs discovered via Kraken AssetPairs (0 = hardcoded fallback) */
-  crossPairsDiscovered: number;
   scannedAt: string;
+  /** v19 — cross pairs discovered dynamically via Kraken AssetPairs (0 when using the hardcoded fallback) */
+  crossPairsDiscovered: number;
 }
