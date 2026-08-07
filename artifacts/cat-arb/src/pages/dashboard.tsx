@@ -68,8 +68,6 @@ function PriceTile({
   );
 }
 
-// ── Main Dashboard ─────────────────────────────────────────────────────────────
-
 export default function Dashboard() {
   const {
     isRunning, setIsRunning, liveMode,
@@ -80,7 +78,7 @@ export default function Dashboard() {
     isExecutingTriangular,
     emergencyStop, setEmergencyStop,
     startTime, failedTrades, sessionTradeCount, apiLatencyMs,
-    triOpportunities,
+    triOpportunities, triPriceSource,
   } = useBotContext();
   const [uptimeStr, setUptimeStr] = useState("0h 0m");
   useEffect(() => {
@@ -476,7 +474,7 @@ export default function Dashboard() {
       <MultiCoinRankerCard settings={settings} />
 
       {/* Triangular Arb Opportunities */}
-      <TriangularCard opportunities={triOpportunities} isRunning={isRunning} isExecutingTri={isExecutingTriangular} />
+      <TriangularCard opportunities={triOpportunities} isRunning={isRunning} isExecutingTri={isExecutingTriangular} priceSource={triPriceSource} />
       <OrderBookHunterCard />
 
       {/* Trade History Table */}
@@ -683,19 +681,53 @@ function TriangularCard({
   opportunities,
   isRunning,
   isExecutingTri,
+  priceSource,
 }: {
   opportunities: Array<{ exchange: string; loop: string; profitPct: number; solUsd: number; ethUsd: number; ethSol: number; variant?: string; timestamp: string }>;
   isRunning: boolean;
   isExecutingTri?: boolean;
+  priceSource?: Record<string, "direct" | "synthetic">;
 }) {
+  const krakenSynth = priceSource?.kraken === "synthetic";
+  const coinbaseSynth = priceSource?.coinbase === "synthetic";
+
   return (
     <Card>
       <CardHeader className="py-3 flex flex-row items-center justify-between space-y-0">
-        <CardTitle className="text-sm flex items-center gap-2">
+        <CardTitle className="text-sm flex items-center gap-2 flex-wrap">
           <RefreshCw className={cn("h-4 w-4", isExecutingTri && "animate-spin text-yellow-500")} />
           Triangular Arbitrage
           <span className="text-[9px] font-mono font-bold px-1 border border-primary text-primary">TRI</span>
           <span className="text-[10px] font-mono text-muted-foreground">Same-exchange loops</span>
+          {/* Price source indicators — shown once data arrives */}
+          {priceSource && Object.keys(priceSource).length > 0 && (
+            <span className="flex items-center gap-1">
+              {krakenSynth && (
+                <span
+                  className="text-[9px] font-mono font-bold px-1 border border-yellow-500 text-yellow-500"
+                  title="Kraken ETH/SOL WS market unavailable — triangular scanner is using a synthetic cross rate (ETH/USD ÷ SOL/USD). Real deviation signals cannot be detected."
+                >
+                  K:SYNTH
+                </span>
+              )}
+              {!krakenSynth && priceSource.kraken === "direct" && (
+                <span
+                  className="text-[9px] font-mono font-bold px-1 border border-success text-success"
+                  title="Kraken ETH/SOL direct market — live real-time prices"
+                >
+                  K:DIRECT
+                </span>
+              )}
+              {coinbaseSynth && (
+                <span
+                  className="text-[9px] font-mono font-bold px-1 border border-muted-foreground text-muted-foreground"
+                  title="Coinbase has no direct ETH/SOL market — synthetic cross rate used"
+                >
+                  CB:SYNTH
+                </span>
+              )}
+            </span>
+          )}
           {isExecutingTri && (
             <span className="text-[9px] font-mono font-bold px-1.5 py-0.5 rounded bg-yellow-500/20 text-yellow-500 border border-yellow-500/50 animate-pulse">
               EXECUTING

@@ -255,6 +255,12 @@ export interface TriangularScanResult {
   opportunities: TriangularOpportunity[];
   /** Raw prices used in this scan */
   prices: TriangularScanResultPrices;
+  /**
+   * Per-exchange ETH/SOL price source.
+   * "direct" = live Kraken ETHSOL WS market; "synthetic" = computed from ETH/USD ÷ SOL/USD.
+   * Absent keys mean no price data for that exchange.
+   */
+  priceSource?: Record<string, "direct" | "synthetic">;
   scannedAt: string;
 }
 

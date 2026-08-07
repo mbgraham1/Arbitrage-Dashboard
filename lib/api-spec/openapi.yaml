@@ -764,6 +764,12 @@ components:
           description: "Raw prices used in this scan"
           required: []
           additionalProperties: true
+        priceSource:
+          type: object
+          description: "Price source per exchange: 'direct' if live ETH/SOL market data is available, 'synthetic' if cross-rate is used"
+          additionalProperties:
+            type: string
+            enum: [direct, synthetic]
         scannedAt:
           type: string
 

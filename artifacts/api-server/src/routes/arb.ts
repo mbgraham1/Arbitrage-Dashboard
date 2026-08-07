@@ -201,16 +201,19 @@ router.get("/arb/triangular", async (_req, res): Promise<void> => {
     const tri = getTriPrices();
     const opportunities: TriOpp[] = [];
     const prices: Record<string, unknown> = {};
+    const priceSource: Record<string, "direct" | "synthetic"> = {};
 
     if (tri.kraken) {
-      const { solBid, solAsk, ethBid, ethAsk, ethSolBid, ethSolAsk } = tri.kraken;
+      const { solBid, solAsk, ethBid, ethAsk, ethSolBid, ethSolAsk, ethSolSource } = tri.kraken;
       prices.kraken = { solBid, solAsk, ethBid, ethAsk, ethSolBid, ethSolAsk };
+      priceSource.kraken = ethSolSource;
       opportunities.push(...computeTriLoops("Kraken", solBid, solAsk, ethBid, ethAsk, ethSolBid, ethSolAsk));
     }
 
     if (tri.coinbase) {
-      const { solBid, solAsk, ethBid, ethAsk, ethSolBid, ethSolAsk } = tri.coinbase;
+      const { solBid, solAsk, ethBid, ethAsk, ethSolBid, ethSolAsk, ethSolSource } = tri.coinbase;
       prices.coinbase = { solBid, solAsk, ethBid, ethAsk, ethSolBid, ethSolAsk };
+      priceSource.coinbase = ethSolSource;
       opportunities.push(...computeTriLoops("Coinbase", solBid, solAsk, ethBid, ethAsk, ethSolBid, ethSolAsk));
     }
 
@@ -243,7 +246,7 @@ router.get("/arb/triangular", async (_req, res): Promise<void> => {
         .catch(() => {});
     }
 
-    res.json({ opportunities, prices, scannedAt: new Date().toISOString() });
+    res.json({ opportunities, prices, priceSource, scannedAt: new Date().toISOString() });
   } catch (err) {
     res.status(500).json({ error: (err as Error).message });
   }

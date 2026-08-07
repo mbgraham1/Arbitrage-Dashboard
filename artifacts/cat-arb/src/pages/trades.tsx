@@ -201,7 +201,7 @@ export default function Trades() {
                   </tr>
                 </thead>
                 <tbody className="divide-y-2 divide-border">
-                  {triItems.map((row) => (
+                  {triItems.map((row: import("@workspace/api-client-react").TriScanRecord) => (
                     <tr key={row.id} className="hover:bg-muted/30 transition-colors">
                       <td className="px-4 py-3 text-muted-foreground">
                         {format(new Date(row.createdAt), "MM/dd HH:mm:ss")}

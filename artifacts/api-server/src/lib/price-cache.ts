@@ -274,7 +274,34 @@ export function initPriceFeeds(): void {
   startCoinbasePoll();
   startRestPollers();
   console.log("[price-cache] Price feeds initialised for 10 pairs (BTC, ETH, SOL, AVAX, DOT, POL, LINK, UNI, ATOM, ADA)");
+  void checkKrakenEthSolAvailability();
   void verifyPairAvailability();
+}
+
+/**
+ * REST poll at startup to confirm Kraken has a live ETH/SOL direct market.
+ * Logs the result so operators know whether triangular scans will use direct
+ * prices or fall back to synthetic cross rates.
+ */
+async function checkKrakenEthSolAvailability(): Promise<void> {
+  try {
+    const r = await fetch("https://api.kraken.com/0/public/Ticker?pair=ETHSOL", {
+      signal: AbortSignal.timeout(8_000),
+    });
+    const data = await r.json() as { error?: string[]; result?: Record<string, unknown> };
+    if (data.error?.length) {
+      console.warn(`[price-cache] Kraken ETH/SOL REST check: pair not available (${data.error.join(", ")}) — triangular scans will use synthetic cross rates`);
+      return;
+    }
+    const keys = Object.keys(data.result ?? {});
+    if (keys.length > 0) {
+      console.log(`[price-cache] Kraken ETH/SOL REST check ✓ — direct market confirmed (${keys[0]}); WS subscription active`);
+    } else {
+      console.warn("[price-cache] Kraken ETH/SOL REST check: empty result — pair may not be active; triangular scans may fall back to synthetic rates");
+    }
+  } catch (e) {
+    console.warn(`[price-cache] Kraken ETH/SOL REST check failed (${(e as Error).message}) — connectivity issue; WS subscription still attempted`);
+  }
 }
 
 /**
@@ -311,8 +338,8 @@ async function verifyPairAvailability(): Promise<void> {
 // ── Triangular arb interface ───────────────────────────────────────────────────
 
 export interface TriPrices {
-  kraken:   { solBid: number; solAsk: number; ethBid: number; ethAsk: number; ethSolBid: number; ethSolAsk: number } | null;
-  coinbase: { solBid: number; solAsk: number; ethBid: number; ethAsk: number; ethSolBid: number; ethSolAsk: number } | null;
+  kraken:   { solBid: number; solAsk: number; ethBid: number; ethAsk: number; ethSolBid: number; ethSolAsk: number; ethSolSource: "direct" | "synthetic" } | null;
+  coinbase: { solBid: number; solAsk: number; ethBid: number; ethAsk: number; ethSolBid: number; ethSolAsk: number; ethSolSource: "direct" | "synthetic" } | null;
 }
 
 /**
@@ -347,8 +374,9 @@ export function getTriPrices(): TriPrices {
     const ethSol = freshEthSol
       ? { bid: triEthSol.kraken!.bid, ask: triEthSol.kraken!.ask }
       : syntheticEthSol(ethBid, ethAsk, solBid, solAsk);
+    const ethSolSource: "direct" | "synthetic" = freshEthSol ? "direct" : "synthetic";
     if (ethSol.bid > 0 && ethSol.ask > 0) {
-      krakenResult = { solBid, solAsk, ethBid, ethAsk, ethSolBid: ethSol.bid, ethSolAsk: ethSol.ask };
+      krakenResult = { solBid, solAsk, ethBid, ethAsk, ethSolBid: ethSol.bid, ethSolAsk: ethSol.ask, ethSolSource };
     }
   }
 
@@ -367,7 +395,7 @@ export function getTriPrices(): TriPrices {
     // Coinbase has no direct ETH/SOL market; always synthetic
     const ethSol = syntheticEthSol(ethBid, ethAsk, solBid, solAsk);
     if (ethSol.bid > 0 && ethSol.ask > 0) {
-      coinbaseResult = { solBid, solAsk, ethBid, ethAsk, ethSolBid: ethSol.bid, ethSolAsk: ethSol.ask };
+      coinbaseResult = { solBid, solAsk, ethBid, ethAsk, ethSolBid: ethSol.bid, ethSolAsk: ethSol.ask, ethSolSource: "synthetic" };
     }
   }
 

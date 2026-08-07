@@ -74,6 +74,11 @@ export interface BotContextType {
   isExecutingTriangular: boolean;
   /** Latest triangular arb opportunities from the server-side scan */
   triOpportunities: TriangularOpportunity[];
+  /**
+   * Per-exchange ETH/SOL price source from the latest triangular scan.
+   * "direct" = live Kraken ETHSOL WS market; "synthetic" = computed cross rate.
+   */
+  triPriceSource: Record<string, "direct" | "synthetic">;
   /** Latest cointegration mean-reversion signals from the Kalman filter scan */
   cointSignals: CointegrationSignal[];
 }
@@ -171,6 +176,7 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
   const [isForcingTriangular, setIsForcingTriangular] = useState(false);
   const [isAutoExecutingTri, setIsAutoExecutingTri] = useState(false);
   const [triOpportunities, setTriOpportunities] = useState<TriangularOpportunity[]>([]);
+  const [triPriceSource, setTriPriceSource] = useState<Record<string, "direct" | "synthetic">>({});
   const [cointSignals, setCointSignals] = useState<CointegrationSignal[]>([]);
 
   // ── Refs that give poll() always-current values without re-triggering effects ──
@@ -220,6 +226,7 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
     if (!triScan.data) return;
     const opps = triScan.data.opportunities;
     setTriOpportunities(opps);
+    if (triScan.data.priceSource) setTriPriceSource(triScan.data.priceSource);
     if (opps.length > 0) {
       for (const opp of opps) {
         const variant = opp.variant === "btc" ? "BTC" : "ETH";
@@ -653,6 +660,7 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
     isForcingTriangular,
     isExecutingTriangular,
     triOpportunities,
+    triPriceSource,
     cointSignals,
   };
 
