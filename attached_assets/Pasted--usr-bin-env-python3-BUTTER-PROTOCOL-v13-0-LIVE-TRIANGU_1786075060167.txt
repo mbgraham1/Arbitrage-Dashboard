@@ -1,0 +1,432 @@
+#!/usr/bin/env python3
+"""
+BUTTER PROTOCOL v13.0 – LIVE TRIANGULAR ARBITRAGE (Kraken only)
+- Scans BTC → USD → SOL → BTC loops.
+- Executes with limit orders on Kraken.
+- No new exchange accounts needed.
+- Persistent ledger + nuclear keep‑alive.
+"""
+
+import base64
+import hashlib
+import hmac
+import json
+import os
+import threading
+import time
+import uuid
+from decimal import Decimal, ROUND_DOWN
+from urllib.parse import urlencode
+
+import requests
+import streamlit as st
+from coinbase.rest import RESTClient
+import websocket
+
+# ---------- PERSISTENT LEDGER ----------
+LEDGER_FILE = "ledger.json"
+
+def load_ledger():
+    try:
+        with open(LEDGER_FILE, "r") as f:
+            data = json.load(f)
+            return Decimal(data.get("profit", "0.00")), int(data.get("trades", 0))
+    except:
+        return Decimal("0.00"), 0
+
+def save_ledger(profit, trades):
+    with open(LEDGER_FILE, "w") as f:
+        json.dump({"profit": str(profit), "trades": trades}, f)
+
+# ---------- WebSocket price store ----------
+latest_prices = {"kraken": None, "coinbase": None}
+price_lock = threading.Lock()
+
+def on_kraken_message(ws, message):
+    global latest_prices
+    try:
+        data = json.loads(message)
+        if isinstance(data, list) and len(data) > 1 and data[2] == "ticker":
+            tick = data[1]
+            if "c" in tick:
+                with price_lock:
+                    latest_prices["kraken"] = Decimal(tick["c"][0])
+    except:
+        pass
+
+def start_kraken_ws():
+    ws = websocket.WebSocketApp("wss://ws.kraken.com/v2", on_message=on_kraken_message)
+    def on_open(ws):
+        ws.send(json.dumps({"method": "subscribe", "params": {"channel": "ticker", "symbol": ["SOL/USD"]}}))
+    ws.on_open = on_open
+    ws.run_forever()
+
+def on_coinbase_message(ws, message):
+    global latest_prices
+    try:
+        data = json.loads(message)
+        if data.get("type") == "ticker" and data.get("product_id") == "SOL-USD":
+            with price_lock:
+                latest_prices["coinbase"] = Decimal(data["price"])
+    except:
+        pass
+
+def start_coinbase_ws():
+    ws = websocket.WebSocketApp("wss://ws-feed.exchange.coinbase.com", on_message=on_coinbase_message)
+    def on_open(ws):
+        ws.send(json.dumps({"type": "subscribe", "product_ids": ["SOL-USD"], "channels": ["ticker"]}))
+    ws.on_open = on_open
+    ws.run_forever()
+
+# ---------- REST helpers ----------
+def D(v): return Decimal(str(v))
+
+def kraken_rest():
+    try:
+        r = requests.get("https://api.kraken.com/0/public/Ticker", params={"pair": "SOLUSD"}, timeout=3)
+        return D(list(r.json()["result"].values())[0]["c"][0])
+    except: return None
+
+def coinbase_rest():
+    try:
+        r = requests.get("https://api.coinbase.com/v2/prices/SOL-USD/spot", timeout=3)
+        return D(r.json()["data"]["amount"])
+    except: return None
+
+# ---------- Kraken API (unchanged) ----------
+KRAKEN_BASE_URL = "https://api.kraken.com"
+REQUEST_TIMEOUT = 10
+session = requests.Session()
+
+def kraken_private_request(api_key, api_secret, path, data):
+    nonce = str(time.time_ns())
+    payload = {"nonce": nonce, **data}
+    postdata = urlencode(payload)
+    encoded = (nonce + postdata).encode()
+    message = path.encode() + hashlib.sha256(encoded).digest()
+    decoded_secret = base64.b64decode(api_secret)
+    api_sign = base64.b64encode(hmac.new(decoded_secret, message, hashlib.sha512).digest()).decode()
+    resp = session.post(KRAKEN_BASE_URL + path, data=payload, headers={"API-Key": api_key, "API-Sign": api_sign}, timeout=REQUEST_TIMEOUT)
+    resp.raise_for_status()
+    result = resp.json()
+    if result.get("error"):
+        raise RuntimeError("Kraken: " + "; ".join(result["error"]))
+    return result
+
+def get_kraken_balance(api_key, api_secret):
+    res = kraken_private_request(api_key, api_secret, "/0/private/Balance", {})
+    return {k: D(v) for k, v in res["result"].items() if D(v) > 0}
+
+def kraken_limit_order(api_key, api_secret, pair, side, volume, price):
+    return kraken_private_request(api_key, api_secret, "/0/private/AddOrder", {
+        "pair": pair,
+        "type": side.lower(),
+        "ordertype": "limit",
+        "post_only": "true",
+        "volume": format(volume, "f"),
+        "price": format(price, "f"),
+    })
+
+def kraken_market_order(api_key, api_secret, pair, side, volume):
+    return kraken_private_request(api_key, api_secret, "/0/private/AddOrder", {
+        "pair": pair,
+        "type": side.lower(),
+        "ordertype": "market",
+        "volume": format(volume, "f"),
+    })
+
+# ---------- TRIANGULAR ARBITRAGE SCANNER ----------
+def scan_triangular():
+    """Fetches bid/ask for BTC/USD, SOL/USD, SOL/BTC and calculates two routes."""
+    try:
+        # Fetch tickers
+        r = requests.get("https://api.kraken.com/0/public/Ticker?pair=XXBTZUSD,SOLUSD,SOLXBT", timeout=5)
+        data = r.json()
+        if data.get("error"):
+            return None, None, None
+        res = data["result"]
+
+        # BTC/USD
+        btc_usd = res["XXBTZUSD"]
+        btc_bid = D(btc_usd["b"][0])
+        btc_ask = D(btc_usd["a"][0])
+
+        # SOL/USD
+        sol_usd = res["SOLUSD"]
+        sol_bid = D(sol_usd["b"][0])
+        sol_ask = D(sol_usd["a"][0])
+
+        # SOL/BTC (how much BTC for 1 SOL)
+        sol_btc = res["SOLXBT"]
+        sol_btc_bid = D(sol_btc["b"][0])  # bid: buy SOL for BTC
+        sol_btc_ask = D(sol_btc["a"][0])  # ask: sell SOL for BTC
+
+        # ---- ROUTE 1: USD -> BTC -> SOL -> USD ----
+        # Start with 1 USD
+        start = D("1")
+        # Buy BTC with USD
+        btc_amt = start / btc_ask
+        # Buy SOL with BTC (pay in BTC)
+        sol_amt = btc_amt / sol_btc_ask
+        # Sell SOL for USD
+        usd_final = sol_amt * sol_bid
+        profit_1 = (usd_final - start) / start * D("100")
+
+        # ---- ROUTE 2: USD -> SOL -> BTC -> USD ----
+        # Buy SOL with USD
+        sol_amt2 = start / sol_ask
+        # Sell SOL for BTC
+        btc_amt2 = sol_amt2 * sol_btc_bid
+        # Sell BTC for USD
+        usd_final2 = btc_amt2 * btc_bid
+        profit_2 = (usd_final2 - start) / start * D("100")
+
+        # Build route descriptions
+        route1 = "USD → BTC → SOL → USD"
+        route2 = "USD → SOL → BTC → USD"
+
+        return {
+            "route1": {"name": route1, "profit_pct": profit_1, "detail": f"Buy BTC @ {btc_ask:.2f}, Buy SOL @ {sol_btc_ask:.8f} BTC, Sell SOL @ {sol_bid:.2f}"},
+            "route2": {"name": route2, "profit_pct": profit_2, "detail": f"Buy SOL @ {sol_ask:.2f}, Sell SOL @ {sol_btc_bid:.8f} BTC, Sell BTC @ {btc_bid:.2f}"},
+        }, btc_bid, btc_ask, sol_bid, sol_ask, sol_btc_bid, sol_btc_ask
+    except Exception as e:
+        return None, None, None
+
+# ---------- Streamlit UI ----------
+st.set_page_config(page_title="🐱 TRIANGULAR ENGINE", layout="wide")
+st.title("🐱 KRAKEN TRIANGULAR – v13.0")
+
+loaded_profit, loaded_trades = load_ledger()
+
+if "running" not in st.session_state: st.session_state.running = False
+if "live_mode" not in st.session_state: st.session_state.live_mode = False
+if "logs" not in st.session_state: st.session_state.logs = []
+if "trade_count" not in st.session_state: st.session_state.trade_count = loaded_trades
+if "total_profit_usd" not in st.session_state: st.session_state.total_profit_usd = loaded_profit
+if "last_trade_time" not in st.session_state: st.session_state.last_trade_time = 0.0
+if "ws_started" not in st.session_state: st.session_state.ws_started = False
+
+def add_log(msg):
+    ts = time.strftime("%H:%M:%S")
+    st.session_state.logs.insert(0, f"[{ts}] {msg}")
+    st.session_state.logs = st.session_state.logs[:200]
+
+# Sidebar
+st.sidebar.header("🔐 Kraken API")
+kraken_key = st.sidebar.text_input("API Key", type="password", key="kraken_key")
+kraken_secret = st.sidebar.text_area("Private Key", type="password", key="kraken_secret", height=80)
+
+st.sidebar.divider()
+st.sidebar.header("⚙️ Parameters")
+min_edge = D(st.sidebar.number_input("Min Net Edge (%)", value=0.05, step=0.01, format="%.2f"))
+tri_fees = D(st.sidebar.number_input("Triangular Fees (%)", value=0.50, step=0.01, format="%.2f", help="3 legs × ~0.16% = 0.48%"))
+cooldown = st.sidebar.number_input("Cooldown (sec)", value=30, step=5)
+poll = st.sidebar.slider("Refresh (sec)", 2, 15, 5)
+
+st.sidebar.divider()
+st.sidebar.header("🔴 Live Trading")
+st.session_state.live_mode = st.sidebar.toggle("Enable live orders", value=st.session_state.live_mode)
+if st.session_state.live_mode:
+    st.sidebar.error("⚠️ LIVE ACTIVE")
+else:
+    st.sidebar.info("🧪 DRY RUN")
+
+if st.sidebar.button("⏹ STOP BOT", use_container_width=True):
+    st.session_state.running = False
+    save_ledger(st.session_state.total_profit_usd, st.session_state.trade_count)
+
+creds_ok = all([kraken_key.strip(), kraken_secret.strip()])
+
+# ---------- Keep-Alive ----------
+def self_ping():
+    slug = os.environ.get("REPL_SLUG", "")
+    owner = os.environ.get("REPL_OWNER", "")
+    if slug and owner:
+        url = f"https://{slug}.{owner}.replit.app"
+    else:
+        url = "http://localhost:8080"
+    while True:
+        time.sleep(120)
+        try:
+            requests.get(url, timeout=5)
+        except:
+            pass
+
+if creds_ok and st.session_state.running:
+    threading.Thread(target=self_ping, daemon=True).start()
+
+# Main controls
+col1, col2, col3 = st.columns(3)
+with col1:
+    if st.button("▶ START", use_container_width=True, disabled=not creds_ok or st.session_state.running):
+        st.session_state.running = True
+        st.rerun()
+with col2:
+    if st.button("Test Kraken", use_container_width=True, disabled=not creds_ok):
+        try:
+            bal = get_kraken_balance(kraken_key, kraken_secret)
+            st.success("✅ Connected.")
+            st.json({k: f"{v:.4f}" for k, v in bal.items() if v > 0})
+            add_log("Kraken test passed.")
+        except Exception as e:
+            st.error(f"❌ {e}")
+            add_log(f"Test failed: {e}")
+with col3:
+    if st.button("💣 FORCE TRIANGULAR", use_container_width=True, disabled=not creds_ok):
+        if not st.session_state.live_mode:
+            st.warning("Enable Live Trading first!")
+        else:
+            try:
+                scan, b_bid, b_ask, s_bid, s_ask, sb_bid, sb_ask = scan_triangular()
+                if not scan:
+                    st.error("Could not fetch triangular data.")
+                else:
+                    # Determine best route
+                    r1 = scan["route1"]
+                    r2 = scan["route2"]
+                    net1 = r1["profit_pct"] - tri_fees
+                    net2 = r2["profit_pct"] - tri_fees
+                    if net1 > net2 and net1 > min_edge:
+                        best = r1
+                        net = net1
+                        desc = r1["detail"]
+                    elif net2 > net1 and net2 > min_edge:
+                        best = r2
+                        net = net2
+                        desc = r2["detail"]
+                    else:
+                        st.warning("No positive net edge. Try later.")
+                        desc = "No profitable route."
+                        best = None
+                    if best:
+                        st.info(f"Executing {best['name']} | Net Edge: {net:.3f}%")
+                        # We need to execute 3 orders. For safety, we do a market test.
+                        # Since this is FORCE, we use market orders.
+                        # Check balance has USD, BTC, SOL.
+                        bal = get_kraken_balance(kraken_key, kraken_secret)
+                        usd = bal.get("USD", D("0"))
+                        btc = bal.get("BTC", D("0"))
+                        sol = bal.get("SOL", D("0"))
+                        # Use small test amount
+                        test_usd = min(usd, D("10"))
+                        if test_usd < D("1"):
+                            st.error("Insufficient USD for test trade.")
+                        else:
+                            # Execute route 1: USD -> BTC -> SOL -> USD
+                            if best["name"] == "USD → BTC → SOL → USD":
+                                # 1. Buy BTC with USD
+                                btc_amt = test_usd / b_ask
+                                kraken_market_order(kraken_key, kraken_secret, "XXBTZUSD", "buy", btc_amt)
+                                # 2. Buy SOL with BTC
+                                sol_amt = btc_amt / sb_ask
+                                kraken_market_order(kraken_key, kraken_secret, "SOLXBT", "buy", sol_amt)
+                                # 3. Sell SOL for USD
+                                kraken_market_order(kraken_key, kraken_secret, "SOLUSD", "sell", sol_amt)
+                                profit = (sol_amt * s_bid) - test_usd
+                            else:
+                                # Route 2: USD -> SOL -> BTC -> USD
+                                sol_amt = test_usd / s_ask
+                                kraken_market_order(kraken_key, kraken_secret, "SOLUSD", "buy", sol_amt)
+                                btc_amt = sol_amt * sb_bid
+                                kraken_market_order(kraken_key, kraken_secret, "SOLXBT", "sell", sol_amt) # sell SOL for BTC
+                                kraken_market_order(kraken_key, kraken_secret, "XXBTZUSD", "sell", btc_amt)
+                                profit = (btc_amt * b_bid) - test_usd
+                            st.session_state.total_profit_usd += profit.quantize(D("0.01"))
+                            st.session_state.trade_count += 1
+                            save_ledger(st.session_state.total_profit_usd, st.session_state.trade_count)
+                            add_log(f"💥 FORCE TRI #{st.session_state.trade_count} | profit ~${profit:.2f}")
+                            st.success(f"Triangular loop executed! Est. profit: ${profit:.2f}")
+            except Exception as e:
+                st.error(f"Force error: {e}")
+                add_log(f"Force error: {e}")
+
+# ---------- MAIN AUTO LOOP ----------
+placeholder = st.empty()
+
+if st.session_state.running and creds_ok:
+    try:
+        while st.session_state.running:
+            scan, b_bid, b_ask, s_bid, s_ask, sb_bid, sb_ask = scan_triangular()
+            
+            with placeholder.container():
+                st.subheader("📊 Triangular Scanner (Kraken Only)")
+                if scan:
+                    r1 = scan["route1"]
+                    r2 = scan["route2"]
+                    net1 = r1["profit_pct"] - tri_fees
+                    net2 = r2["profit_pct"] - tri_fees
+                    
+                    col1, col2 = st.columns(2)
+                    col1.metric("Route 1: USD→BTC→SOL→USD", f"{net1:.3f}%", delta=f"Gross: {r1['profit_pct']:.3f}%")
+                    col2.metric("Route 2: USD→SOL→BTC→USD", f"{net2:.3f}%", delta=f"Gross: {r2['profit_pct']:.3f}%")
+                    
+                    # Auto-execution logic
+                    now = time.time()
+                    cooldown_ok = now - st.session_state.last_trade_time >= cooldown
+                    best_net = max(net1, net2)
+                    best_route = r1 if net1 > net2 else r2
+                    
+                    if best_net >= min_edge and cooldown_ok:
+                        if not st.session_state.live_mode:
+                            st.warning(f"🔍 DRY RUN: {best_route['name']} | Net: {best_net:.3f}%")
+                            st.session_state.last_trade_time = now
+                        else:
+                            st.success(f"🔥 LIVE TRIANGULAR FIRING! Route: {best_route['name']}")
+                            # Execute limit orders (post-only) for the best route
+                            try:
+                                bal = get_kraken_balance(kraken_key, kraken_secret)
+                                usd = bal.get("USD", D("0"))
+                                # Use 20% of USD balance, max 50 USD per trade to stay safe
+                                trade_usd = min(usd * D("0.2"), D("50"))
+                                if trade_usd < D("1"):
+                                    st.error("Insufficient USD balance.")
+                                else:
+                                    if best_route["name"] == "USD → BTC → SOL → USD":
+                                        btc_amt = trade_usd / b_ask
+                                        sol_amt = btc_amt / sb_ask
+                                        # Place limit orders (we'll use limit for safety)
+                                        kraken_limit_order(kraken_key, kraken_secret, "XXBTZUSD", "buy", btc_amt, b_ask)
+                                        kraken_limit_order(kraken_key, kraken_secret, "SOLXBT", "buy", sol_amt, sb_ask)
+                                        kraken_limit_order(kraken_key, kraken_secret, "SOLUSD", "sell", sol_amt, s_bid)
+                                    else:
+                                        sol_amt = trade_usd / s_ask
+                                        btc_amt = sol_amt * sb_bid
+                                        kraken_limit_order(kraken_key, kraken_secret, "SOLUSD", "buy", sol_amt, s_ask)
+                                        kraken_limit_order(kraken_key, kraken_secret, "SOLXBT", "sell", sol_amt, sb_bid)
+                                        kraken_limit_order(kraken_key, kraken_secret, "XXBTZUSD", "sell", btc_amt, b_bid)
+                                    profit = (best_net / 100) * trade_usd
+                                    profit = profit.quantize(D("0.01"))
+                                    st.session_state.total_profit_usd += profit
+                                    st.session_state.trade_count += 1
+                                    st.session_state.last_trade_time = now
+                                    save_ledger(st.session_state.total_profit_usd, st.session_state.trade_count)
+                                    add_log(f"✅ TRIANGULAR #{st.session_state.trade_count} | profit ~${profit}")
+                                    st.success(f"Triangular orders placed! Est. profit: ${profit}")
+                            except Exception as e:
+                                st.error(f"Execution error: {e}")
+                                add_log(f"Tri execution error: {e}")
+                    else:
+                        st.info(f"Best net edge: {best_net:.3f}% (need {min_edge:.2f}%)")
+                else:
+                    st.warning("Could not fetch triangular data. Check Kraken API.")
+
+                st.subheader("📋 Activity Log")
+                st.code("\n".join(st.session_state.logs[:50]) or "No activity.")
+
+            time.sleep(poll)
+
+    except Exception as e:
+        with placeholder.container():
+            st.error(f"🚨 Loop crashed: {e}")
+        add_log(f"Loop crash: {e}")
+        st.session_state.running = False
+        save_ledger(st.session_state.total_profit_usd, st.session_state.trade_count)
+
+else:
+    if not creds_ok:
+        placeholder.warning("Paste your Kraken API keys and test connection.")
+    else:
+        placeholder.info("Bot idle. Press START to begin monitoring.")
+
+st.divider()
+st.caption("🐱 v13.0 – Triangular Arbitrage on Kraken. No Binance. No MetaMask. Just pure math.")

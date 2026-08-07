@@ -173,6 +173,11 @@ export interface TriExecuteRequest {
   /** Override trade size in USD. Auto-sized when omitted. */
   tradeUsd?: number;
   isDryRun?: boolean;
+  /**
+   * "market" (default, Force button) or "limit" (auto-loop, post-only maker).
+   * Python v13: FORCE uses market orders; auto-loop uses limit post-only orders.
+   */
+  orderType?: "market" | "limit";
 }
 
 export interface TriExecuteResult {

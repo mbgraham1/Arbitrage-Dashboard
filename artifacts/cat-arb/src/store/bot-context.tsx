@@ -241,7 +241,8 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
           lastTriTradeTimeRef.current = now;
           addLog("trade", `[TRI·BTC·AUTO] ${bestBtc.loop} | +${bestBtc.profitPct.toFixed(3)}% — firing`);
           executeTriangularMutation.mutate(
-            { data: { krakenKey: creds.krakenKey, krakenSecret: creds.krakenSecret, loop: bestBtc.loop, isDryRun: false } },
+            // auto-loop: limit (post-only maker, ~0.16%×3 = 0.48% fees), Python v13 behaviour
+            { data: { krakenKey: creds.krakenKey, krakenSecret: creds.krakenSecret, loop: bestBtc.loop, isDryRun: false, orderType: "limit" } },
             {
               onSuccess: (r) => {
                 if (r.success) addLog("success", `[TRI·BTC·AUTO] Done — est. $${r.estimatedProfitUsd.toFixed(2)}`);

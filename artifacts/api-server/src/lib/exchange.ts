@@ -152,6 +152,28 @@ export async function krakenLimitOrder(
 }
 
 /**
+ * Places a post-only limit order using an arbitrary raw Kraken pair symbol.
+ * Used for auto-loop triangular legs (maker rate = ~0.16% vs 0.26% taker).
+ * Port of Python v13 kraken_limit_order() with post_only=true.
+ */
+export async function krakenRawLimitOrder(
+  creds: KrakenCreds,
+  side: "buy" | "sell",
+  volume: number,
+  price: number,
+  rawPair: string,
+): Promise<{ txid: string[] }> {
+  return krakenPrivateRequest<{ txid: string[] }>("/0/private/AddOrder", {
+    pair: rawPair,
+    type: side,
+    ordertype: "limit",
+    price: price.toFixed(8),
+    volume: volume.toFixed(8),
+    oflags: "post", // post-only: rejected if it would cross spread (maker only)
+  }, creds);
+}
+
+/**
  * Places a market order using an arbitrary raw Kraken pair symbol.
  * Used for triangular arb legs that have no canonical Pair mapping
  * (e.g. "SOLXBT", "XXBTZUSD").

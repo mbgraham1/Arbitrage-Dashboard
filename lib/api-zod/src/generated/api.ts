@@ -173,6 +173,11 @@ export const ExecuteTriangularBody = zod.object({
   /** Override trade size in USD. Auto-sized (20% USD / max $50) when omitted. */
   tradeUsd: zod.number().optional(),
   isDryRun: zod.boolean().optional().default(false),
+  /**
+   * "market" (default, Force button) or "limit" (auto-loop, post-only maker).
+   * Python v13: FORCE uses market orders; auto-loop uses limit orders (post_only).
+   */
+  orderType: zod.enum(["market", "limit"]).optional().default("market"),
 })
 
 export const ExecuteTriangularResponse = zod.object({
