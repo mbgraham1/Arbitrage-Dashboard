@@ -39,6 +39,8 @@ import {
   coinbaseOrderDetails,
   coinbaseFillPrice,
   coinbaseCancelOrder,
+  getKrakenBidAsk,
+  getCoinbaseBidAsk,
   PAIRS,
   type Pair,
 } from "../lib/exchange";
@@ -201,6 +203,54 @@ router.get("/arb/scan", async (req, res): Promise<void> => {
     }
     const entries = await scanAllPairs(enabledPairs);
     res.json(entries);
+  } catch (err) {
+    res.status(500).json({ error: (err as Error).message });
+  }
+});
+
+// ── GET /arb/fresh-quote — cache-bypassing live bid/ask for one pair ──────────
+// Fetches bid/ask directly from Kraken and Coinbase REST APIs, skipping the
+// in-process WS cache entirely. Used by Force Trade for a stale-price preflight
+// check immediately before execution. Returns the best executable route and a
+// quotedAt ISO timestamp so the caller can measure true quote age.
+router.get("/arb/fresh-quote", async (req, res): Promise<void> => {
+  const pair = String(req.query["pair"] ?? "SOL/USD");
+  if (!PAIRS.includes(pair as Pair)) {
+    res.status(400).json({ error: `Unknown pair: ${pair}. Valid pairs: ${PAIRS.join(", ")}` });
+    return;
+  }
+  try {
+    const [krakenQ, coinbaseQ] = await Promise.all([
+      getKrakenBidAsk(pair as Pair),
+      getCoinbaseBidAsk(pair as Pair),
+    ]);
+    const quotedAt = new Date().toISOString();
+
+    // Route 1: buy Kraken ask → sell Coinbase bid
+    const kToC = ((coinbaseQ.bid - krakenQ.ask) / krakenQ.ask) * 100;
+    // Route 2: buy Coinbase ask → sell Kraken bid
+    const cToK = ((krakenQ.bid - coinbaseQ.ask) / coinbaseQ.ask) * 100;
+
+    const useKraken     = kToC >= cToK;
+    const grossSpreadPct = useKraken ? kToC : cToK;
+    const buyExchange   = useKraken ? "Kraken"   : "Coinbase";
+    const sellExchange  = useKraken ? "Coinbase" : "Kraken";
+    const buyPrice      = useKraken ? krakenQ.ask  : coinbaseQ.ask;
+    const sellPrice     = useKraken ? coinbaseQ.bid : krakenQ.bid;
+
+    res.json({
+      pair,
+      krakenBid:    krakenQ.bid,
+      krakenAsk:    krakenQ.ask,
+      coinbaseBid:  coinbaseQ.bid,
+      coinbaseAsk:  coinbaseQ.ask,
+      grossSpreadPct,
+      buyExchange,
+      sellExchange,
+      buyPrice,
+      sellPrice,
+      quotedAt,
+    });
   } catch (err) {
     res.status(500).json({ error: (err as Error).message });
   }

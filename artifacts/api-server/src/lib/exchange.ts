@@ -181,6 +181,24 @@ export async function getKrakenPrice(pair: Pair = "SOL/USD"): Promise<number> {
 }
 
 /**
+ * Fetches live bid AND ask directly from Kraken REST — bypasses the WS cache.
+ * Use for preflight checks where cache freshness cannot be assumed.
+ */
+export async function getKrakenBidAsk(pair: Pair = "SOL/USD"): Promise<{ bid: number; ask: number; mid: number }> {
+  const krakenPair = KRAKEN_REST_PAIRS[pair];
+  const result = await krakenPublicRequest<Record<string, { b: string[]; a: string[]; c: string[] }>>(
+    "/0/public/Ticker", { pair: krakenPair }
+  );
+  const ticker = Object.values(result)[0];
+  if (!ticker) throw new Error(`Kraken: no ticker returned for ${krakenPair}`);
+  const bid = parseFloat(ticker.b[0]);
+  const ask = parseFloat(ticker.a[0]);
+  if (!isFinite(bid) || !isFinite(ask) || bid <= 0 || ask <= 0) {
+    throw new Error(`Kraken: invalid bid/ask for ${krakenPair} (bid=${bid} ask=${ask})`);
+  }
+  return { bid, ask, mid: (bid + ask) / 2 };
+}
+/**
  * Value the ENTIRE Kraken account in USD from actual balances — the ground
  * truth for realized P&L. USD/stables count at par; every other asset is
  * priced at the live Ticker mid. Assets we can't price are reported so the

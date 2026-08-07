@@ -15,6 +15,7 @@ import {
   getListTradesQueryKey,
   getGetTradeSummaryQueryKey,
   scanAllPairs,
+  getFreshQuote,
   useGetObScan,
   useObExecute,
   getGetObScanQueryKey,
@@ -614,41 +615,64 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
         const best = entries && entries.length > 0 ? entries[0] : null;
 
         if (best) {
-          // Use executable ask/bid — the prices a market order actually fills at.
-          // Buy side pays the ask; sell side receives the bid.
-          const buyPrice  = best.buyExchange  === "Kraken" ? best.krakenAsk  : best.coinbaseAsk;
-          const sellPrice = best.sellExchange === "Kraken" ? best.krakenBid  : best.coinbaseBid;
-          // Recompute spread from executable prices (matches how the ranker scored it)
-          const execSpreadPct = buyPrice > 0 ? ((sellPrice - buyPrice) / buyPrice) * 100 : best.grossSpreadPct;
-          addLog("info", `[FORCE] Best pair: ${best.pair} via ${best.buyExchange}→${best.sellExchange} exec-spread ${execSpreadPct.toFixed(3)}%`);
+          // ── Fresh price check — REST bypass, no WS cache ─────────────────
+          // The scan result may be several seconds old (served from the same
+          // 15-second WS cache). Call /arb/fresh-quote which hits Kraken and
+          // Coinbase REST APIs directly, skipping the cache entirely.
+          const scanAgeMs = Date.now() - new Date(best.scannedAt).getTime();
+          addLog("info", `[FORCE] Best pair: ${best.pair} via ${best.buyExchange}→${best.sellExchange} | scan was ${scanAgeMs}ms ago — fetching live quote...`);
 
-          // The server uses krakenPrice for Kraken orders and coinbasePrice for Coinbase orders.
-          // Populate each with the executable side price so order sizing uses ask/bid, not mid.
-          // Kraken is buying  → supply ask; Kraken is selling  → supply bid.
-          // Coinbase is buying → supply ask; Coinbase is selling → supply bid.
-          const execKrakenPrice   = best.buyExchange === "Kraken" ? best.krakenAsk  : best.krakenBid;
-          const execCoinbasePrice = best.buyExchange === "Coinbase" ? best.coinbaseAsk : best.coinbaseBid;
+          let freshQ: Awaited<ReturnType<typeof getFreshQuote>>;
+          try {
+            freshQ = await getFreshQuote(best.pair);
+          } catch (fetchErr) {
+            addLog("warning", `[FORCE] Live quote failed (${fetchErr instanceof Error ? fetchErr.message : "unknown"}) — aborting`);
+            return;
+          }
+
+          const s = settingsRef.current;
+          const quoteAgeMs = Date.now() - new Date(freshQ.quotedAt).getTime();
+          const freshNetEdge = freshQ.grossSpreadPct - s.totalFees - s.slippage;
+
+          if (freshNetEdge < s.minNetEdge) {
+            addLog(
+              "warning",
+              `[FORCE] Spread collapsed — aborting. Live net edge ${freshNetEdge.toFixed(3)}% < min ${s.minNetEdge}% ` +
+              `(prices refreshed ${quoteAgeMs}ms ago)`,
+            );
+            return;
+          }
+
+          addLog(
+            "info",
+            `[FORCE] Live check OK — ${best.pair} net ${freshNetEdge.toFixed(3)}% via ${freshQ.buyExchange}→${freshQ.sellExchange} ` +
+            `(prices refreshed ${quoteAgeMs}ms ago)`,
+          );
+
+          // Build priceData from live REST quotes so execution uses fresh ask/bid
+          const execKrakenPrice   = freshQ.buyExchange === "Kraken" ? freshQ.krakenAsk : freshQ.krakenBid;
+          const execCoinbasePrice = freshQ.buyExchange === "Coinbase" ? freshQ.coinbaseAsk : freshQ.coinbaseBid;
 
           priceData = {
             pair: best.pair,
             krakenPrice: execKrakenPrice,
-            krakenBid: best.krakenBid,
-            krakenAsk: best.krakenAsk,
+            krakenBid: freshQ.krakenBid,
+            krakenAsk: freshQ.krakenAsk,
             coinbasePrice: execCoinbasePrice,
-            coinbaseBid: best.coinbaseBid,
-            coinbaseAsk: best.coinbaseAsk,
-            grossSpreadPct: execSpreadPct,
-            netEdgePct: 0, // computed in runExecuteTrade
-            route: `${best.pair} ${best.buyExchange} → ${best.sellExchange}`,
-            buyExchange: best.buyExchange,
-            sellExchange: best.sellExchange,
-            bestBuyExchange: best.buyExchange,
-            bestSellExchange: best.sellExchange,
-            buyPrice,
-            sellPrice,
+            coinbaseBid: freshQ.coinbaseBid,
+            coinbaseAsk: freshQ.coinbaseAsk,
+            grossSpreadPct: freshQ.grossSpreadPct,
+            netEdgePct: freshNetEdge,
+            route: `${best.pair} ${freshQ.buyExchange} → ${freshQ.sellExchange}`,
+            buyExchange: freshQ.buyExchange,
+            sellExchange: freshQ.sellExchange,
+            bestBuyExchange: freshQ.buyExchange,
+            bestSellExchange: freshQ.sellExchange,
+            buyPrice: freshQ.buyPrice,
+            sellPrice: freshQ.sellPrice,
             executable: true,
             wsStatus: { kraken: true, coinbase: true },
-            timestamp: best.scannedAt,
+            timestamp: freshQ.quotedAt,
           };
         }
       } catch (scanErr) {

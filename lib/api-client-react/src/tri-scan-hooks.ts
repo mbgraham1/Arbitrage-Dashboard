@@ -91,6 +91,28 @@ export const useGetTriangularHistorySummary = (
     ...options,
   });
 
+// ── Fresh-quote — cache-bypassing live bid/ask for a single pair ──────────────
+
+export interface FreshQuoteResult {
+  pair: string;
+  krakenBid: number;
+  krakenAsk: number;
+  coinbaseBid: number;
+  coinbaseAsk: number;
+  grossSpreadPct: number;
+  buyExchange: "Kraken" | "Coinbase";
+  sellExchange: "Kraken" | "Coinbase";
+  buyPrice: number;
+  sellPrice: number;
+  /** ISO timestamp of when the REST quotes were fetched — use to measure true quote age */
+  quotedAt: string;
+}
+
+export const getFreshQuote = (pair: string): Promise<FreshQuoteResult> =>
+  customFetch<FreshQuoteResult>(`/api/arb/fresh-quote?pair=${encodeURIComponent(pair)}`, {
+    method: "GET",
+  });
+
 export const useGetTriangularHistory = (
   params?: { limit?: number; offset?: number },
   options?: Omit<
