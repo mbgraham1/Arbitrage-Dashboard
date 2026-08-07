@@ -211,6 +211,27 @@ paths:
                 items:
                   $ref: "#/components/schemas/TradeRecord"
 
+  /prices/all-pairs:
+    get:
+      operationId: getAllPairSnapshots
+      tags: [exchange]
+      summary: Return cached bid/ask for all 10 pairs without REST fallbacks
+      description: >
+        Reads the in-memory price cache for all 10 configured pairs and returns
+        every pair — including those with stale or missing data. Kraken and
+        Coinbase bid/ask fields are null when no fresh data is available (> 30 s
+        old), allowing the UI to render a "—" placeholder. Sorted by gross spread
+        descending; no-data pairs go last.
+      responses:
+        "200":
+          description: Snapshot for all 10 pairs (some fields may be null when data is stale)
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/AllPairSnapshot"
+
   /arb/scan:
     get:
       operationId: scanAllPairs
@@ -232,6 +253,30 @@ paths:
                   $ref: "#/components/schemas/PairScanEntry"
         "500":
           description: Price fetch error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /arb/cointegration:
+    get:
+      operationId: scanCointegrationArb
+      tags: [exchange]
+      summary: Run Kalman-filter cointegration scan and return mean-reversion signals
+      description: >
+        Fetches mid-prices for SOL, ETH, BTC, AVAX, and DOT from the in-memory
+        cache, updates each pair's Kalman-filter spread history, and returns any
+        pairs whose |z-score| ≥ 2.0. Returns an empty signals array when
+        observations are insufficient or no pair is out-of-range.
+      responses:
+        "200":
+          description: Cointegration scan result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CointegrationScanResult"
+        "500":
+          description: Scan error
           content:
             application/json:
               schema:
@@ -441,6 +486,11 @@ components:
           type: string
         coinbaseSecret:
           type: string
+        enabledPairs:
+          type: array
+          items:
+            type: string
+          description: "Optional allow-list of pair symbols to scan (e.g. ['SOL/USD', 'BTC/USD']). Scans all pairs when omitted."
 
     WsStatus:
       type: object
@@ -647,6 +697,35 @@ components:
         sellOrderId:
           type: ["string", "null"]
 
+    AllPairSnapshot:
+      type: object
+      required: [pair, coin, grossSpreadPct, buyExchange, krakenBid, krakenAsk, coinbaseBid, coinbaseAsk]
+      properties:
+        pair:
+          type: string
+          description: "Canonical pair, e.g. BTC/USD"
+        coin:
+          type: string
+          description: "Short coin symbol, e.g. BTC"
+        krakenBid:
+          type: ["number", "null"]
+          description: "Kraken best bid; null when cache data is stale (> 30 s)"
+        krakenAsk:
+          type: ["number", "null"]
+          description: "Kraken best ask; null when cache data is stale (> 30 s)"
+        coinbaseBid:
+          type: ["number", "null"]
+          description: "Coinbase best bid; null when cache data is stale (> 30 s)"
+        coinbaseAsk:
+          type: ["number", "null"]
+          description: "Coinbase best ask; null when cache data is stale (> 30 s)"
+        grossSpreadPct:
+          type: ["number", "null"]
+          description: "Gross cross-exchange spread % (best direction); null when either side is missing"
+        buyExchange:
+          type: ["string", "null"]
+          description: "Exchange to buy on for best spread; null when spread cannot be computed"
+
     PairScanEntry:
       type: object
       required: [coin, pair, krakenPrice, coinbasePrice, krakenBid, krakenAsk, coinbaseBid, coinbaseAsk, grossSpreadPct, buyExchange, sellExchange, scannedAt]
@@ -743,6 +822,55 @@ components:
           description: "v18 — top route re-simulated at $10/$50/$100/$500/$1,000; unabsorbable sizes omitted"
         scannedAt: {type: string}
 
+    CointegrationSignal:
+      type: object
+      required: [pair, asset1, asset2, price1, price2, hedgeRatio, spread, zScore, direction, edgePct, observations, timestamp]
+      properties:
+        pair:
+          type: string
+          description: "Display label, e.g. SOL/ETH"
+        asset1:
+          type: string
+          description: "Short symbol for asset 1, e.g. SOL"
+        asset2:
+          type: string
+          description: "Short symbol for asset 2, e.g. ETH"
+        price1:
+          type: number
+        price2:
+          type: number
+        hedgeRatio:
+          type: number
+          description: "Kalman-filter beta (hedge ratio)"
+        spread:
+          type: number
+          description: "Latest Kalman spread value"
+        zScore:
+          type: number
+          description: "Normalised z-score of the current spread"
+        direction:
+          type: string
+          enum: [long_asset1, short_asset1]
+        edgePct:
+          type: number
+          description: "Conservative edge estimate as a fraction (not %)"
+        observations:
+          type: integer
+          description: "Number of spread observations in the Kalman history"
+        timestamp:
+          type: string
+
+    CointegrationScanResult:
+      type: object
+      required: [signals, scannedAt]
+      properties:
+        signals:
+          type: array
+          items:
+            $ref: "#/components/schemas/CointegrationSignal"
+        scannedAt:
+          type: string
+
     ObExecuteRequest:
       type: object
       required: [krakenKey, krakenSecret, assetA, assetB]
@@ -812,6 +940,11 @@ components:
         isDryRun:
           type: boolean
           default: false
+        orderType:
+          type: string
+          enum: [market, limit]
+          default: market
+          description: "market = force/dry-run (taker); limit = auto-loop (post-only maker)"
 
     TriExecuteResult:
       type: object

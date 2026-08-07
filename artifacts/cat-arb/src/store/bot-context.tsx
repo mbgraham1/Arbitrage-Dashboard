@@ -295,14 +295,14 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [triScan.data]);
 
-  // ── Cointegration scan — Kalman filter pairs trading signals ─────────────────
-  // Polls /arb/cointegration on the same cadence; logs COINT signals.
+  // ── Cointegration scan — Kalman-filter mean-reversion signals ────────────────
+  // Polls /arb/cointegration every 30 s regardless of bot state (signals are
+  // computed from the in-memory Kalman history and require warm-up time).
   const cointScan = useScanCointegrationArb({
     query: {
       queryKey: getScanCointegrationArbQueryKey(),
-      enabled: isRunning,
-      refetchInterval: Math.max(2, settingsRef.current.pollInterval) * 1000,
-      staleTime: 0,
+      refetchInterval: 30_000,
+      staleTime: 25_000,
     },
   });
 
@@ -311,15 +311,9 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
     const sigs = cointScan.data.signals;
     setCointSignals(sigs);
     for (const sig of sigs) {
-      const dirLabel = sig.direction === "long_asset1"
-        ? `Long ${sig.asset1} / Short ${sig.asset2}`
-        : `Short ${sig.asset1} / Long ${sig.asset2}`;
       addLog(
         "coint",
-        `[COINT] ${sig.pair} | z=${sig.zScore.toFixed(2)} | β=${sig.hedgeRatio.toFixed(4)} | ` +
-        `${dirLabel} | Edge ~${sig.edgePct.toFixed(2)}% | ` +
-        `${sig.asset1}=$${sig.price1.toFixed(4)} ${sig.asset2}=$${sig.price2.toFixed(4)} | ` +
-        `obs=${sig.observations}`
+        `[COINT] ${sig.pair} z=${sig.zScore.toFixed(2)} · ${sig.direction} · edge ${(sig.edgePct * 100).toFixed(2)}%`,
       );
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps

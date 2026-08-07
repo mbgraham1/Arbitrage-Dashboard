@@ -15,9 +15,11 @@ export interface TriangularOpportunity {
   profitPct: number;
   /** SOL/USD mid price used */
   solUsd: number;
-  /** ETH/USD mid price used */
+  /** ETH/USD or BTC/USD mid price used (see variant) */
   ethUsd: number;
-  /** ETH/SOL mid price used */
+  /** ETH/SOL or SOL/BTC mid price used (see variant) */
   ethSol: number;
+  /** 'eth' for ETH/SOL loops, 'btc' for BTC/SOL loops (v13) */
+  variant?: string;
   timestamp: string;
 }

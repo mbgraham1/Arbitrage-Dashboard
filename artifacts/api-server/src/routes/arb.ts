@@ -31,7 +31,7 @@ import {
   PAIRS,
   type Pair,
 } from "../lib/exchange";
-import { getBestPairPrices, getTriPrices, getBtcTriPrices, scanAllPairs, getPairPrices } from "../lib/price-cache";
+import { getBestPairPrices, getTriPrices, getBtcTriPrices, scanAllPairs, getPairPrices, getAllPairSnapshots } from "../lib/price-cache";
 import { scanOrderBookCycles, preflightObCycle, OB_ASSETS, OB_USD_PAIRS, CROSS_LOOKUP, type ObAsset } from "../lib/order-book";
 import { createPairHistory, updatePairHistory, type PairHistory } from "../lib/kalman";
 
@@ -163,6 +163,15 @@ function computeBtcTriLoops(
 }
 
 const router: IRouter = Router();
+
+// ── GET /prices/all-pairs — cache snapshot, no REST fallbacks ─────────────────
+router.get("/prices/all-pairs", (_req, res): void => {
+  try {
+    res.json(getAllPairSnapshots());
+  } catch (err) {
+    res.status(500).json({ error: (err as Error).message });
+  }
+});
 
 // ── GET /arb/scan — all 10 pairs ranked by gross spread ───────────────────────
 router.get("/arb/scan", async (_req, res): Promise<void> => {

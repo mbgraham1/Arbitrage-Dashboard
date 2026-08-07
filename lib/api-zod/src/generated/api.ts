@@ -25,11 +25,11 @@ export const FetchPricesBody = zod.object({
   "krakenSecret": zod.string(),
   "coinbaseKey": zod.string(),
   "coinbaseSecret": zod.string(),
-  "enabledPairs": zod.array(zod.string()).optional()
+  "enabledPairs": zod.array(zod.string()).optional().describe('Optional allow-list of pair symbols to scan (e.g. [\'SOL\/USD\', \'BTC\/USD\']). Scans all pairs when omitted.')
 })
 
 export const FetchPricesResponse = zod.object({
-  "pair": zod.string().optional(),
+  "pair": zod.string().optional().describe('Canonical pair symbol with the best spread (e.g. SOL\/USD, BTC\/USD)'),
   "krakenPrice": zod.number(),
   "krakenBid": zod.number(),
   "krakenAsk": zod.number(),
@@ -63,7 +63,8 @@ export const FetchBalancesBody = zod.object({
   "krakenKey": zod.string(),
   "krakenSecret": zod.string(),
   "coinbaseKey": zod.string(),
-  "coinbaseSecret": zod.string()
+  "coinbaseSecret": zod.string(),
+  "enabledPairs": zod.array(zod.string()).optional().describe('Optional allow-list of pair symbols to scan (e.g. [\'SOL\/USD\', \'BTC\/USD\']). Scans all pairs when omitted.')
 })
 
 export const FetchBalancesResponse = zod.object({
@@ -148,7 +149,7 @@ export const ExecuteTradeBody = zod.object({
   "liveMode": zod.boolean(),
   "netEdgePct": zod.number().optional(),
   "orderType": zod.enum(['market', 'limit']).default(executeTradeBodyOrderTypeDefault),
-  "pair": zod.enum(['BTC/USD','ETH/USD','SOL/USD','AVAX/USD','DOT/USD','POL/USD','LINK/USD','UNI/USD','ATOM/USD','ADA/USD']).optional()
+  "pair": zod.string().optional().describe('Trading pair symbol (e.g. SOL\/USD, BTC\/USD). Defaults to SOL\/USD.')
 })
 
 export const ExecuteTradeResponse = zod.object({
@@ -164,63 +165,6 @@ export const ExecuteTradeResponse = zod.object({
 
 
 /**
- * @summary Execute a BTC/SOL/USD triangular arbitrage loop on Kraken (v13 Python port)
- */
-export const ExecuteTriangularBody = zod.object({
-  krakenKey: zod.string(),
-  krakenSecret: zod.string(),
-  /** "USD→BTC→SOL→USD" or "USD→SOL→BTC→USD" */
-  loop: zod.string(),
-  /** Override trade size in USD. Auto-sized (20% USD / max $50) when omitted. */
-  tradeUsd: zod.number().optional(),
-  isDryRun: zod.boolean().optional().default(false),
-  /**
-   * "market" (default, Force button) or "limit" (auto-loop, post-only maker).
-   * Python v13: FORCE uses market orders; auto-loop uses limit orders (post_only).
-   */
-  orderType: zod.enum(["market", "limit"]).optional().default("market"),
-})
-
-/**
- * @summary Manually execute the top Order Book Hunter route (v18 port)
- */
-export const ObExecuteBody = zod.object({
-  krakenKey: zod.string(),
-  krakenSecret: zod.string(),
-  /** Asset A of the route shown in the dashboard (server re-verifies with a fresh pre-flight) */
-  assetA: zod.string(),
-  assetB: zod.string(),
-  tradeSizeUsd: zod.number().positive().max(10_000).optional().default(10),
-  feesPct: zod.number().min(0).optional().default(0.5),
-  /** Min net profit ($) at $10; scaled by size/10 for the pre-flight gate */
-  minProfitUsd: zod.number().min(0).optional().default(0.02),
-  isDryRun: zod.boolean().optional().default(true),
-})
-
-export const ObExecuteResponse = zod.object({
-  success: zod.boolean(),
-  isDryRun: zod.boolean(),
-  executed: zod.boolean(),
-  route: zod.string(),
-  /** Fresh pre-flight net profit ($); null when pre-flight could not simulate */
-  preflightProfitUsd: zod.number().nullish(),
-  leg1OrderId: zod.string().nullish(),
-  leg2OrderId: zod.string().nullish(),
-  leg3OrderId: zod.string().nullish(),
-  error: zod.string().nullish(),
-})
-
-export const ExecuteTriangularResponse = zod.object({
-  success: zod.boolean(),
-  isDryRun: zod.boolean(),
-  estimatedProfitUsd: zod.number(),
-  leg1OrderId: zod.string().nullish(),
-  leg2OrderId: zod.string().nullish(),
-  leg3OrderId: zod.string().nullish(),
-  error: zod.string().nullish(),
-})
-
-/**
  * @summary Get trade history
  */
 export const listTradesQueryLimitDefault = 50;
@@ -234,7 +178,7 @@ export const ListTradesQueryParams = zod.object({
 export const ListTradesResponseItem = zod.object({
   "id": zod.number(),
   "createdAt": zod.string(),
-  "pair": zod.string().nullish(),
+  "pair": zod.string().nullish().describe('Trading pair symbol (e.g. SOL\/USD, BTC\/USD). Null for records before multi-pair support.'),
   "buyExchange": zod.string(),
   "sellExchange": zod.string(),
   "volumeSol": zod.number(),
@@ -250,6 +194,67 @@ export const ListTradesResponse = zod.array(ListTradesResponseItem)
 
 
 /**
+ * Reads the in-memory price cache for all 10 configured pairs and returns every pair — including those with stale or missing data. Kraken and Coinbase bid/ask fields are null when no fresh data is available (> 30 s old), allowing the UI to render a "—" placeholder. Sorted by gross spread descending; no-data pairs go last.
+ * @summary Return cached bid/ask for all 10 pairs without REST fallbacks
+ */
+export const GetAllPairSnapshotsResponseItem = zod.object({
+  "pair": zod.string().describe('Canonical pair, e.g. BTC\/USD'),
+  "coin": zod.string().describe('Short coin symbol, e.g. BTC'),
+  "krakenBid": zod.number().nullable().describe('Kraken best bid; null when cache data is stale (> 30 s)'),
+  "krakenAsk": zod.number().nullable().describe('Kraken best ask; null when cache data is stale (> 30 s)'),
+  "coinbaseBid": zod.number().nullable().describe('Coinbase best bid; null when cache data is stale (> 30 s)'),
+  "coinbaseAsk": zod.number().nullable().describe('Coinbase best ask; null when cache data is stale (> 30 s)'),
+  "grossSpreadPct": zod.number().nullable().describe('Gross cross-exchange spread % (best direction); null when either side is missing'),
+  "buyExchange": zod.string().nullable().describe('Exchange to buy on for best spread; null when spread cannot be computed')
+})
+export const GetAllPairSnapshotsResponse = zod.array(GetAllPairSnapshotsResponseItem)
+
+
+/**
+ * Port of Python scan_all_coins(). Fetches bid/ask for all 10 configured pairs from Kraken and Coinbase and returns them sorted by gross spread (best direction per pair) descending. Net edge = grossSpreadPct minus the client's fee + slippage settings.
+ * @summary Scan all 10 pairs and rank by cross-exchange gross spread
+ */
+export const ScanAllPairsResponseItem = zod.object({
+  "coin": zod.string().describe('Short coin symbol, e.g. BTC, ETH, SOL'),
+  "pair": zod.string().describe('Canonical pair, e.g. BTC\/USD'),
+  "krakenPrice": zod.number(),
+  "coinbasePrice": zod.number(),
+  "krakenBid": zod.number(),
+  "krakenAsk": zod.number(),
+  "coinbaseBid": zod.number(),
+  "coinbaseAsk": zod.number(),
+  "grossSpreadPct": zod.number().describe('Gross cross-exchange spread % using bid\/ask (best direction)'),
+  "buyExchange": zod.string(),
+  "sellExchange": zod.string(),
+  "scannedAt": zod.string()
+})
+export const ScanAllPairsResponse = zod.array(ScanAllPairsResponseItem)
+
+
+/**
+ * Fetches mid-prices for SOL, ETH, BTC, AVAX, and DOT from the in-memory cache, updates each pair's Kalman-filter spread history, and returns any pairs whose |z-score| ≥ 2.0. Returns an empty signals array when observations are insufficient or no pair is out-of-range.
+ * @summary Run Kalman-filter cointegration scan and return mean-reversion signals
+ */
+export const ScanCointegrationArbResponse = zod.object({
+  "signals": zod.array(zod.object({
+  "pair": zod.string().describe('Display label, e.g. SOL\/ETH'),
+  "asset1": zod.string().describe('Short symbol for asset 1, e.g. SOL'),
+  "asset2": zod.string().describe('Short symbol for asset 2, e.g. ETH'),
+  "price1": zod.number(),
+  "price2": zod.number(),
+  "hedgeRatio": zod.number().describe('Kalman-filter beta (hedge ratio)'),
+  "spread": zod.number().describe('Latest Kalman spread value'),
+  "zScore": zod.number().describe('Normalised z-score of the current spread'),
+  "direction": zod.enum(['long_asset1', 'short_asset1']),
+  "edgePct": zod.number().describe('Conservative edge estimate as a fraction (not %)'),
+  "observations": zod.number().describe('Number of spread observations in the Kalman history'),
+  "timestamp": zod.string()
+})),
+  "scannedAt": zod.string()
+})
+
+
+/**
  * Checks USDT→SOL→ETH→USDT and USDT→ETH→SOL→USDT loops on Kraken and Coinbase using live bid/ask prices. Returns opportunities where the loop product after fees exceeds the 0.1% profit threshold.
  * @summary Scan for triangular arbitrage opportunities within each exchange
  */
@@ -259,35 +264,131 @@ export const ScanTriangularArbResponse = zod.object({
   "loop": zod.string().describe('Loop direction, e.g. USD→SOL→ETH→USD'),
   "profitPct": zod.number().describe('Net profit percentage after fees'),
   "solUsd": zod.number().describe('SOL\/USD mid price used'),
-  "ethUsd": zod.number().describe('ETH\/USD mid price used'),
-  "ethSol": zod.number().describe('ETH\/SOL mid price used'),
+  "ethUsd": zod.number().describe('ETH\/USD or BTC\/USD mid price used (see variant)'),
+  "ethSol": zod.number().describe('ETH\/SOL or SOL\/BTC mid price used (see variant)'),
+  "variant": zod.string().optional().describe('\'eth\' for ETH\/SOL loops, \'btc\' for BTC\/SOL loops (v13)'),
   "timestamp": zod.string()
 })),
   "prices": zod.record(zod.string(), zod.unknown()).describe('Raw prices used in this scan'),
+  "priceSource": zod.record(zod.string(), zod.enum(['direct', 'synthetic'])).optional().describe('Price source per exchange: \'direct\' if live ETH\/SOL market data is available, \'synthetic\' if cross-rate is used'),
   "scannedAt": zod.string()
 })
 
+
 /**
- * Returns cointegration pairs-trading signals via Kalman filter z-score.
- * @summary Scan for cointegration mean-reversion opportunities
+ * Port of Python v18 "Scaling Analyzer" (v17 wide-net scan plus a scaling table — the top-ranked route is re-simulated at $10/$50/$100/$500/$1,000 with VIABLE / HIGH_SLIPPAGE / REJECTED statuses; the min-profit threshold scales with size/10). Fetches Kraken Depth API for all required pairs in parallel, then walks the book for each A→B permutation of 34 assets (only routes with a real Kraken cross pair are simulatable) to compute realistic fill prices at the given trade size. An optional volatility filter restricts the scan to assets that moved more than 1.5% in 24h (falls back to all assets when fewer than 3 qualify). All simulatable cycles (top 15) are returned ranked by estimated net profit, each with total execution slippage, a liquidity confidence score, and a READY / HIGH_SLIPPAGE / LOW_PROFIT status classification.
+ * @summary Scan triangular cycles across 34 assets using L2 order book depth (v18 port)
  */
-export const ScanCointegrationArbResponse = zod.object({
-  "signals": zod.array(zod.object({
-    "pair": zod.string().describe('Cointegrated pair, e.g. SOL/ETH'),
-    "asset1": zod.string().describe('First asset symbol, e.g. SOL'),
-    "asset2": zod.string().describe('Second asset symbol, e.g. ETH'),
-    "price1": zod.number().describe('USD price of asset1'),
-    "price2": zod.number().describe('USD price of asset2'),
-    "hedgeRatio": zod.number().describe('Current Kalman-estimated hedge ratio (β)'),
-    "spread": zod.number().describe('Current spread residual (price1 − β·price2)'),
-    "zScore": zod.number().describe('Z-score of the spread vs recent history'),
-    "direction": zod.enum(['long_asset1', 'short_asset1']).describe('Trade direction: long asset1 / short asset2, or vice versa'),
-    "edgePct": zod.number().describe('Estimated edge in % based on z-score magnitude'),
-    "observations": zod.number().describe('Number of observations in spread history'),
-    "timestamp": zod.string()
-  })),
+export const getObScanQueryTradeSizeUsdDefault = 10;
+export const getObScanQueryFeesPctDefault = 0.5;
+export const getObScanQueryMinProfitUsdDefault = 0.02;
+export const getObScanQueryMaxSlippagePctDefault = 0.5;
+export const getObScanQueryVolatilityFilterDefault = true;
+
+export const GetObScanQueryParams = zod.object({
+  "tradeSizeUsd": zod.coerce.number().default(getObScanQueryTradeSizeUsdDefault).describe('Simulated trade size in USD (default 10)'),
+  "feesPct": zod.coerce.number().default(getObScanQueryFeesPctDefault).describe('Estimated total fees % (default 0.5 — 3 legs × 0.16% maker)'),
+  "minProfitUsd": zod.coerce.number().default(getObScanQueryMinProfitUsdDefault).describe('Minimum net profit ($) required for READY status at $10 (default 0.02 — v18; scaled by size\/10 in the scaling table)'),
+  "maxSlippagePct": zod.coerce.number().default(getObScanQueryMaxSlippagePctDefault).describe('Maximum tolerated total slippage (%) for READY status (default 0.5)'),
+  "volatilityFilter": zod.coerce.boolean().default(getObScanQueryVolatilityFilterDefault).describe('v17 — scan only assets with |24h change| > 1.5% (default true; falls back to all assets when fewer than 3 qualify)')
+})
+
+export const GetObScanResponse = zod.object({
+  "cycles": zod.array(zod.object({
+  "route": zod.string().describe('e.g. USD→SOL→ETH→USD'),
+  "assetA": zod.string(),
+  "assetB": zod.string(),
+  "estimatedProfitUsd": zod.number(),
+  "profitPct": zod.number().describe('profit as % of tradeSizeUsd'),
+  "avgPriceA": zod.number().describe('average USD fill price for leg 1'),
+  "avgCrossRate": zod.number().describe('average B-per-A cross rate'),
+  "avgPriceB": zod.number().describe('average USD fill price for leg 3'),
+  "volumeA": zod.number().describe('amount of A acquired in leg 1'),
+  "slippagePct": zod.number().describe('total execution slippage across 3 legs (%)'),
+  "status": zod.enum(['READY', 'HIGH_SLIPPAGE', 'LOW_PROFIT']).describe('v15 conservative classification'),
+  "confidencePct": zod.number().describe('v17 liquidity confidence 0-100 — avg top-of-book coverage across the 3 legs')
+})),
+  "tradeSizeUsd": zod.number(),
+  "feesPct": zod.number(),
+  "minProfitUsd": zod.number().describe('min net profit ($) for READY status'),
+  "maxSlippagePct": zod.number().describe('max tolerated total slippage (%) for READY status'),
+  "readyCount": zod.number().describe('number of READY cycles'),
+  "pairsScanned": zod.number().describe('pairs whose order book fetch succeeded'),
+  "pairsRequested": zod.number().describe('pairs the scan attempted to fetch'),
+  "volatilityFilter": zod.boolean().describe('v17 — whether the volatility filter was requested'),
+  "activeAssets": zod.array(zod.string()).describe('v17 — assets actually scanned after the volatility filter'),
+  "scalingRoute": zod.string().nullable().describe('v18 — route of the top-ranked cycle the scaling table covers (null when no cycles)'),
+  "scaling": zod.array(zod.object({
+  "sizeUsd": zod.number(),
+  "profitUsd": zod.number(),
+  "slippagePct": zod.number(),
+  "confidencePct": zod.number(),
+  "status": zod.enum(['VIABLE', 'HIGH_SLIPPAGE', 'REJECTED']).describe('v18 — VIABLE when profit > minProfitUsd×(size\/10) and slippage within limit')
+})).describe('v18 — top route re-simulated at $10\/$50\/$100\/$500\/$1,000; unabsorbable sizes omitted'),
   "scannedAt": zod.string()
 })
+
+
+/**
+ * Port of the Python v18 MANUAL EXECUTION BUTTON. Re-fetches fresh order books for the route (cache bypassed), re-simulates the cycle (pre-flight), and only places 3 sequential Kraken market orders when the fresh profit exceeds minProfitUsd × (size/10). Dry-run records a ledger row without placing orders. Legs are sized from the pre-flight simulation with orientation-aware cross-pair sides.
+ * @summary Manually execute the top Order Book Hunter route (v18 port)
+ */
+export const obExecuteBodyTradeSizeUsdDefault = 10;
+export const obExecuteBodyFeesPctDefault = 0.5;
+export const obExecuteBodyMinProfitUsdDefault = 0.02;
+export const obExecuteBodyIsDryRunDefault = true;
+
+export const ObExecuteBody = zod.object({
+  "krakenKey": zod.string(),
+  "krakenSecret": zod.string(),
+  "assetA": zod.string().describe('Asset A of the displayed top route (server re-verifies via fresh pre-flight)'),
+  "assetB": zod.string(),
+  "tradeSizeUsd": zod.number().default(obExecuteBodyTradeSizeUsdDefault),
+  "feesPct": zod.number().default(obExecuteBodyFeesPctDefault),
+  "minProfitUsd": zod.number().default(obExecuteBodyMinProfitUsdDefault).describe('Min net profit ($) at $10; pre-flight gate scales it by size\/10'),
+  "isDryRun": zod.boolean().default(obExecuteBodyIsDryRunDefault)
+})
+
+export const ObExecuteResponse = zod.object({
+  "success": zod.boolean(),
+  "isDryRun": zod.boolean(),
+  "executed": zod.boolean().describe('True when orders were placed (or dry-run recorded); false when pre-flight rejected'),
+  "route": zod.string(),
+  "preflightProfitUsd": zod.number().nullish().describe('Fresh pre-flight net profit ($); null when books couldn\'t be fetched'),
+  "leg1OrderId": zod.string().nullish(),
+  "leg2OrderId": zod.string().nullish(),
+  "leg3OrderId": zod.string().nullish(),
+  "error": zod.string().nullish()
+})
+
+
+/**
+ * Port of Python v13 FORCE TRIANGULAR. Places 3 sequential market orders on Kraken for either the USD→BTC→SOL→USD or USD→SOL→BTC→USD loop. In dry-run mode only computes the estimated profit without placing orders. Trade size defaults to 10 USD (dry/force) or 20% of USD balance capped at $50 (auto-loop).
+ * @summary Execute a BTC/SOL/USD triangular loop on Kraken
+ */
+export const executeTriangularBodyIsDryRunDefault = false;
+export const executeTriangularBodyOrderTypeDefault = `market`;
+
+export const ExecuteTriangularBody = zod.object({
+  "krakenKey": zod.string(),
+  "krakenSecret": zod.string(),
+  "loop": zod.string().describe('USD→BTC→SOL→USD or USD→SOL→BTC→USD'),
+  "tradeUsd": zod.number().optional().describe('Override trade size in USD. Auto-sized when omitted.'),
+  "isDryRun": zod.boolean().default(executeTriangularBodyIsDryRunDefault),
+  "orderType": zod.enum(['market', 'limit']).default(executeTriangularBodyOrderTypeDefault).describe('market = force\/dry-run (taker); limit = auto-loop (post-only maker)')
+})
+
+export const ExecuteTriangularResponse = zod.object({
+  "success": zod.boolean(),
+  "isDryRun": zod.boolean(),
+  "estimatedProfitUsd": zod.number(),
+  "leg1OrderId": zod.string().nullish(),
+  "leg2OrderId": zod.string().nullish(),
+  "leg3OrderId": zod.string().nullish(),
+  "error": zod.string().nullish()
+})
+
+
 /**
  * @summary Get P&L summary and statistics
  */
@@ -301,6 +402,7 @@ export const GetTradeSummaryResponse = zod.object({
   "recentTrades": zod.array(zod.object({
   "id": zod.number(),
   "createdAt": zod.string(),
+  "pair": zod.string().nullish().describe('Trading pair symbol (e.g. SOL\/USD, BTC\/USD). Null for records before multi-pair support.'),
   "buyExchange": zod.string(),
   "sellExchange": zod.string(),
   "volumeSol": zod.number(),
@@ -313,4 +415,5 @@ export const GetTradeSummaryResponse = zod.object({
   "sellOrderId": zod.string().nullish()
 }))
 })
+
 

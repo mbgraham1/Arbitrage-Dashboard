@@ -28,7 +28,7 @@ export interface ExchangeCredentials {
   krakenSecret: string;
   coinbaseKey: string;
   coinbaseSecret: string;
-  /** Optional list of pair symbols to scan (e.g. ["BTC/USD","SOL/USD"]). Omit to scan all pairs. */
+  /** Optional allow-list of pair symbols to scan (e.g. ['SOL/USD', 'BTC/USD']). Scans all pairs when omitted. */
   enabledPairs?: string[];
 }
 
@@ -133,7 +133,10 @@ export interface TradeResult {
 export interface TradeRecord {
   id: number;
   createdAt: string;
-  /** Trading pair symbol. Null for records before multi-pair support. @nullable */
+  /**
+     * Trading pair symbol (e.g. SOL/USD, BTC/USD). Null for records before multi-pair support.
+     * @nullable
+     */
   pair?: string | null;
   buyExchange: string;
   sellExchange: string;
@@ -149,71 +152,90 @@ export interface TradeRecord {
   sellOrderId?: string | null;
 }
 
-export interface TriangularOpportunity {
-  /** Exchange where the loop was detected (e.g. Kraken) */
-  exchange: string;
-  /** Loop direction, e.g. USD→SOL→ETH→USD */
-  loop: string;
-  /** Net profit percentage after fees */
-  profitPct: number;
-  /** SOL/USD mid price used */
-  solUsd: number;
-  /** ETH/USD or BTC/USD mid price used (see variant) */
-  ethUsd: number;
-  /** ETH/SOL or SOL/BTC mid price used (see variant) */
-  ethSol: number;
-  /** 'eth' for ETH/SOL loops, 'btc' for BTC/SOL loops (v13) */
-  variant?: string;
-  timestamp: string;
-}
-
-export interface TriExecuteRequest {
-  krakenKey: string;
-  krakenSecret: string;
-  /** USD→BTC→SOL→USD or USD→SOL→BTC→USD */
-  loop: string;
-  /** Override trade size in USD. Auto-sized when omitted. */
-  tradeUsd?: number;
-  isDryRun?: boolean;
+export interface AllPairSnapshot {
+  /** Canonical pair, e.g. BTC/USD */
+  pair: string;
+  /** Short coin symbol, e.g. BTC */
+  coin: string;
   /**
-   * "market" (default, Force button) or "limit" (auto-loop, post-only maker).
-   * Python v13: FORCE uses market orders; auto-loop uses limit post-only orders.
-   */
-  orderType?: "market" | "limit";
+     * Kraken best bid; null when cache data is stale (> 30 s)
+     * @nullable
+     */
+  krakenBid: number | null;
+  /**
+     * Kraken best ask; null when cache data is stale (> 30 s)
+     * @nullable
+     */
+  krakenAsk: number | null;
+  /**
+     * Coinbase best bid; null when cache data is stale (> 30 s)
+     * @nullable
+     */
+  coinbaseBid: number | null;
+  /**
+     * Coinbase best ask; null when cache data is stale (> 30 s)
+     * @nullable
+     */
+  coinbaseAsk: number | null;
+  /**
+     * Gross cross-exchange spread % (best direction); null when either side is missing
+     * @nullable
+     */
+  grossSpreadPct: number | null;
+  /**
+     * Exchange to buy on for best spread; null when spread cannot be computed
+     * @nullable
+     */
+  buyExchange: string | null;
 }
 
-export interface TriExecuteResult {
-  success: boolean;
-  isDryRun: boolean;
-  estimatedProfitUsd: number;
-  leg1OrderId?: string | null;
-  leg2OrderId?: string | null;
-  leg3OrderId?: string | null;
-  error?: string | null;
+export interface PairScanEntry {
+  /** Short coin symbol, e.g. BTC, ETH, SOL */
+  coin: string;
+  /** Canonical pair, e.g. BTC/USD */
+  pair: string;
+  krakenPrice: number;
+  coinbasePrice: number;
+  krakenBid: number;
+  krakenAsk: number;
+  coinbaseBid: number;
+  coinbaseAsk: number;
+  /** Gross cross-exchange spread % using bid/ask (best direction) */
+  grossSpreadPct: number;
+  buyExchange: string;
+  sellExchange: string;
+  scannedAt: string;
 }
 
 /**
- * Raw prices used in this scan
+ * v15 conservative classification
  */
-// ── v14 Order Book Hunter ─────────────────────────────────────────────────────
+export type ObCycleEntryStatus = typeof ObCycleEntryStatus[keyof typeof ObCycleEntryStatus];
 
-/** Single triangular cycle result from the L2 order book simulation (v14). */
+
+export const ObCycleEntryStatus = {
+  READY: 'READY',
+  HIGH_SLIPPAGE: 'HIGH_SLIPPAGE',
+  LOW_PROFIT: 'LOW_PROFIT',
+} as const;
+
 export interface ObCycleEntry {
+  /** e.g. USD→SOL→ETH→USD */
   route: string;
   assetA: string;
   assetB: string;
   estimatedProfitUsd: number;
-  /** Profit as % of tradeSizeUsd */
+  /** profit as % of tradeSizeUsd */
   profitPct: number;
-  /** Average fill price for leg 1: USD per A */
+  /** average USD fill price for leg 1 */
   avgPriceA: number;
-  /** Average fill rate for leg 2: B per A (cross rate) */
+  /** average B-per-A cross rate */
   avgCrossRate: number;
-  /** Average fill price for leg 3: USD per B */
+  /** average USD fill price for leg 3 */
   avgPriceB: number;
-  /** Amount of A acquired in leg 1 — used for execution sizing */
+  /** amount of A acquired in leg 1 */
   volumeA: number;
-  /** Total execution slippage across 3 legs (%) */
+  /** total execution slippage across 3 legs (%) */
   slippagePct: number;
   /** v15 conservative classification */
   status: ObCycleEntryStatus;
@@ -221,14 +243,87 @@ export interface ObCycleEntry {
   confidencePct: number;
 }
 
-export type ObCycleEntryStatus = (typeof ObCycleEntryStatus)[keyof typeof ObCycleEntryStatus];
+/**
+ * v18 — VIABLE when profit > minProfitUsd×(size/10) and slippage within limit
+ */
+export type ObScalingRowStatus = typeof ObScalingRowStatus[keyof typeof ObScalingRowStatus];
 
-// eslint-disable-next-line @typescript-eslint/no-redeclare
-export const ObCycleEntryStatus = {
-  READY: "READY",
-  HIGH_SLIPPAGE: "HIGH_SLIPPAGE",
-  LOW_PROFIT: "LOW_PROFIT",
+
+export const ObScalingRowStatus = {
+  VIABLE: 'VIABLE',
+  HIGH_SLIPPAGE: 'HIGH_SLIPPAGE',
+  REJECTED: 'REJECTED',
 } as const;
+
+export interface ObScalingRow {
+  sizeUsd: number;
+  profitUsd: number;
+  slippagePct: number;
+  confidencePct: number;
+  /** v18 — VIABLE when profit > minProfitUsd×(size/10) and slippage within limit */
+  status: ObScalingRowStatus;
+}
+
+export interface ObScanResult {
+  cycles: ObCycleEntry[];
+  tradeSizeUsd: number;
+  feesPct: number;
+  /** min net profit ($) for READY status */
+  minProfitUsd: number;
+  /** max tolerated total slippage (%) for READY status */
+  maxSlippagePct: number;
+  /** number of READY cycles */
+  readyCount: number;
+  /** pairs whose order book fetch succeeded */
+  pairsScanned: number;
+  /** pairs the scan attempted to fetch */
+  pairsRequested: number;
+  /** v17 — whether the volatility filter was requested */
+  volatilityFilter: boolean;
+  /** v17 — assets actually scanned after the volatility filter */
+  activeAssets: string[];
+  /** v18 — route of the top-ranked cycle the scaling table covers (null when no cycles) */
+  scalingRoute: string | null;
+  /** v18 — top route re-simulated at $10/$50/$100/$500/$1,000; unabsorbable sizes omitted */
+  scaling: ObScalingRow[];
+  scannedAt: string;
+}
+
+export type CointegrationSignalDirection = typeof CointegrationSignalDirection[keyof typeof CointegrationSignalDirection];
+
+
+export const CointegrationSignalDirection = {
+  long_asset1: 'long_asset1',
+  short_asset1: 'short_asset1',
+} as const;
+
+export interface CointegrationSignal {
+  /** Display label, e.g. SOL/ETH */
+  pair: string;
+  /** Short symbol for asset 1, e.g. SOL */
+  asset1: string;
+  /** Short symbol for asset 2, e.g. ETH */
+  asset2: string;
+  price1: number;
+  price2: number;
+  /** Kalman-filter beta (hedge ratio) */
+  hedgeRatio: number;
+  /** Latest Kalman spread value */
+  spread: number;
+  /** Normalised z-score of the current spread */
+  zScore: number;
+  direction: CointegrationSignalDirection;
+  /** Conservative edge estimate as a fraction (not %) */
+  edgePct: number;
+  /** Number of spread observations in the Kalman history */
+  observations: number;
+  timestamp: string;
+}
+
+export interface CointegrationScanResult {
+  signals: CointegrationSignal[];
+  scannedAt: string;
+}
 
 export interface ObExecuteRequest {
   krakenKey: string;
@@ -249,74 +344,95 @@ export interface ObExecuteResult {
   /** True when orders were placed (or dry-run recorded); false when pre-flight rejected */
   executed: boolean;
   route: string;
-  /** Fresh pre-flight net profit ($); null when books couldn't be fetched */
+  /**
+     * Fresh pre-flight net profit ($); null when books couldn't be fetched
+     * @nullable
+     */
   preflightProfitUsd?: number | null;
+  /** @nullable */
   leg1OrderId?: string | null;
+  /** @nullable */
   leg2OrderId?: string | null;
+  /** @nullable */
   leg3OrderId?: string | null;
+  /** @nullable */
   error?: string | null;
 }
 
-export type ObScalingRowStatus = (typeof ObScalingRowStatus)[keyof typeof ObScalingRowStatus];
+/**
+ * market = force/dry-run (taker); limit = auto-loop (post-only maker)
+ */
+export type TriExecuteRequestOrderType = typeof TriExecuteRequestOrderType[keyof typeof TriExecuteRequestOrderType];
 
-// eslint-disable-next-line @typescript-eslint/no-redeclare
-export const ObScalingRowStatus = {
-  VIABLE: "VIABLE",
-  HIGH_SLIPPAGE: "HIGH_SLIPPAGE",
-  REJECTED: "REJECTED",
+
+export const TriExecuteRequestOrderType = {
+  market: 'market',
+  limit: 'limit',
 } as const;
 
-/** v18 — one row of the top-route scaling table. */
-export interface ObScalingRow {
-  sizeUsd: number;
-  profitUsd: number;
-  slippagePct: number;
-  confidencePct: number;
-  /** VIABLE when profit > minProfitUsd×(size/10) and slippage within limit */
-  status: ObScalingRowStatus;
+export interface TriExecuteRequest {
+  krakenKey: string;
+  krakenSecret: string;
+  /** USD→BTC→SOL→USD or USD→SOL→BTC→USD */
+  loop: string;
+  /** Override trade size in USD. Auto-sized when omitted. */
+  tradeUsd?: number;
+  isDryRun?: boolean;
+  /** market = force/dry-run (taker); limit = auto-loop (post-only maker) */
+  orderType?: TriExecuteRequestOrderType;
 }
 
-export interface ObScanResult {
-  cycles: ObCycleEntry[];
-  tradeSizeUsd: number;
-  feesPct: number;
-  /** Min net profit ($) for READY status */
-  minProfitUsd: number;
-  /** Max tolerated total slippage (%) for READY status */
-  maxSlippagePct: number;
-  /** Number of READY cycles */
-  readyCount: number;
-  /** Pairs whose order book fetch succeeded */
-  pairsScanned: number;
-  /** Pairs the scan attempted to fetch */
-  pairsRequested: number;
-  /** v17 — whether the volatility filter was requested */
-  volatilityFilter: boolean;
-  /** v17 — assets actually scanned after the volatility filter */
-  activeAssets: string[];
-  /** v18 — route of the top-ranked cycle the scaling table covers (null when no cycles) */
-  scalingRoute: string | null;
-  /** v18 — top route re-simulated at $10/$50/$100/$500/$1,000; unabsorbable sizes omitted */
-  scaling: ObScalingRow[];
-  scannedAt: string;
+export interface TriExecuteResult {
+  success: boolean;
+  isDryRun: boolean;
+  estimatedProfitUsd: number;
+  /** @nullable */
+  leg1OrderId?: string | null;
+  /** @nullable */
+  leg2OrderId?: string | null;
+  /** @nullable */
+  leg3OrderId?: string | null;
+  /** @nullable */
+  error?: string | null;
 }
 
+export interface TriangularOpportunity {
+  /** Exchange where the loop was detected (e.g. Kraken) */
+  exchange: string;
+  /** Loop direction, e.g. USD→SOL→ETH→USD */
+  loop: string;
+  /** Net profit percentage after fees */
+  profitPct: number;
+  /** SOL/USD mid price used */
+  solUsd: number;
+  /** ETH/USD or BTC/USD mid price used (see variant) */
+  ethUsd: number;
+  /** ETH/SOL or SOL/BTC mid price used (see variant) */
+  ethSol: number;
+  /** 'eth' for ETH/SOL loops, 'btc' for BTC/SOL loops (v13) */
+  variant?: string;
+  timestamp: string;
+}
+
+/**
+ * Raw prices used in this scan
+ */
 export type TriangularScanResultPrices = { [key: string]: unknown };
+
+/**
+ * Price source per exchange: 'direct' if live ETH/SOL market data is available, 'synthetic' if cross-rate is used
+ */
+export type TriangularScanResultPriceSource = {[key: string]: 'direct' | 'synthetic'};
 
 export interface TriangularScanResult {
   opportunities: TriangularOpportunity[];
   /** Raw prices used in this scan */
   prices: TriangularScanResultPrices;
-  /**
-   * Per-exchange ETH/SOL price source.
-   * "direct" = live Kraken ETHSOL WS market; "synthetic" = computed from ETH/USD ÷ SOL/USD.
-   * Absent keys mean no price data for that exchange.
-   */
-  priceSource?: Record<string, "direct" | "synthetic">;
+  /** Price source per exchange: 'direct' if live ETH/SOL market data is available, 'synthetic' if cross-rate is used */
+  priceSource?: TriangularScanResultPriceSource;
   scannedAt: string;
 }
 
-export type CointegrationSignalDirection = 'long_asset1' | 'short_asset1';
 export interface TradeSummary {
   totalTrades: number;
   liveTrades: number;
@@ -332,52 +448,26 @@ limit?: number;
 offset?: number;
 };
 
-export interface PairScanEntry {
-  /** Short coin symbol, e.g. BTC, ETH, SOL */
-  coin: string;
-  /** Canonical pair, e.g. BTC/USD */
-  pair: string;
-  krakenPrice: number;
-  coinbasePrice: number;
-  krakenBid: number;
-  krakenAsk: number;
-  coinbaseBid: number;
-  coinbaseAsk: number;
-  /** Gross cross-exchange spread % using bid/ask (best direction) */
-  grossSpreadPct: number;
-  buyExchange: string;
-  sellExchange: string;
-  scannedAt: string;
-}
+export type GetObScanParams = {
+/**
+ * Simulated trade size in USD (default 10)
+ */
+tradeSizeUsd?: number;
+/**
+ * Estimated total fees % (default 0.5 — 3 legs × 0.16% maker)
+ */
+feesPct?: number;
+/**
+ * Minimum net profit ($) required for READY status at $10 (default 0.02 — v18; scaled by size/10 in the scaling table)
+ */
+minProfitUsd?: number;
+/**
+ * Maximum tolerated total slippage (%) for READY status (default 0.5)
+ */
+maxSlippagePct?: number;
+/**
+ * v17 — scan only assets with |24h change| > 1.5% (default true; falls back to all assets when fewer than 3 qualify)
+ */
+volatilityFilter?: boolean;
+};
 
-
-export interface CointegrationSignal {
-  /** Cointegrated pair, e.g. SOL/ETH */
-  pair: string;
-  /** First asset symbol, e.g. SOL */
-  asset1: string;
-  /** Second asset symbol, e.g. ETH */
-  asset2: string;
-  /** USD price of asset1 */
-  price1: number;
-  /** USD price of asset2 */
-  price2: number;
-  /** Current Kalman-estimated hedge ratio (β) */
-  hedgeRatio: number;
-  /** Current spread residual (price1 − β·price2) */
-  spread: number;
-  /** Z-score of the spread vs recent history */
-  zScore: number;
-  /** Trade direction */
-  direction: CointegrationSignalDirection;
-  /** Estimated edge in % based on z-score magnitude */
-  edgePct: number;
-  /** Number of observations in spread history */
-  observations: number;
-  timestamp: string;
-}
-
-export interface CointegrationScanResult {
-  signals: CointegrationSignal[];
-  scannedAt: string;
-}

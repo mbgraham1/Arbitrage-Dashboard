@@ -8,7 +8,7 @@ import {
 } from "lucide-react";
 import { format } from "date-fns";
 import { cn } from "@/lib/utils";
-import { useGetTradeSummary, useListTrades, useScanAllPairs, useGetObScan, getObScanQueryKey, useObExecute, TradeRecord, PairScanEntry, ObCycleEntry } from "@workspace/api-client-react";
+import { useGetTradeSummary, useListTrades, useScanAllPairs, useGetObScan, getGetObScanQueryKey, useObExecute, useGetAllPairSnapshots, getGetAllPairSnapshotsQueryKey, TradeRecord, PairScanEntry, ObCycleEntry, AllPairSnapshot } from "@workspace/api-client-react";
 
 // ── Small helpers ──────────────────────────────────────────────────────────────
 
@@ -470,6 +470,9 @@ export default function Dashboard() {
         </div>
       </div>
 
+      {/* All-Pairs Breakdown */}
+      <AllPairsCard activePair={latestPriceData?.pair ?? null} />
+
       {/* Multi-Coin Opportunity Ranker */}
       <MultiCoinRankerCard settings={settings} />
 
@@ -480,6 +483,106 @@ export default function Dashboard() {
       {/* Trade History Table */}
       <TradeHistoryTable />
     </div>
+  );
+}
+
+// ── All-Pairs Breakdown Card ───────────────────────────────────────────────────
+
+function AllPairsCard({ activePair }: { activePair: string | null }) {
+  const query = useGetAllPairSnapshots({
+    query: {
+      queryKey: getGetAllPairSnapshotsQueryKey(),
+      refetchInterval: 5_000,
+      staleTime: 4_000,
+    },
+  });
+
+  const rows: AllPairSnapshot[] = query.data ?? [];
+
+  const bestPair = rows.find(r => r.grossSpreadPct != null)?.pair ?? null;
+  const highlightedPair = activePair ?? bestPair;
+
+  const fmt = (v: number | null | undefined, decimals = 4) =>
+    v != null ? `$${v.toLocaleString(undefined, { minimumFractionDigits: decimals, maximumFractionDigits: decimals })}` : "—";
+
+  return (
+    <Card>
+      <CardHeader className="py-3 flex flex-row items-center justify-between space-y-0">
+        <CardTitle className="text-sm flex items-center gap-2">
+          <Radio className="h-4 w-4" /> All Pairs
+          <span className="text-[9px] font-mono font-bold px-1 border border-primary text-primary">10 PAIRS</span>
+          <span className="text-[10px] font-mono text-muted-foreground">Live bid/ask · sorted by spread</span>
+        </CardTitle>
+        <div className="flex items-center gap-2 text-[10px] font-mono text-muted-foreground">
+          {query.isFetching && <RefreshCw className="h-3 w-3 animate-spin" />}
+          {rows.length > 0 && `${rows.filter(r => r.grossSpreadPct != null).length}/${rows.length} pairs live`}
+        </div>
+      </CardHeader>
+      <CardContent className="p-0">
+        {rows.length === 0 ? (
+          <div className="p-6 text-center text-sm font-mono text-muted-foreground">
+            {query.isLoading ? "Fetching price snapshots…" : "Price data unavailable."}
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs font-mono border-collapse">
+              <thead>
+                <tr className="border-b-2 border-border bg-muted/50">
+                  {["#", "Pair", "Kraken Bid", "Kraken Ask", "Coinbase Bid", "Coinbase Ask", "Spread %", "Route"].map(h => (
+                    <th key={h} className="text-left px-3 py-2 text-[10px] uppercase font-bold text-muted-foreground whitespace-nowrap">{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((row, i) => {
+                  const isActive = row.pair === highlightedPair;
+                  const hasData  = row.grossSpreadPct != null;
+                  return (
+                    <tr
+                      key={row.pair}
+                      className={cn(
+                        "border-b border-border/50",
+                        isActive && hasData
+                          ? "bg-primary/10 ring-1 ring-inset ring-primary/40"
+                          : i % 2 === 0 ? "" : "bg-muted/20",
+                        !hasData && "opacity-50",
+                      )}
+                    >
+                      <td className="px-3 py-1.5 text-muted-foreground">{i + 1}</td>
+                      <td className="px-3 py-1.5 font-bold whitespace-nowrap">
+                        {row.coin}
+                        {isActive && hasData && (
+                          <span className="ml-1 text-[8px] font-bold px-0.5 border border-primary text-primary">BEST</span>
+                        )}
+                      </td>
+                      <td className="px-3 py-1.5 text-muted-foreground">{fmt(row.krakenBid)}</td>
+                      <td className="px-3 py-1.5 text-muted-foreground">{fmt(row.krakenAsk)}</td>
+                      <td className="px-3 py-1.5 text-muted-foreground">{fmt(row.coinbaseBid)}</td>
+                      <td className="px-3 py-1.5 text-muted-foreground">{fmt(row.coinbaseAsk)}</td>
+                      <td className={cn(
+                        "px-3 py-1.5 font-bold",
+                        row.grossSpreadPct == null
+                          ? "text-muted-foreground"
+                          : row.grossSpreadPct > 0
+                            ? "text-success"
+                            : "text-destructive",
+                      )}>
+                        {row.grossSpreadPct != null ? `${row.grossSpreadPct >= 0 ? "+" : ""}${row.grossSpreadPct.toFixed(3)}%` : "—"}
+                      </td>
+                      <td className="px-3 py-1.5 text-muted-foreground whitespace-nowrap">
+                        {row.buyExchange != null
+                          ? `${row.buyExchange} → ${row.buyExchange === "Kraken" ? "Coinbase" : "Kraken"}`
+                          : "—"}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </CardContent>
+    </Card>
   );
 }
 
@@ -605,8 +708,9 @@ function OrderBookHunterCard() {
     return () => clearTimeout(t);
   }, [tradeSizeInput]);
   const tradeSize = Math.max(1, parseFloat(debouncedSize) || 10);
-  const { data, isLoading } = useGetObScan(tradeSize, 0.5, 0.02, 0.5, true, {
-    query: { queryKey: getObScanQueryKey(tradeSize, 0.5, 0.02, 0.5, true), refetchInterval: 5_000, staleTime: 4_000 },
+  const obParams = { tradeSizeUsd: tradeSize, feesPct: 0.5, minProfitUsd: 0.02, maxSlippagePct: 0.5, volatilityFilter: true };
+  const { data, isLoading } = useGetObScan(obParams, {
+    query: { queryKey: getGetObScanQueryKey(obParams), refetchInterval: 5_000, staleTime: 4_000 },
   });
 
   const cycles: ObCycleEntry[] = data?.cycles ?? [];

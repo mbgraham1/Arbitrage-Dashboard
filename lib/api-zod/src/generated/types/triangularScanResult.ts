@@ -7,12 +7,13 @@
  */
 import type { TriangularOpportunity } from './triangularOpportunity';
 import type { TriangularScanResultPrices } from './triangularScanResultPrices';
+import type { TriangularScanResultPriceSource } from './triangularScanResultPriceSource';
 
 export interface TriangularScanResult {
   opportunities: TriangularOpportunity[];
   /** Raw prices used in this scan */
   prices: TriangularScanResultPrices;
   /** Price source per exchange: 'direct' if live ETH/SOL market data is available, 'synthetic' if cross-rate is used */
-  priceSource?: Record<string, 'direct' | 'synthetic'>;
+  priceSource?: TriangularScanResultPriceSource;
   scannedAt: string;
 }

@@ -6,15 +6,28 @@
  * OpenAPI spec version: 0.1.0
  */
 
+export * from './allPairSnapshot';
 export * from './balanceData';
 export * from './balanceEntry';
 export * from './coinbaseCredentials';
+export * from './cointegrationScanResult';
+export * from './cointegrationSignal';
+export * from './cointegrationSignalDirection';
 export * from './connectionTestResult';
 export * from './errorResponse';
 export * from './exchangeCredentials';
+export * from './getObScanParams';
 export * from './healthStatus';
 export * from './krakenCredentials';
 export * from './listTradesParams';
+export * from './obCycleEntry';
+export * from './obCycleEntryStatus';
+export * from './obExecuteRequest';
+export * from './obExecuteResult';
+export * from './obScalingRow';
+export * from './obScalingRowStatus';
+export * from './obScanResult';
+export * from './pairScanEntry';
 export * from './preloadedCredentials';
 export * from './priceData';
 export * from './tradeRecord';
@@ -25,4 +38,8 @@ export * from './tradeSummary';
 export * from './triangularOpportunity';
 export * from './triangularScanResult';
 export * from './triangularScanResultPrices';
+export * from './triangularScanResultPriceSource';
+export * from './triExecuteRequest';
+export * from './triExecuteRequestOrderType';
+export * from './triExecuteResult';
 export * from './wsStatus';

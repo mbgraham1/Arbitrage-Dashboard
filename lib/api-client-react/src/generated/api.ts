@@ -20,15 +20,19 @@ import type {
 } from '@tanstack/react-query';
 
 import type {
+  AllPairSnapshot,
   BalanceData,
   CoinbaseCredentials,
   CointegrationScanResult,
   ConnectionTestResult,
   ErrorResponse,
   ExchangeCredentials,
+  GetObScanParams,
   HealthStatus,
   KrakenCredentials,
   ListTradesParams,
+  ObExecuteRequest,
+  ObExecuteResult,
   ObScanResult,
   PairScanEntry,
   PreloadedCredentials,
@@ -37,11 +41,9 @@ import type {
   TradeRequest,
   TradeResult,
   TradeSummary,
-  TriangularScanResult,
-  ObExecuteRequest,
-  ObExecuteResult,
   TriExecuteRequest,
   TriExecuteResult,
+  TriangularScanResult
 } from './api.schemas';
 
 import { customFetch } from '../custom-fetch';
@@ -53,6 +55,7 @@ type AwaitedInput<T> = PromiseLike<T> | T;
 
 
 type SecondParameter<T extends (...args: never) => unknown> = Parameters<T>[1];
+
 
 
 const withQueryKey = <T extends object, K>(query: T, queryKey: K): T & { queryKey: K } => {
@@ -71,6 +74,8 @@ const withQueryKey = <T extends object, K>(query: T, queryKey: K): T & { queryKe
 };
 
 export const getHealthCheckUrl = () => {
+
+
 
 
   return `/api/healthz`
@@ -92,6 +97,9 @@ export const healthCheck = async ( options?: RequestInit): Promise<HealthStatus>
 );}
 
 
+
+
+
 export const getHealthCheckQueryKey = () => {
     return [
     `/api/healthz`
@@ -107,7 +115,11 @@ const {query: queryOptions, request: requestOptions} = options ?? {};
   const queryKey =  queryOptions?.queryKey ?? getHealthCheckQueryKey();
 
 
+
     const queryFn: QueryFunction<Awaited<ReturnType<typeof healthCheck>>> = ({ signal }) => healthCheck({ signal, ...requestOptions });
+
+
+
 
 
    return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof healthCheck>>, TError, TData> & { queryKey: QueryKey }
@@ -134,7 +146,14 @@ export function useHealthCheck<TData = Awaited<ReturnType<typeof healthCheck>>, 
 }
 
 
+
+
+
+
+
 export const getFetchPricesUrl = () => {
+
+
 
 
   return `/api/prices`
@@ -155,6 +174,9 @@ export const fetchPrices = async (exchangeCredentials: ExchangeCredentials, opti
 );}
 
 
+
+
+
 export const getFetchPricesMutationOptions = <TError = ErrorType<ErrorResponse>,
     TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof fetchPrices>>, TError,{data: BodyType<ExchangeCredentials>}, TContext>, request?: SecondParameter<typeof customFetch>}
 ): UseMutationOptions<Awaited<ReturnType<typeof fetchPrices>>, TError,{data: BodyType<ExchangeCredentials>}, TContext> => {
@@ -167,11 +189,17 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
       : {mutation: { mutationKey, }, request: undefined};
 
 
+
+
       const mutationFn: MutationFunction<Awaited<ReturnType<typeof fetchPrices>>, {data: BodyType<ExchangeCredentials>}> = (props) => {
           const {data} = props ?? {};
 
           return  fetchPrices(data,requestOptions)
         }
+
+
+
+
 
 
   return  { mutationFn, ...mutationOptions }}
@@ -197,6 +225,8 @@ export const useFetchPrices = <TError = ErrorType<ErrorResponse>,
 export const getFetchBalancesUrl = () => {
 
 
+
+
   return `/api/balances`
 }
 
@@ -215,6 +245,9 @@ export const fetchBalances = async (exchangeCredentials: ExchangeCredentials, op
 );}
 
 
+
+
+
 export const getFetchBalancesMutationOptions = <TError = ErrorType<ErrorResponse>,
     TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof fetchBalances>>, TError,{data: BodyType<ExchangeCredentials>}, TContext>, request?: SecondParameter<typeof customFetch>}
 ): UseMutationOptions<Awaited<ReturnType<typeof fetchBalances>>, TError,{data: BodyType<ExchangeCredentials>}, TContext> => {
@@ -227,11 +260,17 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
       : {mutation: { mutationKey, }, request: undefined};
 
 
+
+
       const mutationFn: MutationFunction<Awaited<ReturnType<typeof fetchBalances>>, {data: BodyType<ExchangeCredentials>}> = (props) => {
           const {data} = props ?? {};
 
           return  fetchBalances(data,requestOptions)
         }
+
+
+
+
 
 
   return  { mutationFn, ...mutationOptions }}
@@ -257,6 +296,8 @@ export const useFetchBalances = <TError = ErrorType<ErrorResponse>,
 export const getGetPreloadedCredentialsUrl = () => {
 
 
+
+
   return `/api/credentials/preloaded`
 }
 
@@ -275,6 +316,9 @@ export const getPreloadedCredentials = async ( options?: RequestInit): Promise<P
 );}
 
 
+
+
+
 export const getGetPreloadedCredentialsQueryKey = () => {
     return [
     `/api/credentials/preloaded`
@@ -290,7 +334,11 @@ const {query: queryOptions, request: requestOptions} = options ?? {};
   const queryKey =  queryOptions?.queryKey ?? getGetPreloadedCredentialsQueryKey();
 
 
+
     const queryFn: QueryFunction<Awaited<ReturnType<typeof getPreloadedCredentials>>> = ({ signal }) => getPreloadedCredentials({ signal, ...requestOptions });
+
+
+
 
 
    return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof getPreloadedCredentials>>, TError, TData> & { queryKey: QueryKey }
@@ -317,7 +365,14 @@ export function useGetPreloadedCredentials<TData = Awaited<ReturnType<typeof get
 }
 
 
+
+
+
+
+
 export const getTestKrakenUrl = () => {
+
+
 
 
   return `/api/test-kraken`
@@ -338,6 +393,9 @@ export const testKraken = async (krakenCredentials: KrakenCredentials, options?:
 );}
 
 
+
+
+
 export const getTestKrakenMutationOptions = <TError = ErrorType<ErrorResponse>,
     TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof testKraken>>, TError,{data: BodyType<KrakenCredentials>}, TContext>, request?: SecondParameter<typeof customFetch>}
 ): UseMutationOptions<Awaited<ReturnType<typeof testKraken>>, TError,{data: BodyType<KrakenCredentials>}, TContext> => {
@@ -350,11 +408,17 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
       : {mutation: { mutationKey, }, request: undefined};
 
 
+
+
       const mutationFn: MutationFunction<Awaited<ReturnType<typeof testKraken>>, {data: BodyType<KrakenCredentials>}> = (props) => {
           const {data} = props ?? {};
 
           return  testKraken(data,requestOptions)
         }
+
+
+
+
 
 
   return  { mutationFn, ...mutationOptions }}
@@ -380,6 +444,8 @@ export const useTestKraken = <TError = ErrorType<ErrorResponse>,
 export const getTestCoinbaseUrl = () => {
 
 
+
+
   return `/api/test-coinbase`
 }
 
@@ -398,6 +464,9 @@ export const testCoinbase = async (coinbaseCredentials: CoinbaseCredentials, opt
 );}
 
 
+
+
+
 export const getTestCoinbaseMutationOptions = <TError = ErrorType<ErrorResponse>,
     TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof testCoinbase>>, TError,{data: BodyType<CoinbaseCredentials>}, TContext>, request?: SecondParameter<typeof customFetch>}
 ): UseMutationOptions<Awaited<ReturnType<typeof testCoinbase>>, TError,{data: BodyType<CoinbaseCredentials>}, TContext> => {
@@ -410,11 +479,17 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
       : {mutation: { mutationKey, }, request: undefined};
 
 
+
+
       const mutationFn: MutationFunction<Awaited<ReturnType<typeof testCoinbase>>, {data: BodyType<CoinbaseCredentials>}> = (props) => {
           const {data} = props ?? {};
 
           return  testCoinbase(data,requestOptions)
         }
+
+
+
+
 
 
   return  { mutationFn, ...mutationOptions }}
@@ -440,6 +515,8 @@ export const useTestCoinbase = <TError = ErrorType<ErrorResponse>,
 export const getExecuteTradeUrl = () => {
 
 
+
+
   return `/api/execute-trade`
 }
 
@@ -458,6 +535,9 @@ export const executeTrade = async (tradeRequest: TradeRequest, options?: Request
 );}
 
 
+
+
+
 export const getExecuteTradeMutationOptions = <TError = ErrorType<ErrorResponse>,
     TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof executeTrade>>, TError,{data: BodyType<TradeRequest>}, TContext>, request?: SecondParameter<typeof customFetch>}
 ): UseMutationOptions<Awaited<ReturnType<typeof executeTrade>>, TError,{data: BodyType<TradeRequest>}, TContext> => {
@@ -470,11 +550,17 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
       : {mutation: { mutationKey, }, request: undefined};
 
 
+
+
       const mutationFn: MutationFunction<Awaited<ReturnType<typeof executeTrade>>, {data: BodyType<TradeRequest>}> = (props) => {
           const {data} = props ?? {};
 
           return  executeTrade(data,requestOptions)
         }
+
+
+
+
 
 
   return  { mutationFn, ...mutationOptions }}
@@ -527,6 +613,9 @@ export const listTrades = async (params?: ListTradesParams, options?: RequestIni
 );}
 
 
+
+
+
 export const getListTradesQueryKey = (params?: ListTradesParams,) => {
     return [
     `/api/trades`, ...(params ? [params] : [])
@@ -542,7 +631,11 @@ const {query: queryOptions, request: requestOptions} = options ?? {};
   const queryKey =  queryOptions?.queryKey ?? getListTradesQueryKey(params);
 
 
+
     const queryFn: QueryFunction<Awaited<ReturnType<typeof listTrades>>> = ({ signal }) => listTrades(params, { signal, ...requestOptions });
+
+
+
 
 
    return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof listTrades>>, TError, TData> & { queryKey: QueryKey }
@@ -569,7 +662,248 @@ export function useListTrades<TData = Awaited<ReturnType<typeof listTrades>>, TE
 }
 
 
+
+
+
+
+
+export const getGetAllPairSnapshotsUrl = () => {
+
+
+
+
+  return `/api/prices/all-pairs`
+}
+
+/**
+ * Reads the in-memory price cache for all 10 configured pairs and returns every pair — including those with stale or missing data. Kraken and Coinbase bid/ask fields are null when no fresh data is available (> 30 s old), allowing the UI to render a "—" placeholder. Sorted by gross spread descending; no-data pairs go last.
+ * @summary Return cached bid/ask for all 10 pairs without REST fallbacks
+ */
+export const getAllPairSnapshots = async ( options?: RequestInit): Promise<AllPairSnapshot[]> => {
+
+  return customFetch<AllPairSnapshot[]>(getGetAllPairSnapshotsUrl(),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getGetAllPairSnapshotsQueryKey = () => {
+    return [
+    `/api/prices/all-pairs`
+    ] as const;
+    }
+
+
+export const getGetAllPairSnapshotsQueryOptions = <TData = Awaited<ReturnType<typeof getAllPairSnapshots>>, TError = ErrorType<unknown>>( options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getAllPairSnapshots>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getGetAllPairSnapshotsQueryKey();
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof getAllPairSnapshots>>> = ({ signal }) => getAllPairSnapshots({ signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof getAllPairSnapshots>>, TError, TData> & { queryKey: QueryKey }
+}
+
+export type GetAllPairSnapshotsQueryResult = NonNullable<Awaited<ReturnType<typeof getAllPairSnapshots>>>
+export type GetAllPairSnapshotsQueryError = ErrorType<unknown>
+
+
+/**
+ * @summary Return cached bid/ask for all 10 pairs without REST fallbacks
+ */
+
+export function useGetAllPairSnapshots<TData = Awaited<ReturnType<typeof getAllPairSnapshots>>, TError = ErrorType<unknown>>(
+  options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getAllPairSnapshots>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+
+ ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+
+  const queryOptions = getGetAllPairSnapshotsQueryOptions(options)
+
+  const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+
+export const getScanAllPairsUrl = () => {
+
+
+
+
+  return `/api/arb/scan`
+}
+
+/**
+ * Port of Python scan_all_coins(). Fetches bid/ask for all 10 configured pairs from Kraken and Coinbase and returns them sorted by gross spread (best direction per pair) descending. Net edge = grossSpreadPct minus the client's fee + slippage settings.
+ * @summary Scan all 10 pairs and rank by cross-exchange gross spread
+ */
+export const scanAllPairs = async ( options?: RequestInit): Promise<PairScanEntry[]> => {
+
+  return customFetch<PairScanEntry[]>(getScanAllPairsUrl(),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getScanAllPairsQueryKey = () => {
+    return [
+    `/api/arb/scan`
+    ] as const;
+    }
+
+
+export const getScanAllPairsQueryOptions = <TData = Awaited<ReturnType<typeof scanAllPairs>>, TError = ErrorType<ErrorResponse>>( options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof scanAllPairs>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getScanAllPairsQueryKey();
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof scanAllPairs>>> = ({ signal }) => scanAllPairs({ signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof scanAllPairs>>, TError, TData> & { queryKey: QueryKey }
+}
+
+export type ScanAllPairsQueryResult = NonNullable<Awaited<ReturnType<typeof scanAllPairs>>>
+export type ScanAllPairsQueryError = ErrorType<ErrorResponse>
+
+
+/**
+ * @summary Scan all 10 pairs and rank by cross-exchange gross spread
+ */
+
+export function useScanAllPairs<TData = Awaited<ReturnType<typeof scanAllPairs>>, TError = ErrorType<ErrorResponse>>(
+  options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof scanAllPairs>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+
+ ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+
+  const queryOptions = getScanAllPairsQueryOptions(options)
+
+  const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+
+export const getScanCointegrationArbUrl = () => {
+
+
+
+
+  return `/api/arb/cointegration`
+}
+
+/**
+ * Fetches mid-prices for SOL, ETH, BTC, AVAX, and DOT from the in-memory cache, updates each pair's Kalman-filter spread history, and returns any pairs whose |z-score| ≥ 2.0. Returns an empty signals array when observations are insufficient or no pair is out-of-range.
+ * @summary Run Kalman-filter cointegration scan and return mean-reversion signals
+ */
+export const scanCointegrationArb = async ( options?: RequestInit): Promise<CointegrationScanResult> => {
+
+  return customFetch<CointegrationScanResult>(getScanCointegrationArbUrl(),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getScanCointegrationArbQueryKey = () => {
+    return [
+    `/api/arb/cointegration`
+    ] as const;
+    }
+
+
+export const getScanCointegrationArbQueryOptions = <TData = Awaited<ReturnType<typeof scanCointegrationArb>>, TError = ErrorType<ErrorResponse>>( options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof scanCointegrationArb>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getScanCointegrationArbQueryKey();
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof scanCointegrationArb>>> = ({ signal }) => scanCointegrationArb({ signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof scanCointegrationArb>>, TError, TData> & { queryKey: QueryKey }
+}
+
+export type ScanCointegrationArbQueryResult = NonNullable<Awaited<ReturnType<typeof scanCointegrationArb>>>
+export type ScanCointegrationArbQueryError = ErrorType<ErrorResponse>
+
+
+/**
+ * @summary Run Kalman-filter cointegration scan and return mean-reversion signals
+ */
+
+export function useScanCointegrationArb<TData = Awaited<ReturnType<typeof scanCointegrationArb>>, TError = ErrorType<ErrorResponse>>(
+  options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof scanCointegrationArb>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+
+ ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+
+  const queryOptions = getScanCointegrationArbQueryOptions(options)
+
+  const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+
 export const getScanTriangularArbUrl = () => {
+
+
 
 
   return `/api/arb/triangular`
@@ -591,6 +925,9 @@ export const scanTriangularArb = async ( options?: RequestInit): Promise<Triangu
 );}
 
 
+
+
+
 export const getScanTriangularArbQueryKey = () => {
     return [
     `/api/arb/triangular`
@@ -606,7 +943,11 @@ const {query: queryOptions, request: requestOptions} = options ?? {};
   const queryKey =  queryOptions?.queryKey ?? getScanTriangularArbQueryKey();
 
 
+
     const queryFn: QueryFunction<Awaited<ReturnType<typeof scanTriangularArb>>> = ({ signal }) => scanTriangularArb({ signal, ...requestOptions });
+
+
+
 
 
    return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof scanTriangularArb>>, TError, TData> & { queryKey: QueryKey }
@@ -632,237 +973,244 @@ export function useScanTriangularArb<TData = Awaited<ReturnType<typeof scanTrian
   return withQueryKey(query, queryOptions.queryKey);
 }
 
-export const getScanCointegrationArbUrl = () => {
-  return `/api/arb/cointegration`
+
+
+
+
+
+
+export const getGetObScanUrl = (params?: GetObScanParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/arb/ob-scan?${stringifiedParams}` : `/api/arb/ob-scan`
 }
 
-
-// ── /arb/ob-scan ─────────────────────────────────────────────────────────────
-// Port of Python v17 "420-Route Hunter" — walks L2 depth across 34 assets,
-// classifies each cycle READY / HIGH_SLIPPAGE / LOW_PROFIT, scores liquidity
-// confidence, with an optional 24h volatility filter.
-
-export const getObScanUrl = (tradeSizeUsd?: number, feesPct?: number, minProfitUsd?: number, maxSlippagePct?: number, volatilityFilter?: boolean) => {
-  const p = new URLSearchParams();
-  if (tradeSizeUsd     != null) p.set("tradeSizeUsd",     String(tradeSizeUsd));
-  if (feesPct          != null) p.set("feesPct",          String(feesPct));
-  if (minProfitUsd     != null) p.set("minProfitUsd",     String(minProfitUsd));
-  if (maxSlippagePct   != null) p.set("maxSlippagePct",   String(maxSlippagePct));
-  if (volatilityFilter != null) p.set("volatilityFilter", String(volatilityFilter));
-  const qs = p.toString();
-  return `/api/arb/ob-scan${qs ? `?${qs}` : ""}`;
-};
-
 /**
- * Fetches the v17 order book hunter scan — all simulatable triangular cycles
- * across 34 assets, simulated using actual L2 depth from Kraken, with
- * slippage, confidence, status classification, and optional volatility filter.
- * @summary Scan triangular cycles across 34 assets using L2 order book depth (v17)
+ * Port of Python v18 "Scaling Analyzer" (v17 wide-net scan plus a scaling table — the top-ranked route is re-simulated at $10/$50/$100/$500/$1,000 with VIABLE / HIGH_SLIPPAGE / REJECTED statuses; the min-profit threshold scales with size/10). Fetches Kraken Depth API for all required pairs in parallel, then walks the book for each A→B permutation of 34 assets (only routes with a real Kraken cross pair are simulatable) to compute realistic fill prices at the given trade size. An optional volatility filter restricts the scan to assets that moved more than 1.5% in 24h (falls back to all assets when fewer than 3 qualify). All simulatable cycles (top 15) are returned ranked by estimated net profit, each with total execution slippage, a liquidity confidence score, and a READY / HIGH_SLIPPAGE / LOW_PROFIT status classification.
+ * @summary Scan triangular cycles across 34 assets using L2 order book depth (v18 port)
  */
-export const getObScan = async (
-  tradeSizeUsd?: number,
-  feesPct?: number,
-  minProfitUsd?: number,
-  maxSlippagePct?: number,
-  volatilityFilter?: boolean,
-  options?: RequestInit,
-): Promise<ObScanResult> =>
-  customFetch<ObScanResult>(getObScanUrl(tradeSizeUsd, feesPct, minProfitUsd, maxSlippagePct, volatilityFilter), { ...options, method: "GET" });
+export const getObScan = async (params?: GetObScanParams, options?: RequestInit): Promise<ObScanResult> => {
 
-export const getObScanQueryKey = (tradeSizeUsd?: number, feesPct?: number, minProfitUsd?: number, maxSlippagePct?: number, volatilityFilter?: boolean) =>
-  [`/api/arb/ob-scan`, tradeSizeUsd, feesPct, minProfitUsd, maxSlippagePct, volatilityFilter] as const;
-
-export const getObScanQueryOptions = <
-  TData = Awaited<ReturnType<typeof getObScan>>,
-  TError = ErrorType<ErrorResponse>,
->(
-  tradeSizeUsd?: number,
-  feesPct?: number,
-  minProfitUsd?: number,
-  maxSlippagePct?: number,
-  volatilityFilter?: boolean,
-  options?: { query?: UseQueryOptions<Awaited<ReturnType<typeof getObScan>>, TError, TData>; request?: SecondParameter<typeof customFetch> },
-): UseQueryOptions<Awaited<ReturnType<typeof getObScan>>, TError, TData> & { queryKey: QueryKey } => {
-  const { query: queryOptions, request: requestOptions } = options ?? {};
-  const queryKey = queryOptions?.queryKey ?? getObScanQueryKey(tradeSizeUsd, feesPct, minProfitUsd, maxSlippagePct, volatilityFilter);
-  const queryFn: QueryFunction<Awaited<ReturnType<typeof getObScan>>> = ({ signal }) =>
-    getObScan(tradeSizeUsd, feesPct, minProfitUsd, maxSlippagePct, volatilityFilter, { signal, ...requestOptions });
-  return { queryKey, queryFn, ...queryOptions } as UseQueryOptions<Awaited<ReturnType<typeof getObScan>>, TError, TData> & { queryKey: QueryKey };
-};
-
-export type GetObScanQueryResult = NonNullable<Awaited<ReturnType<typeof getObScan>>>;
-export type GetObScanQueryError = ErrorType<ErrorResponse>;
-
-/**
- * @summary Scan triangular cycles across 34 assets using L2 order book depth (v17 port)
- */
-export const useGetObScan = <
-  TData = Awaited<ReturnType<typeof getObScan>>,
-  TError = ErrorType<ErrorResponse>,
->(
-  tradeSizeUsd?: number,
-  feesPct?: number,
-  minProfitUsd?: number,
-  maxSlippagePct?: number,
-  volatilityFilter?: boolean,
-  options?: { query?: UseQueryOptions<Awaited<ReturnType<typeof getObScan>>, TError, TData>; request?: SecondParameter<typeof customFetch> },
-): UseQueryResult<TData, TError> & { queryKey: QueryKey } => {
-  const queryOptions = getObScanQueryOptions(tradeSizeUsd, feesPct, minProfitUsd, maxSlippagePct, volatilityFilter, options);
-  const query = useQuery(queryOptions) as UseQueryResult<TData, TError> & { queryKey: QueryKey };
-  return withQueryKey(query, queryOptions.queryKey);
-};
-
-// ── /arb/ob-execute ───────────────────────────────────────────────────────────
-
-export const getObExecuteUrl = () => `/api/arb/ob-execute`;
-
-/**
- * Port of Python v18 MANUAL EXECUTION BUTTON. Fresh pre-flight re-simulation,
- * then 3 sequential Kraken market orders (or a dry-run ledger row).
- * @summary Manually execute the top Order Book Hunter route (v18 port)
- */
-export const obExecute = async (
-  obExecuteRequest: ObExecuteRequest,
-  options?: RequestInit,
-): Promise<ObExecuteResult> => {
-  return customFetch<ObExecuteResult>(getObExecuteUrl(), {
+  return customFetch<ObScanResult>(getGetObScanUrl(params),
+  {
     ...options,
-    method: "POST",
-    headers: { "Content-Type": "application/json", ...options?.headers },
-    body: JSON.stringify(obExecuteRequest),
-  });
-};
+    method: 'GET'
 
-export const getObExecuteMutationOptions = <
-  TError = ErrorType<ErrorResponse>,
-  TContext = unknown,
->(
-  options?: { mutation?: UseMutationOptions<Awaited<ReturnType<typeof obExecute>>, TError, { data: BodyType<ObExecuteRequest> }, TContext>; request?: SecondParameter<typeof customFetch> },
-): UseMutationOptions<Awaited<ReturnType<typeof obExecute>>, TError, { data: BodyType<ObExecuteRequest> }, TContext> => {
-  const { mutation: mutationOptions, request: requestOptions } = options ?? {};
-  const mutationKey = ["obExecute"];
-  const mutationFn: MutationFunction<Awaited<ReturnType<typeof obExecute>>, { data: BodyType<ObExecuteRequest> }> = (props) => {
-    const { data } = props ?? {};
-    return obExecute(data, requestOptions);
-  };
-  return { mutationKey, mutationFn, ...mutationOptions };
-};
 
-export type ObExecuteMutationResult = NonNullable<Awaited<ReturnType<typeof obExecute>>>;
-export type ObExecuteMutationError = ErrorType<ErrorResponse>;
+  }
+);}
 
-/**
- * @summary Manually execute the top Order Book Hunter route (v18 port)
- */
-export const useObExecute = <TError = ErrorType<ErrorResponse>, TContext = unknown>(
-  options?: { mutation?: UseMutationOptions<Awaited<ReturnType<typeof obExecute>>, TError, { data: BodyType<ObExecuteRequest> }, TContext>; request?: SecondParameter<typeof customFetch> },
-): UseMutationResult<Awaited<ReturnType<typeof obExecute>>, TError, { data: BodyType<ObExecuteRequest> }, TContext> => {
-  const mutationOptions = getObExecuteMutationOptions(options);
-  return useMutation(mutationOptions);
-};
 
-// ── /arb/execute-triangular ───────────────────────────────────────────────────
 
-export const getExecuteTriangularUrl = () => `/api/arb/execute-triangular`;
 
-/**
- * Port of Python v13 FORCE TRIANGULAR. Executes 3 sequential market orders on
- * Kraken for USD→BTC→SOL→USD or USD→SOL→BTC→USD. Dry-run returns estimate only.
- * @summary Execute a BTC/SOL/USD triangular loop on Kraken
- */
-export const executeTriangular = async (
-  triExecuteRequest: TriExecuteRequest,
-  options?: RequestInit,
-): Promise<TriExecuteResult> => {
-  return customFetch<TriExecuteResult>(getExecuteTriangularUrl(), {
-    ...options,
-    method: "POST",
-    headers: { "Content-Type": "application/json", ...options?.headers },
-    body: JSON.stringify(triExecuteRequest),
-  });
-};
 
-export const getExecuteTriangularMutationOptions = <
-  TError = ErrorType<ErrorResponse>,
-  TContext = unknown,
->(
-  options?: { mutation?: UseMutationOptions<Awaited<ReturnType<typeof executeTriangular>>, TError, { data: BodyType<TriExecuteRequest> }, TContext>; request?: SecondParameter<typeof customFetch> },
-): UseMutationOptions<Awaited<ReturnType<typeof executeTriangular>>, TError, { data: BodyType<TriExecuteRequest> }, TContext> => {
-  const { mutation: mutationOptions, request: requestOptions } = options ?? {};
-  const mutationKey = ["executeTriangular"];
-  const mutationFn: MutationFunction<Awaited<ReturnType<typeof executeTriangular>>, { data: BodyType<TriExecuteRequest> }> = (props) => {
-    const { data } = props ?? {};
-    return executeTriangular(data, requestOptions);
-  };
-  return { mutationKey, mutationFn, ...mutationOptions };
-};
+export const getGetObScanQueryKey = (params?: GetObScanParams,) => {
+    return [
+    `/api/arb/ob-scan`, ...(params ? [params] : [])
+    ] as const;
+    }
 
-export type ExecuteTriangularMutationResult = NonNullable<Awaited<ReturnType<typeof executeTriangular>>>;
-export type ExecuteTriangularMutationError = ErrorType<ErrorResponse>;
 
-/**
- * @summary Execute a BTC/SOL/USD triangular loop on Kraken
- */
-export const useExecuteTriangular = <TError = ErrorType<ErrorResponse>, TContext = unknown>(
-  options?: { mutation?: UseMutationOptions<Awaited<ReturnType<typeof executeTriangular>>, TError, { data: BodyType<TriExecuteRequest> }, TContext>; request?: SecondParameter<typeof customFetch> },
-): UseMutationResult<Awaited<ReturnType<typeof executeTriangular>>, TError, { data: BodyType<TriExecuteRequest> }, TContext> => {
-  const mutationOptions = getExecuteTriangularMutationOptions(options);
-  return useMutation(mutationOptions);
-};
-
-// ── /arb/scan ─────────────────────────────────────────────────────────────────
-
-export const getScanAllPairsUrl = () => `/api/arb/scan`;
-
-/**
- * Port of Python scan_all_coins(). Fetches bid/ask for all 10 configured
- * pairs and returns them sorted by gross spread descending.
- * @summary Scan all 10 pairs and rank by cross-exchange gross spread
- */
-export const scanAllPairs = async (options?: RequestInit): Promise<PairScanEntry[]> => {
-  return customFetch<PairScanEntry[]>(getScanAllPairsUrl(), {
-    ...options,
-    method: "GET",
-  });
-};
-
-export const getScanAllPairsQueryKey = () => [`/api/arb/scan`] as const;
-
-export const getScanAllPairsQueryOptions = <
-  TData = Awaited<ReturnType<typeof scanAllPairs>>,
-  TError = ErrorType<ErrorResponse>,
->(
-  options?: { query?: UseQueryOptions<Awaited<ReturnType<typeof scanAllPairs>>, TError, TData>; request?: SecondParameter<typeof customFetch> },
+export const getGetObScanQueryOptions = <TData = Awaited<ReturnType<typeof getObScan>>, TError = ErrorType<ErrorResponse>>(params?: GetObScanParams, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getObScan>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
 ) => {
-  const { query: queryOptions, request: requestOptions } = options ?? {};
-  const queryKey = queryOptions?.queryKey ?? getScanAllPairsQueryKey();
-  const queryFn: QueryFunction<Awaited<ReturnType<typeof scanAllPairs>>> = ({ signal }) =>
-    scanAllPairs({ signal, ...requestOptions });
-  return { queryKey, queryFn, ...queryOptions } as UseQueryOptions<
-    Awaited<ReturnType<typeof scanAllPairs>>,
-    TError,
-    TData
-  > & { queryKey: QueryKey };
-};
 
-export type ScanAllPairsQueryResult = NonNullable<Awaited<ReturnType<typeof scanAllPairs>>>;
-export type ScanAllPairsQueryError = ErrorType<ErrorResponse>;
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getGetObScanQueryKey(params);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof getObScan>>> = ({ signal }) => getObScan(params, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof getObScan>>, TError, TData> & { queryKey: QueryKey }
+}
+
+export type GetObScanQueryResult = NonNullable<Awaited<ReturnType<typeof getObScan>>>
+export type GetObScanQueryError = ErrorType<ErrorResponse>
+
 
 /**
- * @summary Scan all 10 pairs and rank by cross-exchange gross spread
+ * @summary Scan triangular cycles across 34 assets using L2 order book depth (v18 port)
  */
-export function useScanAllPairs<
-  TData = Awaited<ReturnType<typeof scanAllPairs>>,
-  TError = ErrorType<ErrorResponse>,
->(
-  options?: { query?: UseQueryOptions<Awaited<ReturnType<typeof scanAllPairs>>, TError, TData>; request?: SecondParameter<typeof customFetch> },
-): UseQueryResult<TData, TError> & { queryKey: QueryKey } {
-  const queryOptions = getScanAllPairsQueryOptions(options);
-  const query = useQuery(queryOptions) as UseQueryResult<TData, TError> & { queryKey: QueryKey };
+
+export function useGetObScan<TData = Awaited<ReturnType<typeof getObScan>>, TError = ErrorType<ErrorResponse>>(
+ params?: GetObScanParams, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getObScan>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+
+ ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+
+  const queryOptions = getGetObScanQueryOptions(params,options)
+
+  const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
+
   return withQueryKey(query, queryOptions.queryKey);
 }
+
+
+
+
+
+
+
+export const getObExecuteUrl = () => {
+
+
+
+
+  return `/api/arb/ob-execute`
+}
+
+/**
+ * Port of the Python v18 MANUAL EXECUTION BUTTON. Re-fetches fresh order books for the route (cache bypassed), re-simulates the cycle (pre-flight), and only places 3 sequential Kraken market orders when the fresh profit exceeds minProfitUsd × (size/10). Dry-run records a ledger row without placing orders. Legs are sized from the pre-flight simulation with orientation-aware cross-pair sides.
+ * @summary Manually execute the top Order Book Hunter route (v18 port)
+ */
+export const obExecute = async (obExecuteRequest: ObExecuteRequest, options?: RequestInit): Promise<ObExecuteResult> => {
+
+  return customFetch<ObExecuteResult>(getObExecuteUrl(),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(obExecuteRequest)
+  }
+);}
+
+
+
+
+
+export const getObExecuteMutationOptions = <TError = ErrorType<ErrorResponse>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof obExecute>>, TError,{data: BodyType<ObExecuteRequest>}, TContext>, request?: SecondParameter<typeof customFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof obExecute>>, TError,{data: BodyType<ObExecuteRequest>}, TContext> => {
+
+const mutationKey = ['obExecute'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof obExecute>>, {data: BodyType<ObExecuteRequest>}> = (props) => {
+          const {data} = props ?? {};
+
+          return  obExecute(data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type ObExecuteMutationResult = NonNullable<Awaited<ReturnType<typeof obExecute>>>
+    export type ObExecuteMutationBody = BodyType<ObExecuteRequest>
+    export type ObExecuteMutationError = ErrorType<ErrorResponse>
+
+    /**
+ * @summary Manually execute the top Order Book Hunter route (v18 port)
+ */
+export const useObExecute = <TError = ErrorType<ErrorResponse>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof obExecute>>, TError,{data: BodyType<ObExecuteRequest>}, TContext>, request?: SecondParameter<typeof customFetch>}
+ ): UseMutationResult<
+        Awaited<ReturnType<typeof obExecute>>,
+        TError,
+        {data: BodyType<ObExecuteRequest>},
+        TContext
+      > => {
+      return useMutation(getObExecuteMutationOptions(options));
+    }
+
+export const getExecuteTriangularUrl = () => {
+
+
+
+
+  return `/api/arb/execute-triangular`
+}
+
+/**
+ * Port of Python v13 FORCE TRIANGULAR. Places 3 sequential market orders on Kraken for either the USD→BTC→SOL→USD or USD→SOL→BTC→USD loop. In dry-run mode only computes the estimated profit without placing orders. Trade size defaults to 10 USD (dry/force) or 20% of USD balance capped at $50 (auto-loop).
+ * @summary Execute a BTC/SOL/USD triangular loop on Kraken
+ */
+export const executeTriangular = async (triExecuteRequest: TriExecuteRequest, options?: RequestInit): Promise<TriExecuteResult> => {
+
+  return customFetch<TriExecuteResult>(getExecuteTriangularUrl(),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(triExecuteRequest)
+  }
+);}
+
+
+
+
+
+export const getExecuteTriangularMutationOptions = <TError = ErrorType<ErrorResponse>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof executeTriangular>>, TError,{data: BodyType<TriExecuteRequest>}, TContext>, request?: SecondParameter<typeof customFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof executeTriangular>>, TError,{data: BodyType<TriExecuteRequest>}, TContext> => {
+
+const mutationKey = ['executeTriangular'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof executeTriangular>>, {data: BodyType<TriExecuteRequest>}> = (props) => {
+          const {data} = props ?? {};
+
+          return  executeTriangular(data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type ExecuteTriangularMutationResult = NonNullable<Awaited<ReturnType<typeof executeTriangular>>>
+    export type ExecuteTriangularMutationBody = BodyType<TriExecuteRequest>
+    export type ExecuteTriangularMutationError = ErrorType<ErrorResponse>
+
+    /**
+ * @summary Execute a BTC/SOL/USD triangular loop on Kraken
+ */
+export const useExecuteTriangular = <TError = ErrorType<ErrorResponse>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof executeTriangular>>, TError,{data: BodyType<TriExecuteRequest>}, TContext>, request?: SecondParameter<typeof customFetch>}
+ ): UseMutationResult<
+        Awaited<ReturnType<typeof executeTriangular>>,
+        TError,
+        {data: BodyType<TriExecuteRequest>},
+        TContext
+      > => {
+      return useMutation(getExecuteTriangularMutationOptions(options));
+    }
 
 export const getGetTradeSummaryUrl = () => {
+
+
 
 
   return `/api/trades/summary`
@@ -883,6 +1231,9 @@ export const getTradeSummary = async ( options?: RequestInit): Promise<TradeSumm
 );}
 
 
+
+
+
 export const getGetTradeSummaryQueryKey = () => {
     return [
     `/api/trades/summary`
@@ -898,7 +1249,11 @@ const {query: queryOptions, request: requestOptions} = options ?? {};
   const queryKey =  queryOptions?.queryKey ?? getGetTradeSummaryQueryKey();
 
 
+
     const queryFn: QueryFunction<Awaited<ReturnType<typeof getTradeSummary>>> = ({ signal }) => getTradeSummary({ signal, ...requestOptions });
+
+
+
 
 
    return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof getTradeSummary>>, TError, TData> & { queryKey: QueryKey }
@@ -925,43 +1280,8 @@ export function useGetTradeSummary<TData = Awaited<ReturnType<typeof getTradeSum
 }
 
 
-export type ScanCointegrationArbQueryResult = NonNullable<Awaited<ReturnType<typeof scanCointegrationArb>>>
 
-/**
- * @summary Scan for cointegration mean-reversion opportunities
- */
-export function useScanCointegrationArb<TData = Awaited<ReturnType<typeof scanCointegrationArb>>, TError = ErrorType<ErrorResponse>>(
-  options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof scanCointegrationArb>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
-):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
-  const queryOptions = getScanCointegrationArbQueryOptions(options)
-  const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
-  return withQueryKey(query, queryOptions.queryKey);
-}
 
-/**
- * Returns cointegration pairs-trading signals via Kalman filter z-score.
- * @summary Scan for cointegration mean-reversion opportunities
- */
-export const scanCointegrationArb = async ( options?: RequestInit): Promise<CointegrationScanResult> => {
-  return customFetch<CointegrationScanResult>(getScanCointegrationArbUrl(), {
-    ...options,
-    method: 'GET',
-  });
-}
 
-export const getScanCointegrationArbQueryKey = () => {
-  return [
-    `/api/arb/cointegration`
-  ] as const;
-}
 
-export const getScanCointegrationArbQueryOptions = <TData = Awaited<ReturnType<typeof scanCointegrationArb>>, TError = ErrorType<ErrorResponse>>(
-  options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof scanCointegrationArb>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
-) => {
-  const {query: queryOptions, request: requestOptions} = options ?? {};
-  const queryKey = queryOptions?.queryKey ?? getScanCointegrationArbQueryKey();
-  const queryFn: QueryFunction<Awaited<ReturnType<typeof scanCointegrationArb>>> = ({ signal }) => scanCointegrationArb({ signal, ...requestOptions });
-  return { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof scanCointegrationArb>>, TError, TData> & { queryKey: QueryKey }
-}
 
-export type ScanCointegrationArbQueryError = ErrorType<ErrorResponse>

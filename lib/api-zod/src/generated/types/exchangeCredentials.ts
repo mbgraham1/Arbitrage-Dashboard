@@ -11,4 +11,6 @@ export interface ExchangeCredentials {
   krakenSecret: string;
   coinbaseKey: string;
   coinbaseSecret: string;
+  /** Optional allow-list of pair symbols to scan (e.g. ['SOL/USD', 'BTC/USD']). Scans all pairs when omitted. */
+  enabledPairs?: string[];
 }

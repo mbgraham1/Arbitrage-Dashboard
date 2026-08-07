@@ -605,6 +605,78 @@ export interface AllPrices {
   wsCoinbase:  boolean;
 }
 
+// ── Per-pair snapshot (cache-only, no REST fallback) ─────────────────────────
+
+export interface PairSnapshot {
+  pair: Pair;
+  coin: string;
+  krakenBid:   number | null;
+  krakenAsk:   number | null;
+  coinbaseBid: number | null;
+  coinbaseAsk: number | null;
+  grossSpreadPct: number | null;  // null when either side has no fresh data
+  buyExchange: "Kraken" | "Coinbase" | null;
+}
+
+const SNAPSHOT_STALE_MS = 30_000; // 30 s — generous enough for 2 s Coinbase polls
+
+/**
+ * Returns a snapshot of all 10 pairs directly from the in-memory cache —
+ * no REST fallbacks. Stale / missing sides are returned as null so the UI
+ * can show "—" per-exchange placeholders instead of silently skipping rows.
+ * Sorted by grossSpreadPct descending; pairs with missing data go last.
+ */
+export function getAllPairSnapshots(): PairSnapshot[] {
+  const now = Date.now();
+  const snapshots: PairSnapshot[] = [];
+
+  for (const pair of PAIRS) {
+    const entry = pairCache.get(pair)!;
+
+    const krakenFresh   = entry.kraken   != null && now - entry.kraken.updatedAt   < SNAPSHOT_STALE_MS;
+    const coinbaseFresh = entry.coinbase  != null && now - entry.coinbase.updatedAt  < SNAPSHOT_STALE_MS;
+
+    const krakenBid   = krakenFresh   ? (entry.kraken!.bid   ?? entry.kraken!.price)   : null;
+    const krakenAsk   = krakenFresh   ? (entry.kraken!.ask   ?? entry.kraken!.price)   : null;
+    const coinbaseBid = coinbaseFresh ? (entry.coinbase!.bid  ?? entry.coinbase!.price) : null;
+    const coinbaseAsk = coinbaseFresh ? (entry.coinbase!.ask  ?? entry.coinbase!.price) : null;
+
+    let grossSpreadPct: number | null = null;
+    let buyExchange: "Kraken" | "Coinbase" | null = null;
+
+    if (krakenBid != null && krakenAsk != null && coinbaseBid != null && coinbaseAsk != null) {
+      const kToC = ((coinbaseBid - krakenAsk) / krakenAsk) * 100;
+      const cToK = ((krakenBid  - coinbaseAsk) / coinbaseAsk) * 100;
+      if (kToC >= cToK) {
+        grossSpreadPct = kToC;
+        buyExchange = "Kraken";
+      } else {
+        grossSpreadPct = cToK;
+        buyExchange = "Coinbase";
+      }
+    }
+
+    snapshots.push({
+      pair,
+      coin: pair.split("/")[0]!,
+      krakenBid,
+      krakenAsk,
+      coinbaseBid,
+      coinbaseAsk,
+      grossSpreadPct,
+      buyExchange,
+    });
+  }
+
+  // Pairs with data sorted by spread desc; no-data pairs go last
+  return snapshots.sort((a, b) => {
+    if (a.grossSpreadPct == null && b.grossSpreadPct == null) return 0;
+    if (a.grossSpreadPct == null) return 1;
+    if (b.grossSpreadPct == null) return -1;
+    return b.grossSpreadPct - a.grossSpreadPct;
+  });
+}
+
 /** @deprecated Use getBestPairPrices() for multi-pair scanning. */
 export async function getAllPrices(): Promise<AllPrices> {
   const best = await getBestPairPrices();
