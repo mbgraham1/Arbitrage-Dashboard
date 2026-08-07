@@ -16,3 +16,5 @@ Rule: every live-order path must (1) validate order ACCEPTANCE (txid/orderId pre
 - Feedback-loop penalties must be size-normalized (shortfall as % of trade size, scaled to the current size); pooling absolute USD shortfalls across sizes mis-gates.
 - Balance-based P&L endpoints must scope snapshots per account (hash of API key) — a global snapshot table mixes baselines across credentials and leaks account values.
 - "Realized P&L" from account-value deltas includes market moves on holdings and deposits/withdrawals; label honestly or subtract cash flows via the exchange Ledgers API.
+
+**Preflight must price the way orders execute.** Post-only (maker) legs fill at their join limit prices — simulating them with a taker depth-walk understates the edge by the spread, and using the taker fee tier instead of maker overstated fees (~2x). Scanner, ranking, and executor preflight must share one fee + price model per execution style, and fee tiers must come from the route's actual pairs, not a hardcoded sample.

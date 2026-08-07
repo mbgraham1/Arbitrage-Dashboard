@@ -1208,7 +1208,7 @@ function GraphEngineCard() {
     maxHops:         4,
     executionStyle:  style,
   };
-  const { data, isLoading } = useGetGraphScan(params, {
+  const { data, isLoading, dataUpdatedAt } = useGetGraphScan(params, {
     query: { queryKey: getGetGraphScanQueryKey(params), refetchInterval: 8_000, staleTime: 7_000 },
   });
 
@@ -1261,6 +1261,12 @@ function GraphEngineCard() {
       } else {
         addLog("warning", `[GRAPH·EXEC] ❌ ${r.error ?? "Pre-flight failed."}`);
         setExecResult(`❌ ${r.error ?? "Pre-flight failed — edge disappeared."}`);
+        // No orders were placed on a pre-flight/gate rejection — clear the
+        // cooldown so AUTO can evaluate the next fresh scan immediately.
+        const err = r.error ?? "";
+        if (!r.executed && (err.startsWith("Pre-flight failed") || err.startsWith("Feedback-loop gate") || err.startsWith("Could not fetch"))) {
+          lastAutoFire.current = 0;
+        }
       }
     } catch (e) {
       const msg = e instanceof Error ? e.message : "Unknown error";
@@ -1277,8 +1283,17 @@ function GraphEngineCard() {
   // The server re-validates everything (fresh scan, slippage buffer, feedback
   // -loop history) before any order — this loop only saves the button click.
   const [autoArmed, setAutoArmed] = useState(false);
-  const AUTO_COOLDOWN_MS = 30_000;
+  // Configurable cooldown (seconds) between AUTO fires. Applies only after a
+  // REAL execution attempt — pre-flight rejections placed no orders, so they
+  // clear the cooldown (overlap is prevented by the in-flight lock instead).
+  const [autoCooldownInput, setAutoCooldownInput] = useState("5");
+  const autoCooldownSec = Math.max(1, parseFloat(autoCooldownInput) || 5);
+  const AUTO_COOLDOWN_MS = autoCooldownSec * 1000;
   const lastAutoFire = useRef(0);
+  // Scan generation used for the last fire — AUTO never retries against the
+  // SAME scan snapshot (prevents a rejection→retry loop hammering the server
+  // with identical stale data; a fresh scan arrives every ~8s).
+  const lastFireScanAt = useRef(0);
   // Ticks every second while armed so the cooldown countdown stays live.
   const [, setCooldownTick] = useState(0);
   useEffect(() => {
@@ -1293,6 +1308,7 @@ function GraphEngineCard() {
     : routes.length === 0 ? "no routes in scan yet"
     : !topRoute ? "no executable route — every scanned route is a shape the live executor doesn't support (4+ hop / mixed)"
     : cooldownLeftMs > 0 ? `cooldown — ${Math.ceil(cooldownLeftMs / 1000)}s until next fire`
+    : dataUpdatedAt !== 0 && dataUpdatedAt === lastFireScanAt.current ? "already attempted on this scan — waiting for the next fresh scan (~8s)"
     : topRoute.netProfitUsd <= 0 ? `fees exceed gross edge — best executable route nets ${topRoute.netProfitUsd < 0 ? "-" : ""}$${Math.abs(topRoute.netProfitUsd).toFixed(4)} after fees`
     : topRoute.netProfitUsd <= minProfit ? `edge too small — best executable edge $${topRoute.netProfitUsd.toFixed(4)} ≤ your $${minProfit.toFixed(2)} floor`
     : null;
@@ -1308,13 +1324,15 @@ function GraphEngineCard() {
     if (!autoArmed || !topRoute || executeMutation.isPending) return;
     if (topRoute.netProfitUsd <= minProfit) return;
     if (Date.now() - lastAutoFire.current < AUTO_COOLDOWN_MS) return;
+    if (dataUpdatedAt !== 0 && dataUpdatedAt === lastFireScanAt.current) return; // one attempt per scan snapshot
+    lastFireScanAt.current = dataUpdatedAt;
     lastAutoFire.current = Date.now();
     addLog("info", `[GRAPH·AUTO] Edge $${topRoute.netProfitUsd.toFixed(4)} > floor $${minProfit.toFixed(2)} — auto-firing ${topRoute.description}`);
     void executeRef.current();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [autoArmed, topRoute?.description, topRoute?.netProfitUsd, minProfit, executeMutation.isPending]);
   useEffect(() => {
-    if (autoArmed) addLog("warning", `[GRAPH·AUTO] Armed (${liveMode ? "LIVE" : "dry run"}, ${style}) — fires when top route edge > $${minProfit.toFixed(2)}, 30s cooldown.`);
+    if (autoArmed) addLog("warning", `[GRAPH·AUTO] Armed (${liveMode ? "LIVE" : "dry run"}, ${style}) — fires when top route edge > $${minProfit.toFixed(2)}, ${autoCooldownSec}s cooldown after each real attempt.`);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [autoArmed]);
 
@@ -1363,10 +1381,20 @@ function GraphEngineCard() {
               "text-[10px] font-mono font-bold px-1.5 py-0.5 border",
               autoArmed ? "border-destructive text-destructive animate-pulse" : "border-border text-muted-foreground",
             )}
-            title="Auto-execution: fires EXECUTE automatically whenever the top route's net edge clears your profit floor (30s cooldown). Server re-validates fees, slippage, and this route's execution history before any order."
+            title="Auto-execution: fires EXECUTE automatically whenever the top route's net edge clears your profit floor. Cooldown applies only after a real execution attempt — pre-flight rejections don't pause the bot. Server re-validates fees, slippage, and this route's execution history before any order."
           >
             {autoArmed ? "AUTO·ON" : "AUTO"}
           </button>
+          <span className="flex items-center gap-1 text-[10px] font-mono font-normal text-muted-foreground">
+            cd <input
+              type="number" min={1} step={1}
+              value={autoCooldownInput}
+              onChange={e => setAutoCooldownInput(e.target.value)}
+              className="w-10 bg-transparent border border-border px-1 py-0.5 text-foreground focus:outline-none focus:border-primary"
+              aria-label="AUTO cooldown in seconds after a real execution attempt"
+              title="Seconds AUTO waits after a real execution attempt before firing again. Pre-flight rejections don't start a cooldown."
+            /> s
+          </span>
         </CardTitle>
         <div className="flex items-center gap-2 text-[10px] font-mono text-muted-foreground">
           {isLoading && <RefreshCw className="h-3 w-3 animate-spin" />}

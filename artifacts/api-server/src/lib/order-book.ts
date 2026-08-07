@@ -445,6 +445,7 @@ export async function preflightObCycle(
   assetB: ObAsset,
   sizeUsd: number,
   feesPct: number,
+  pricing: "maker" | "taker" = "taker",
 ): Promise<ObPreflightResult | null> {
   const cross = CROSS_LOOKUP.get(`${assetA}-${assetB}`);
   if (!cross) return null;
@@ -473,6 +474,27 @@ export async function preflightObCycle(
     ? obX.bids[0]![0]                     // buy B on B/A cross — join top bid
     : obX.asks[0]![0];                    // sell A on A/B cross — join top ask
   const priceSellB  = obB.asks[0]![0];   // leg 3: sell B — join top ask
+
+  // MAKER pricing: the orders below are POST-ONLY limits resting at the join
+  // prices — they fill at limitPrice or not at all. Simulating profit with the
+  // taker depth-walk (avg ask/bid VWAP) systematically understates the edge by
+  // the spread, rejecting routes the maker scanner correctly ranked viable.
+  // Recompute volumes and profit from the actual limit prices, zero slippage.
+  if (pricing === "maker") {
+    const mVolumeA = sizeUsd / priceBuyA;
+    const mVolumeB = cross.aIsQuote ? mVolumeA / priceCross : mVolumeA * priceCross;
+    const usdFinal = mVolumeB * priceSellB;
+    const gross    = usdFinal - sizeUsd;
+    const feeUsd   = (feesPct / 100) * (sizeUsd + sizeUsd + usdFinal); // per-leg on notional
+    const legs: [ObExecutionLeg, ObExecutionLeg, ObExecutionLeg] = [
+      { pair: pairA,      side: "buy",                       volume: mVolumeA, limitPrice: priceBuyA  },
+      cross.aIsQuote
+        ? { pair: cross.pair, side: "buy",  volume: mVolumeB, limitPrice: priceCross }
+        : { pair: cross.pair, side: "sell", volume: mVolumeA, limitPrice: priceCross },
+      { pair: pairB,      side: "sell",                      volume: mVolumeB, limitPrice: priceSellB },
+    ];
+    return { profitUsd: gross - feeUsd, slippagePct: 0, confidencePct: sim.confidencePct, legs, volumeA: mVolumeA, volumeB: mVolumeB };
+  }
 
   const legs: [ObExecutionLeg, ObExecutionLeg, ObExecutionLeg] = [
     { pair: pairA,      side: "buy",                      volume: volumeA, limitPrice: priceBuyA  },

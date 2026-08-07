@@ -301,11 +301,25 @@ async function runKrakenTriangle(input: TriangleExecInput, reqLog: ReqLog): Prom
     //    request's feesPct if the fee query fails (e.g. dry run with bad keys).
     const crossPair = CROSS_LOOKUP.get(`${assetA}-${assetB}`)?.pair;
     const feePairs = [OB_USD_PAIRS[assetA as ObAsset], OB_USD_PAIRS[assetB as ObAsset], crossPair].filter((p): p is string => !!p);
-    const actualFeePct = await krakenTakerFeePct(creds, feePairs);
+    // All three legs are submitted POST-ONLY (limit at best bid/ask), so the
+    // fee actually paid is the MAKER tier — the same tier the scanner uses in
+    // maker mode. Using the taker tier here caused scanner-vs-preflight fee
+    // mismatch (e.g. scan at 0.22% approving a route preflight rejected at 0.38%).
+    const tiers = await krakenFeeTiers(creds, feePairs);
+    const actualFeePct = tiers?.makerFeePct ?? tiers?.takerFeePct ?? null;
     const effectiveFeesPct = actualFeePct ?? feesPct;
+    const feeStyleNote = tiers?.makerFeePct != null
+      ? "verified maker tier — all 3 legs post-only"
+      : tiers != null
+        ? "verified taker tier — maker tier unavailable from Kraken"
+        : "assumed (fee query failed)";
 
     // 1. Fresh pre-flight (cache bypassed, depth 10)
-    const pf = await preflightObCycle(assetA as ObAsset, assetB as ObAsset, tradeSizeUsd, effectiveFeesPct);
+    // Price the pre-flight the way the orders actually execute: POST-ONLY
+    // limits at join prices (maker), not a taker depth-walk — otherwise the
+    // simulation understates the edge by the spread and rejects routes the
+    // maker scanner correctly approved.
+    const pf = await preflightObCycle(assetA as ObAsset, assetB as ObAsset, tradeSizeUsd, effectiveFeesPct, "maker");
     if (!pf) {
       return { body: { success: false, isDryRun, executed: false, route, preflightProfitUsd: null, error: "Could not fetch fresh order books (or depth can't absorb the size)." } };
     }
@@ -313,7 +327,7 @@ async function runKrakenTriangle(input: TriangleExecInput, reqLog: ReqLog): Prom
     // minProfitUsd floor (flat USD, not scaled by trade size).
     const threshold = minProfitUsd;
     if (pf.profitUsd <= threshold) {
-      return { body: { success: false, isDryRun, executed: false, route, preflightProfitUsd: pf.profitUsd, error: `Pre-flight failed — fresh profit after ${effectiveFeesPct.toFixed(2)}%/leg fees${actualFeePct != null ? " (your actual Kraken tier)" : ""} is $${pf.profitUsd.toFixed(4)} ≤ minimum $${threshold.toFixed(4)}.` } };
+      return { body: { success: false, isDryRun, executed: false, route, preflightProfitUsd: pf.profitUsd, error: `Pre-flight failed — fresh profit after ${effectiveFeesPct.toFixed(2)}%/leg fees (${feeStyleNote}) is $${pf.profitUsd.toFixed(4)} ≤ minimum $${threshold.toFixed(4)}.` } };
     }
 
     // 2. Dry run — record a ledger row, no orders
@@ -755,6 +769,22 @@ router.post("/arb/graph-execute", async (req, res): Promise<void> => {
     if (!route) {
       res.json({ success: false, isDryRun, executed: false, route: routeDescription ?? "(top route)", preflightProfitUsd: null, error: "Route no longer present in a fresh scan — prices moved." });
       return;
+    }
+    // 1b. Route-pair-specific fee check: the scan above used fee tiers queried
+    //     for BTC/ETH/SOL pairs. If this route's actual Kraken pairs carry a
+    //     HIGHER fee schedule, penalize the fresh net profit by the delta
+    //     (per Kraken leg, on notional) so the gate can't approve on an
+    //     understated fee. A lower route fee is left as safety margin.
+    let routeFeeAdjustedNetUsd = route.netProfitUsd;
+    const routeKrakenPairs = [...new Set(route.hops.filter(h => h.exchange === "kraken" && h.pair).map(h => h.pair!))];
+    if (routeKrakenPairs.length > 0) {
+      const routeTiers = await krakenFeeTiers({ krakenKey, krakenSecret }, routeKrakenPairs);
+      const routeFeePct = (executionStyle === "maker" ? routeTiers?.makerFeePct : routeTiers?.takerFeePct) ?? null;
+      if (routeFeePct != null && routeFeePct > effectiveKrakenFeesPct) {
+        const deltaUsd = ((routeFeePct - effectiveKrakenFeesPct) / 100) * tradeSizeUsd * routeKrakenPairs.length;
+        routeFeeAdjustedNetUsd -= deltaUsd;
+        req.log.info({ route: route.description, routeFeePct, effectiveKrakenFeesPct, deltaUsd }, "Route pairs carry a higher fee tier — net profit penalized");
+      }
     }
     // 2. ADAPTIVE gate: fresh net profit (already after real fees + depth
     //    slippage in taker mode) must also clear a residual slippage buffer —
