@@ -432,7 +432,7 @@ export default function Settings() {
                 max="2"
                 data-testid="input-ob-fees-pct"
                 value={localSettings.obFeesPct}
-                onChange={(e) => setLocalSettings({ ...localSettings, obFeesPct: parseFloat(e.target.value) || 0.4 })}
+                onChange={(e) => setLocalSettings({ ...localSettings, obFeesPct: parseFloat(e.target.value) || 0.16 })}
               />
             </div>
 

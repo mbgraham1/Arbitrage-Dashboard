@@ -195,7 +195,7 @@ router.get("/arb/scan", async (_req, res): Promise<void> => {
 //               volatilityFilter (default true)
 router.get("/arb/ob-scan", async (req, res): Promise<void> => {
   const tradeSizeUsd   = Math.max(1, parseFloat(String(req.query["tradeSizeUsd"]   ?? "10"))   || 10);
-  const feesPct        = Math.max(0, parseFloat(String(req.query["feesPct"]        ?? "0.4"))  || 0.4);
+  const feesPct        = Math.max(0, parseFloat(String(req.query["feesPct"]        ?? "0.26")) || 0.26);
   const minProfitUsd   = Math.max(0, parseFloat(String(req.query["minProfitUsd"]   ?? "0.02")) || 0.02);
   const maxSlippagePct = Math.max(0, parseFloat(String(req.query["maxSlippagePct"] ?? "0.4"))  || 0.4);
   const volatilityFilter = String(req.query["volatilityFilter"] ?? "true") !== "false";
@@ -290,24 +290,26 @@ router.post("/arb/ob-execute", async (req, res): Promise<void> => {
       catch { return { status: "unknown", volExec: 0, price: 0, cost: 0, fee: 0 }; }
     };
 
-    // Poll QueryOrders until closed; returns final info regardless of fill %.
+    // Poll QueryOrders until closed. Limit (post-only) orders may rest in the
+    // book a while; we poll for up to 90 s before cancelling and aborting.
+    const LIMIT_POLL_ITERS = 180; // 180 × 500ms = 90 s
     const waitFill = async (txid: string, label: string) => {
-      for (let i = 0; i < 12; i++) {
+      for (let i = 0; i < LIMIT_POLL_ITERS; i++) {
         await new Promise(r => setTimeout(r, 500));
         const info = await safeInfo(txid);
         if (info.status === "closed" || info.status === "canceled" || info.status === "expired") return info;
       }
-      await tryCancel(creds, txid, label, log); // timed out — stop it, then read final state
+      await tryCancel(creds, txid, label, log); // timed out — cancel, then read final state
       return safeInfo(txid);
     };
 
     let leg1Id = "", leg2Id = "", leg3Id = "";
     let usdSpent = 0, usdReceived = 0, totalFees = 0;
 
-    // ── Leg 1: buy A with USD. volExec = A acquired, cost = USD spent ────────
+    // ── Leg 1: buy A with USD. Post-only limit at best bid → maker fee ────────
     let aHeld = 0;
     try {
-      const r1 = await krakenRawMarketOrder(creds, l1.side, l1.volume, l1.pair);
+      const r1 = await krakenRawLimitOrder(creds, l1.side, l1.volume, l1.limitPrice, l1.pair);
       leg1Id = r1.txid[0] ?? "";
     } catch (e) {
       throw new Error(`Leg 1 failed (no order placed): ${(e as Error).message}`);
@@ -323,11 +325,11 @@ router.post("/arb/ob-execute", async (req, res): Promise<void> => {
       }
     }
 
-    // ── Leg 2: convert A → B on the cross pair ───────────────────────────────
-    const l2Volume = l2.volume * (aHeld / pf.volumeA); // scale plan to actual leg-1 fill
+    // ── Leg 2: convert A → B on cross. Post-only limit at best bid/ask ───────
+    const l2Volume = l2.volume * (aHeld / pf.volumeA); // scale to actual leg-1 fill
     let bHeld = 0;
     try {
-      const r2 = await krakenRawMarketOrder(creds, l2.side, l2Volume, l2.pair);
+      const r2 = await krakenRawLimitOrder(creds, l2.side, l2Volume, l2.limitPrice, l2.pair);
       leg2Id = r2.txid[0] ?? "";
     } catch (e) {
       // Order never placed — we hold all of A; sell it back.
@@ -356,9 +358,9 @@ router.post("/arb/ob-execute", async (req, res): Promise<void> => {
       }
     }
 
-    // ── Leg 3: sell B for USD ─────────────────────────────────────────────────
+    // ── Leg 3: sell B for USD. Post-only limit at best ask → maker fee ───────
     try {
-      const r3 = await krakenRawMarketOrder(creds, l3.side, bHeld, l3.pair);
+      const r3 = await krakenRawLimitOrder(creds, l3.side, bHeld, l3.limitPrice, l3.pair);
       leg3Id = r3.txid[0] ?? "";
     } catch (e) {
       await tryUnwindMarket(creds, "sell", bHeld, pairB, `sell ${assetB} (unwind after leg3 rejection)`, log);

@@ -125,7 +125,7 @@ const DEFAULT_SETTINGS: BotSettings = {
   maxPositionSol: 1.0,  // Kelly: hard cap per trade (SOL)
   enabledPairs: [...ALL_PAIRS], // all 10 pairs enabled by default
   obTradeSize: 10,      // v8: OB Hunter default $10 trade size
-  obFeesPct: 0.40,      // v8: OB Hunter default 0.40% fee per leg (Kraken base taker)
+  obFeesPct: 0.16,      // v8: OB Hunter default 0.16% fee per leg (Kraken post-only maker rate)
 };
 
 // Bump this when defaults change meaningfully — forces a one-time reset for existing users

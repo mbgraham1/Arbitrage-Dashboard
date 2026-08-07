@@ -415,8 +415,11 @@ function simulateCycle(
 
 // ── v18: manual execution pre-flight ─────────────────────────────────────────
 
-/** Execution plan for one leg: Kraken pair, side, and volume in the pair's BASE asset. */
-export interface ObExecutionLeg { pair: string; side: "buy" | "sell"; volume: number; }
+/**
+ * Execution plan for one leg: Kraken pair, side, volume in the pair's BASE
+ * asset, and maker limit price (best bid for buys, best ask for sells).
+ */
+export interface ObExecutionLeg { pair: string; side: "buy" | "sell"; volume: number; limitPrice: number; }
 
 export interface ObPreflightResult {
   profitUsd: number;
@@ -462,12 +465,21 @@ export async function preflightObCycle(
   const volumeA = sim.volA;
   const volumeB = sim.volA * sim.avg2; // B acquired in leg 2 (avg2 = B per A)
 
+  // Post-only limit prices: buys rest at best bid, sells rest at best ask.
+  // (Post-only order is rejected if it would cross the spread, so buy price
+  //  must be ≤ current best bid to queue as a maker — never at or above ask.)
+  const priceBuyA   = obA.bids[0]![0];   // leg 1: buy A — join top bid
+  const priceCross  = cross.aIsQuote
+    ? obX.bids[0]![0]                     // buy B on B/A cross — join top bid
+    : obX.asks[0]![0];                    // sell A on A/B cross — join top ask
+  const priceSellB  = obB.asks[0]![0];   // leg 3: sell B — join top ask
+
   const legs: [ObExecutionLeg, ObExecutionLeg, ObExecutionLeg] = [
-    { pair: pairA, side: "buy", volume: volumeA },
+    { pair: pairA,      side: "buy",                      volume: volumeA, limitPrice: priceBuyA  },
     cross.aIsQuote
-      ? { pair: cross.pair, side: "buy",  volume: volumeB }  // A is quote → buy base B
-      : { pair: cross.pair, side: "sell", volume: volumeA }, // A is base  → sell base A
-    { pair: pairB, side: "sell", volume: volumeB },
+      ? { pair: cross.pair, side: "buy",  volume: volumeB, limitPrice: priceCross }
+      : { pair: cross.pair, side: "sell", volume: volumeA, limitPrice: priceCross },
+    { pair: pairB,      side: "sell",                     volume: volumeB, limitPrice: priceSellB },
   ];
 
   return { profitUsd: sim.profitUsd, slippagePct: sim.slippagePct, confidencePct: sim.confidencePct, legs, volumeA, volumeB };
@@ -492,7 +504,7 @@ const SCALING_SIZES_USD = [10, 50, 100, 500, 1000];
 
 export async function scanOrderBookCycles(
   tradeSizeUsd   = 10,
-  feesPct        = 0.40, // per-leg taker %, Kraken base tier
+  feesPct        = 0.26, // per-leg fee %, Kraken standard taker (0.26%); use 0.16% for post-only maker
   minProfitUsd   = 0.02, // v18: min profit ($) at $10, scaled by size/10 for larger sizes
   maxSlippagePct = 0.50,
   volatilityFilter = true, // v17
