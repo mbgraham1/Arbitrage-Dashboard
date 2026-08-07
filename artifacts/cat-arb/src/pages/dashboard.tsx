@@ -590,8 +590,8 @@ const OB_STATUS_META: Record<string, { label: string; className: string }> = {
 };
 
 function OrderBookHunterCard() {
-  const { data, isLoading } = useGetObScan(10, 0.5, 0.01, 0.5, {
-    query: { queryKey: getObScanQueryKey(10, 0.5, 0.01, 0.5), refetchInterval: 5_000, staleTime: 4_000 },
+  const { data, isLoading } = useGetObScan(10, 0.5, 0.05, 0.5, {
+    query: { queryKey: getObScanQueryKey(10, 0.5, 0.05, 0.5), refetchInterval: 5_000, staleTime: 4_000 },
   });
 
   const cycles: ObCycleEntry[] = data?.cycles ?? [];
@@ -602,7 +602,7 @@ function OrderBookHunterCard() {
         <CardTitle className="text-sm flex items-center gap-2">
           <BookOpen className="h-4 w-4" /> Order Book Hunter
           <span className="text-[10px] font-mono text-muted-foreground font-normal">
-            v15 · Conservative · $10 · 30 cycles
+            v16 · Wide-Net · $10 · 10 assets · 90 routes
           </span>
           {data && data.readyCount > 0 && (
             <span className="text-[9px] font-mono font-bold px-1 border border-success text-success animate-pulse">

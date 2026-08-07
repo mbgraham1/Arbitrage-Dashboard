@@ -8,7 +8,7 @@
 
 // ── Asset definitions ─────────────────────────────────────────────────────────
 
-export const OB_ASSETS = ["BTC", "ETH", "SOL", "LINK", "ADA", "MATIC"] as const;
+export const OB_ASSETS = ["BTC", "ETH", "SOL", "LINK", "ADA", "MATIC", "DOGE", "AVAX", "XRP", "SUI"] as const;
 export type ObAsset = typeof OB_ASSETS[number];
 
 /** Kraken REST pair symbols for the USD leg of each asset. */
@@ -19,6 +19,10 @@ export const OB_USD_PAIRS: Record<ObAsset, string> = {
   LINK:  "LINKUSD",
   ADA:   "ADAUSD",
   MATIC: "MATICUSD",
+  DOGE:  "DOGEUSD",
+  AVAX:  "AVAXUSD",
+  XRP:   "XRPUSD",
+  SUI:   "SUIUSD",
 };
 
 /**
@@ -27,14 +31,20 @@ export const OB_USD_PAIRS: Record<ObAsset, string> = {
  * Bid side of this pair = "sell A, receive B" (B per A).
  */
 const OB_CROSS_MAP: Array<[ObAsset, ObAsset, string]> = [
+  // vs BTC (quote BTC, base = second asset) — all verified live on Kraken
   ["BTC",  "ETH",   "ETHXBT"],
   ["BTC",  "SOL",   "SOLXBT"],
   ["BTC",  "LINK",  "LINKXBT"],
   ["BTC",  "ADA",   "ADAXBT"],
-  ["BTC",  "MATIC", "MATICXBT"],
+  ["BTC",  "DOGE",  "DOGEXBT"],   // v16
+  ["BTC",  "XRP",   "XRPXBT"],    // v16
+  // vs ETH (quote ETH, base = second asset)
   ["ETH",  "SOL",   "SOLETH"],
   ["ETH",  "LINK",  "LINKETH"],
   ["ETH",  "ADA",   "ADAETH"],
+  ["ETH",  "XRP",   "XRPETH"],    // v16
+  // Other crosses (may not all exist on Kraken; missing books self-exclude)
+  ["BTC",  "MATIC", "MATICXBT"],
   ["ETH",  "MATIC", "MATICETH"],
   ["SOL",  "LINK",  "LINKSOL"],
   ["SOL",  "ADA",   "ADASOL"],
@@ -42,6 +52,9 @@ const OB_CROSS_MAP: Array<[ObAsset, ObAsset, string]> = [
   ["LINK", "ADA",   "ADALINK"],
   ["LINK", "MATIC", "MATICLINK"],
   ["ADA",  "MATIC", "MATICADA"],
+  // NOTE (v16): the Python guessed AVAXXBT / SUIXBT / DOGEETH / AVAXETH / SUIETH,
+  // but Kraken does not list them (verified 2026-08) — AVAX and SUI currently
+  // trade vs USD only, so they cannot form triangular cycles yet.
 ];
 
 /**
@@ -263,7 +276,7 @@ function simulateCycle(
 export async function scanOrderBookCycles(
   tradeSizeUsd   = 10,
   feesPct        = 0.50,
-  minProfitUsd   = 0.01,
+  minProfitUsd   = 0.05, // v16: wait for a real edge (> $0.05 on $10)
   maxSlippagePct = 0.50,
 ): Promise<ObScanResult> {
   // Deduplicated list of all pairs we need

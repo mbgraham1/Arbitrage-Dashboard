@@ -283,8 +283,8 @@ paths:
           schema: {type: number, default: 0.5}
         - name: minProfitUsd
           in: query
-          description: Minimum net profit ($) required for READY status (default 0.01)
-          schema: {type: number, default: 0.01}
+          description: Minimum net profit ($) required for READY status (default 0.05 — v16 "real edge")
+          schema: {type: number, default: 0.05}
         - name: maxSlippagePct
           in: query
           description: Maximum tolerated total slippage (%) for READY status (default 0.5)

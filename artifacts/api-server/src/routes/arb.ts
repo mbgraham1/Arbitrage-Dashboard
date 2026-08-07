@@ -181,7 +181,7 @@ router.get("/arb/scan", async (_req, res): Promise<void> => {
 router.get("/arb/ob-scan", async (req, res): Promise<void> => {
   const tradeSizeUsd   = Math.max(1, parseFloat(String(req.query["tradeSizeUsd"]   ?? "10"))   || 10);
   const feesPct        = Math.max(0, parseFloat(String(req.query["feesPct"]        ?? "0.5"))  || 0.5);
-  const minProfitUsd   = Math.max(0, parseFloat(String(req.query["minProfitUsd"]   ?? "0.01")) || 0.01);
+  const minProfitUsd   = Math.max(0, parseFloat(String(req.query["minProfitUsd"]   ?? "0.05")) || 0.05);
   const maxSlippagePct = Math.max(0, parseFloat(String(req.query["maxSlippagePct"] ?? "0.5"))  || 0.5);
   try {
     const result = await scanOrderBookCycles(tradeSizeUsd, feesPct, minProfitUsd, maxSlippagePct);
