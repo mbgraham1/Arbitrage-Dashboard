@@ -747,6 +747,9 @@ function MultiCoinRankerCard({ settings }: { settings: { totalFees: number; slip
 
 // ── Triangular Arb Card ────────────────────────────────────────────────────────
 
+/** Profit must be ≥ this fraction of trade size to execute without a warning (0.1%). */
+const THIN_EDGE_PCT = 0.001;
+
 // ── v15 Order Book Hunter Card (Conservative) ──────────────────────────────────
 const OB_STATUS_META: Record<string, { label: string; className: string }> = {
   READY:         { label: "✅ READY",         className: "text-success border-success" },
@@ -779,6 +782,7 @@ function OrderBookHunterCard() {
   const { credentials, liveMode, addLog, settings } = useBotContext();
   const executeMutation = useObExecute();
   const [execResult, setExecResult] = useState<string | null>(null);
+  const [thinEdgePending, setThinEdgePending] = useState(false);
   const [tradeSizeInput, setTradeSizeInput] = useState(String(settings.obTradeSize));
   // Debounce so we don't fire a Kraken scan on every keystroke (e.g. 10→1→100)
   const [debouncedSize, setDebouncedSize] = useState(String(settings.obTradeSize));
@@ -809,13 +813,9 @@ function OrderBookHunterCard() {
   const topBelowThreshold = !!topCycle && topCycle.estimatedProfitUsd <= minProfit;
   const canExecute = !!topCycle && !executeMutation.isPending;
 
-  const executeTopRoute = async () => {
+  const doExecuteObRoute = async () => {
     if (!topCycle) return;
-    if (!credentials.krakenKey || !credentials.krakenSecret) {
-      addLog("warning", "[OB·EXEC] Add Kraken credentials in Config first.");
-      setExecResult("❌ No Kraken credentials — add them in Config.");
-      return;
-    }
+    setThinEdgePending(false);
     setExecResult(null);
     addLog("trade", `[OB·EXEC] ${topCycle.route} | $${tradeSize} | ${liveMode ? "LIVE" : "dry run"} — pre-flight…`);
     try {
@@ -844,6 +844,22 @@ function OrderBookHunterCard() {
       addLog("error", `[OB·EXEC] Exception: ${msg}`);
       setExecResult(`❌ ${msg}`);
     }
+  };
+
+  const executeTopRoute = async () => {
+    if (!topCycle) return;
+    if (!credentials.krakenKey || !credentials.krakenSecret) {
+      addLog("warning", "[OB·EXEC] Add Kraken credentials in Config first.");
+      setExecResult("❌ No Kraken credentials — add them in Config.");
+      return;
+    }
+    // In live mode, warn when profit is below the thin-edge safety margin (< 0.1% of trade size).
+    // Dry runs bypass this gate so testing is frictionless.
+    if (liveMode && topCycle.estimatedProfitUsd < THIN_EDGE_PCT * tradeSize) {
+      setThinEdgePending(true);
+      return;
+    }
+    await doExecuteObRoute();
   };
 
   return (
@@ -910,6 +926,45 @@ function OrderBookHunterCard() {
         </div>
       </CardHeader>
       <CardContent className="px-0 pb-0">
+        {thinEdgePending && topCycle && (
+          <div className="px-3 py-3 border-b-2 border-amber-500 bg-amber-500/10 flex flex-col gap-2">
+            <div className="flex items-center gap-2 text-amber-500 font-bold text-[11px] font-mono uppercase">
+              ⚠ Thin Edge — Confirm Live Execution
+            </div>
+            <div className="grid grid-cols-3 gap-x-4 gap-y-0.5 text-[10px] font-mono">
+              <span className="text-muted-foreground">Expected profit</span>
+              <span className="text-muted-foreground">Trade size</span>
+              <span className="text-muted-foreground">Break-even move</span>
+              <span className="font-bold text-amber-500">${topCycle.estimatedProfitUsd.toFixed(4)}</span>
+              <span className="font-bold">${tradeSize.toFixed(2)}</span>
+              <span className="font-bold text-destructive">
+                {((topCycle.estimatedProfitUsd / tradeSize) * 100).toFixed(3)}% of price
+              </span>
+            </div>
+            <p className="text-[10px] font-mono text-muted-foreground">
+              A {((topCycle.estimatedProfitUsd / tradeSize) * 100).toFixed(3)}% adverse price move or worse fill will erase this profit before orders settle.
+            </p>
+            <div className="flex gap-2">
+              <Button
+                size="sm"
+                variant="destructive"
+                className="h-6 px-3 text-[10px] font-mono font-bold"
+                onClick={doExecuteObRoute}
+                disabled={executeMutation.isPending}
+              >
+                {executeMutation.isPending ? "EXECUTING…" : "⚡ CONFIRM LIVE EXECUTE"}
+              </Button>
+              <Button
+                size="sm"
+                variant="outline"
+                className="h-6 px-3 text-[10px] font-mono"
+                onClick={() => setThinEdgePending(false)}
+              >
+                Cancel
+              </Button>
+            </div>
+          </div>
+        )}
         {execResult && (
           <div className={cn("px-3 py-2 text-[11px] font-mono border-b border-border/50", execResult.startsWith("✅") ? "text-success" : "text-destructive")}>
             {execResult}
@@ -1185,6 +1240,7 @@ function GraphEngineCard() {
   const { settings, credentials, liveMode, addLog } = useBotContext();
   const executeMutation = useGraphExecute();
   const [execResult, setExecResult] = useState<string | null>(null);
+  const [thinEdgePending, setThinEdgePending] = useState(false);
   const [minProfitInput, setMinProfitInput] = useState("0.10");
   const minProfit = Math.max(0, parseFloat(minProfitInput) || 0);
   const [sizeInput, setSizeInput] = useState(String(settings.obTradeSize));
@@ -1226,15 +1282,11 @@ function GraphEngineCard() {
   // next render, so a rapid auto-fire + manual click could otherwise both
   // pass the check and submit two executions.
   const execInFlight = useRef(false);
-  const executeTopRoute = async () => {
+  const doExecuteGraphRoute = async () => {
     if (!topRoute) return;
     if (execInFlight.current) return;
-    if (!credentials.krakenKey || !credentials.krakenSecret) {
-      addLog("warning", "[GRAPH·EXEC] Add Kraken credentials in Config first.");
-      setExecResult("❌ No Kraken credentials — add them in Config.");
-      return;
-    }
     execInFlight.current = true;
+    setThinEdgePending(false);
     setExecResult(null);
     addLog("trade", `[GRAPH·EXEC] ${topRoute.description} | $${tradeSize} | ${liveMode ? "LIVE" : "dry run"} — pre-flight…`);
     try {
@@ -1277,9 +1329,27 @@ function GraphEngineCard() {
     }
   };
 
+  const executeTopRoute = async () => {
+    if (!topRoute) return;
+    if (!credentials.krakenKey || !credentials.krakenSecret) {
+      addLog("warning", "[GRAPH·EXEC] Add Kraken credentials in Config first.");
+      setExecResult("❌ No Kraken credentials — add them in Config.");
+      return;
+    }
+    // In live mode, warn when profit is below the thin-edge safety margin (< 0.1% of trade size).
+    // Dry runs and AUTO (which calls doExecuteGraphRoute directly) bypass this gate.
+    if (liveMode && topRoute.netProfitUsd < THIN_EDGE_PCT * tradeSize) {
+      setThinEdgePending(true);
+      return;
+    }
+    await doExecuteGraphRoute();
+  };
+
   // ── Auto-execution loop ────────────────────────────────────────────────────
-  // When armed, fires executeTopRoute whenever a fresh scan shows a top route
-  // whose net edge (already after fees + slippage) clears the profit floor.
+  // When armed, fires doExecuteGraphRoute (bypasses thin-edge confirm) since
+  // AUTO already gates on minProfit and the user armed it knowingly.
+  // The server re-validates everything (fresh scan, slippage buffer, feedback
+  // -loop history) before any order — this loop only saves the button click.
   // The server re-validates everything (fresh scan, slippage buffer, feedback
   // -loop history) before any order — this loop only saves the button click.
   const [autoArmed, setAutoArmed] = useState(false);
@@ -1318,8 +1388,9 @@ function GraphEngineCard() {
     : r.netProfitUsd <= 0 ? "Fees exceed gross edge"
     : r.netProfitUsd <= minProfit ? `Edge below your $${minProfit.toFixed(2)} min-profit floor`
     : null;
-  const executeRef = useRef(executeTopRoute);
-  executeRef.current = executeTopRoute;
+  // AUTO calls doExecuteGraphRoute directly so it never triggers the thin-edge confirm dialog.
+  const executeRef = useRef(doExecuteGraphRoute);
+  executeRef.current = doExecuteGraphRoute;
   useEffect(() => {
     if (!autoArmed || !topRoute || executeMutation.isPending) return;
     if (topRoute.netProfitUsd <= minProfit) return;
@@ -1414,6 +1485,45 @@ function GraphEngineCard() {
         </div>
       </CardHeader>
 
+      {thinEdgePending && topRoute && (
+        <div className="px-3 py-3 border-b-2 border-amber-500 bg-amber-500/10 flex flex-col gap-2">
+          <div className="flex items-center gap-2 text-amber-500 font-bold text-[11px] font-mono uppercase">
+            ⚠ Thin Edge — Confirm Live Execution
+          </div>
+          <div className="grid grid-cols-3 gap-x-4 gap-y-0.5 text-[10px] font-mono">
+            <span className="text-muted-foreground">Expected profit</span>
+            <span className="text-muted-foreground">Trade size</span>
+            <span className="text-muted-foreground">Break-even move</span>
+            <span className="font-bold text-amber-500">${topRoute.netProfitUsd.toFixed(4)}</span>
+            <span className="font-bold">${tradeSize.toFixed(2)}</span>
+            <span className="font-bold text-destructive">
+              {((topRoute.netProfitUsd / tradeSize) * 100).toFixed(3)}% of price
+            </span>
+          </div>
+          <p className="text-[10px] font-mono text-muted-foreground">
+            A {((topRoute.netProfitUsd / tradeSize) * 100).toFixed(3)}% adverse price move or worse fill will erase this profit before orders settle.
+          </p>
+          <div className="flex gap-2">
+            <Button
+              size="sm"
+              variant="destructive"
+              className="h-6 px-3 text-[10px] font-mono font-bold"
+              onClick={doExecuteGraphRoute}
+              disabled={executeMutation.isPending}
+            >
+              {executeMutation.isPending ? "EXECUTING…" : "⚡ CONFIRM LIVE EXECUTE"}
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              className="h-6 px-3 text-[10px] font-mono"
+              onClick={() => setThinEdgePending(false)}
+            >
+              Cancel
+            </Button>
+          </div>
+        </div>
+      )}
       {execResult && (
         <div className={cn("px-3 py-2 text-[11px] font-mono border-b border-border/50", execResult.startsWith("✅") ? "text-success" : "text-destructive")}>
           {execResult}
