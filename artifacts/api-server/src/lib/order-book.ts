@@ -3,7 +3,7 @@
  *
  * Fetches L2 order book depth from Kraken public Depth API and walks the book
  * level-by-level to get realistic average fill prices at a given trade size.
- * v17: 21 assets (420 A×B permutations), volatility filter (24h change),
+ * v17+: 34 assets (A×B permutations), volatility filter (24h change),
  * per-cycle confidence score (top-of-book liquidity coverage).
  *
  * Pairs below are the FULL verified set from Kraken /0/public/AssetPairs
@@ -18,6 +18,9 @@
 export const OB_ASSETS = [
   "BTC", "ETH", "SOL", "XRP", "LINK", "DOGE", "AVAX", "SUI", "LTC", "ADA",
   "DOT", "UNI", "AAVE", "NEAR", "ATOM", "HBAR", "TON", "BCH", "FIL", "ARB", "OP",
+  "PEPE", "WIF", "BONK", "INJ", "SEI", "APT", "LDO", "FET", "RNDR",
+  "TAO", "GALA", "BEAM", "JUP",
+  // MKR intentionally excluded — Kraken has no MKR pairs anymore (Maker→SKY migration)
 ] as const;
 export type ObAsset = typeof OB_ASSETS[number];
 
@@ -44,6 +47,19 @@ export const OB_USD_PAIRS: Record<ObAsset, string> = {
   FIL:  "FILUSD",
   ARB:  "ARBUSD",
   OP:   "OPUSD",
+  PEPE: "PEPEUSD",
+  WIF:  "WIFUSD",
+  BONK: "BONKUSD",
+  INJ:  "INJUSD",
+  SEI:  "SEIUSD",
+  APT:  "APTUSD",
+  LDO:  "LDOUSD",
+  FET:  "FETUSD",
+  RNDR: "RENDERUSD", // Kraken renamed the asset RNDR→RENDER
+  TAO:  "TAOUSD",
+  GALA: "GALAUSD",
+  BEAM: "BEAMUSD",
+  JUP:  "JUPUSD",
 };
 
 /**
@@ -395,7 +411,7 @@ const VOLATILITY_MIN_ASSETS    = 3;   // v17: fallback to all assets below this
 
 /**
  * Port of Python v17 main loop: fetches all order books in parallel and
- * simulates all A × B permutations across 21 assets (up to 420 routes;
+ * simulates all A × B permutations across 34 assets (only routes
  * only routes with a real Kraken cross pair are simulatable).
  * v17: optional volatility filter — only assets that moved >1.5% in 24h are
  * scanned (falls back to ALL assets when fewer than 3 qualify).

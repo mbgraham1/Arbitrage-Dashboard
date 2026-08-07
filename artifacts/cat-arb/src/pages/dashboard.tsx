@@ -614,7 +614,7 @@ function OrderBookHunterCard() {
         <CardTitle className="text-sm flex items-center gap-2">
           <BookOpen className="h-4 w-4" /> Order Book Hunter
           <span className="text-[10px] font-mono text-muted-foreground font-normal">
-            v18 · Scaling Analyzer · 21 assets
+            v18 · Scaling Analyzer · 34 assets
           </span>
           <span className="flex items-center gap-1 text-[10px] font-mono font-normal text-muted-foreground">
             $<input
@@ -735,7 +735,7 @@ function OrderBookHunterCard() {
             )}
             {data && (
               <div className="px-3 py-2 text-[10px] font-mono text-muted-foreground border-t border-border/50">
-                Trade size: ${data.tradeSizeUsd} · Fees: {data.feesPct}% · Min profit: ${data.minProfitUsd} (×size/10) · Max slippage: {data.maxSlippagePct}% · Volatility filter: {data.volatilityFilter ? `on (${data.activeAssets.length}/21 moving)` : "off"} · Scanned: {format(new Date(data.scannedAt), "HH:mm:ss")}
+                Trade size: ${data.tradeSizeUsd} · Fees: {data.feesPct}% · Min profit: ${data.minProfitUsd} (×size/10) · Max slippage: {data.maxSlippagePct}% · Volatility filter: {data.volatilityFilter ? `on (${data.activeAssets.length}/34 moving)` : "off"} · Scanned: {format(new Date(data.scannedAt), "HH:mm:ss")}
               </div>
             )}
           </div>

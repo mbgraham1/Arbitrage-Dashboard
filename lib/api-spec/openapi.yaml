@@ -264,14 +264,14 @@ paths:
     get:
       operationId: getObScan
       tags: [arb]
-      summary: Scan triangular cycles across 21 assets using L2 order book depth (v18 port)
+      summary: Scan triangular cycles across 34 assets using L2 order book depth (v18 port)
       description: >
         Port of Python v18 "Scaling Analyzer" (v17 wide-net scan plus a scaling
         table — the top-ranked route is re-simulated at $10/$50/$100/$500/$1,000
         with VIABLE / HIGH_SLIPPAGE / REJECTED statuses; the min-profit threshold
         scales with size/10). Fetches Kraken Depth API for all
         required pairs in parallel, then walks the book for each A→B permutation
-        of 21 assets (up to 420 routes; only routes with a real Kraken cross pair
+        of 34 assets (only routes with a real Kraken cross pair
         are simulatable) to compute realistic fill prices at the given trade size.
         An optional volatility filter restricts the scan to assets that moved more
         than 1.5% in 24h (falls back to all assets when fewer than 3 qualify).

@@ -173,7 +173,7 @@ router.get("/arb/scan", async (_req, res): Promise<void> => {
 });
 
 // ── GET /arb/ob-scan ──────────────────────────────────────────────────────────
-// Port of Python v18 "Scaling Analyzer" (21 assets; top route re-simulated at
+// Port of Python v18 "Scaling Analyzer" (34 assets; top route re-simulated at
 // $10/$50/$100/$500/$1,000 with VIABLE / HIGH_SLIPPAGE / REJECTED statuses).
 // Fetches L2 depth from Kraken, walks the book for all simulatable cycles,
 // classifies each READY / HIGH_SLIPPAGE / LOW_PROFIT and scores liquidity

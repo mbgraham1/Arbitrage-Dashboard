@@ -636,7 +636,7 @@ export const getScanCointegrationArbUrl = () => {
 
 
 // ── /arb/ob-scan ─────────────────────────────────────────────────────────────
-// Port of Python v17 "420-Route Hunter" — walks L2 depth across 21 assets,
+// Port of Python v17 "420-Route Hunter" — walks L2 depth across 34 assets,
 // classifies each cycle READY / HIGH_SLIPPAGE / LOW_PROFIT, scores liquidity
 // confidence, with an optional 24h volatility filter.
 
@@ -653,9 +653,9 @@ export const getObScanUrl = (tradeSizeUsd?: number, feesPct?: number, minProfitU
 
 /**
  * Fetches the v17 order book hunter scan — all simulatable triangular cycles
- * across 21 assets, simulated using actual L2 depth from Kraken, with
+ * across 34 assets, simulated using actual L2 depth from Kraken, with
  * slippage, confidence, status classification, and optional volatility filter.
- * @summary Scan triangular cycles across 21 assets using L2 order book depth (v17)
+ * @summary Scan triangular cycles across 34 assets using L2 order book depth (v17)
  */
 export const getObScan = async (
   tradeSizeUsd?: number,
@@ -692,7 +692,7 @@ export type GetObScanQueryResult = NonNullable<Awaited<ReturnType<typeof getObSc
 export type GetObScanQueryError = ErrorType<ErrorResponse>;
 
 /**
- * @summary Scan triangular cycles across 21 assets using L2 order book depth (v17 port)
+ * @summary Scan triangular cycles across 34 assets using L2 order book depth (v17 port)
  */
 export const useGetObScan = <
   TData = Awaited<ReturnType<typeof getObScan>>,

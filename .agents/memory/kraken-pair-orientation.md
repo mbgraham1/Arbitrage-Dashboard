@@ -17,3 +17,8 @@ suffix heuristics. Also: Ticker field "p" is VWAP, NOT 24h change — the Python
 bots misuse it; compute change as (c[0]−o)/o. Verify pair existence via
 /0/public/AssetPairs (gives authoritative base/quote) instead of guessing
 symbol names like the Python versions do.
+
+## Listing changes seen live (2026-08)
+- MKR has NO Kraken pairs anymore (Maker→SKY migration) — excluded from OB_ASSETS.
+- RNDR renamed: USD pair altname is RENDERUSD (asset symbol kept as RNDR in our code).
+- New-gen listings (PEPE, WIF, BONK, INJ, SEI, APT, LDO, FET, TAO, GALA, BEAM, JUP) have USD pairs only — no BTC/ETH crosses, so they cannot form triangular routes; they only widen ticker/volatility coverage.
