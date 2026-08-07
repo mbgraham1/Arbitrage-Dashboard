@@ -87,14 +87,54 @@ export interface GraphRoute {
   status: "VIABLE" | "REJECTED";
 }
 
+export type ExecutionStyle = "taker" | "maker";
+
 export interface GraphScanResult {
   routes: GraphRoute[];
   tradeSizeUsd: number;
   krakenFeesPct: number;
   coinbaseFeesPct: number;
+  /** Fee model applied to Kraken legs: taker (market, depth-walked) or maker (post-only join) */
+  executionStyle: ExecutionStyle;
   assetsScanned: number;
   routesEvaluated: number;
   scannedAt: string;
+}
+
+// ── Depth-aware pricing ───────────────────────────────────────────────────────
+
+type BookLevels = [number, number][];
+
+/**
+ * Walk ask levels spending `quoteAmount`; returns the volume-weighted average
+ * price actually paid, or null when the visible book CANNOT absorb the full
+ * size — a partial-depth VWAP applied to the whole trade would overstate the
+ * fillable edge, so insufficient depth invalidates the edge entirely.
+ */
+function vwapBuy(asks: BookLevels, quoteAmount: number): number | null {
+  let spent = 0, acquired = 0;
+  for (const [price, qty] of asks) {
+    const levelQuote = price * qty;
+    const take = Math.min(levelQuote, quoteAmount - spent);
+    spent += take;
+    acquired += take / price;
+    if (spent >= quoteAmount - 1e-12) break;
+  }
+  if (spent < quoteAmount - 1e-9) return null; // book too thin for this size
+  return acquired > 0 ? spent / acquired : null;
+}
+
+/** Walk bid levels selling `baseAmount`; VWAP received, or null if too thin. */
+function vwapSell(bids: BookLevels, baseAmount: number): number | null {
+  let sold = 0, received = 0;
+  for (const [price, qty] of bids) {
+    const take = Math.min(qty, baseAmount - sold);
+    sold += take;
+    received += take * price;
+    if (sold >= baseAmount - 1e-12) break;
+  }
+  if (sold < baseAmount - 1e-9) return null; // book too thin for this size
+  return sold > 0 ? received / sold : null;
 }
 
 // ── Node label helper ─────────────────────────────────────────────────────────
@@ -110,7 +150,10 @@ function nodeLabel(node: GraphNode): string {
 async function buildGraph(
   krakenFeesPct: number,
   coinbaseFeesPct: number,
+  tradeSizeUsd: number,
+  executionStyle: ExecutionStyle,
 ): Promise<Map<GraphNode, GraphEdge[]>> {
+  const maker = executionStyle === "maker";
   const graph = new Map<GraphNode, GraphEdge[]>();
 
   const add = (from: GraphNode, edge: GraphEdge) => {
@@ -154,23 +197,50 @@ async function buildGraph(
     const bestBid = book.bids[0]?.[0] ?? 0;
     if (!bestAsk || !bestBid) continue;
 
-    // USD → Asset: buy asset with USD (walk asks)
-    const buyGross = 1 / bestAsk;
-    add("kraken:USD", {
-      to: `kraken:${asset}`, exchange: "kraken",
-      pair: OB_USD_PAIRS[asset], side: "buy",
-      grossRate: buyGross, netRate: buyGross * (1 - krakenFeesPct / 100),
-      feePct: krakenFeesPct, slippagePct: 0, limitPrice: bestBid, // post-only buys join best bid
-    });
+    if (maker) {
+      // Maker: post-only join — buy at best BID, sell at best ASK. Better
+      // prices + maker fee, but fills are not guaranteed. No depth slippage.
+      const buyGross = 1 / bestBid;
+      add("kraken:USD", {
+        to: `kraken:${asset}`, exchange: "kraken",
+        pair: OB_USD_PAIRS[asset], side: "buy",
+        grossRate: buyGross, netRate: buyGross * (1 - krakenFeesPct / 100),
+        feePct: krakenFeesPct, slippagePct: 0, limitPrice: bestBid,
+      });
+      const sellGross = bestAsk;
+      add(`kraken:${asset}`, {
+        to: "kraken:USD", exchange: "kraken",
+        pair: OB_USD_PAIRS[asset], side: "sell",
+        grossRate: sellGross, netRate: sellGross * (1 - krakenFeesPct / 100),
+        feePct: krakenFeesPct, slippagePct: 0, limitPrice: bestAsk,
+      });
+    } else {
+      // Taker: DEPTH-WALKED effective prices for the actual trade size, with
+      // per-edge slippage = drift of the VWAP vs top-of-book. If the visible
+      // book can't absorb the size, the edge is DROPPED (not approximated).
+      const buyVwap  = vwapBuy(book.asks, tradeSizeUsd);
+      const sellVwap = vwapSell(book.bids, tradeSizeUsd / bestBid);
 
-    // Asset → USD: sell asset for USD (walk bids)
-    const sellGross = bestBid;
-    add(`kraken:${asset}`, {
-      to: "kraken:USD", exchange: "kraken",
-      pair: OB_USD_PAIRS[asset], side: "sell",
-      grossRate: sellGross, netRate: sellGross * (1 - krakenFeesPct / 100),
-      feePct: krakenFeesPct, slippagePct: 0, limitPrice: bestAsk, // post-only sells join best ask
-    });
+      if (buyVwap != null) {
+        const buySlip  = ((buyVwap - bestAsk) / bestAsk) * 100;
+        const buyGross = 1 / buyVwap;
+        add("kraken:USD", {
+          to: `kraken:${asset}`, exchange: "kraken",
+          pair: OB_USD_PAIRS[asset], side: "buy",
+          grossRate: buyGross, netRate: buyGross * (1 - krakenFeesPct / 100),
+          feePct: krakenFeesPct, slippagePct: Math.max(0, buySlip), limitPrice: bestBid,
+        });
+      }
+      if (sellVwap != null) {
+        const sellSlip = ((bestBid - sellVwap) / bestBid) * 100;
+        add(`kraken:${asset}`, {
+          to: "kraken:USD", exchange: "kraken",
+          pair: OB_USD_PAIRS[asset], side: "sell",
+          grossRate: sellVwap, netRate: sellVwap * (1 - krakenFeesPct / 100),
+          feePct: krakenFeesPct, slippagePct: Math.max(0, sellSlip), limitPrice: bestAsk,
+        });
+      }
+    }
   }
 
   // ── Kraken cross-pair edges ───────────────────────────────────────────────
@@ -184,25 +254,37 @@ async function buildGraph(
     const bestBid = book.bids[0]?.[0] ?? 0;
     if (!bestAsk || !bestBid) continue;
 
+    // Approximate the from-asset amount this leg will carry (≈ tradeSizeUsd
+    // worth) so the depth walk uses realistic size.
+    const fromUsdBook = krakenBooks.get(fromAsset);
+    const fromUsdMid  = fromUsdBook ? ((fromUsdBook.asks[0]?.[0] ?? 0) + (fromUsdBook.bids[0]?.[0] ?? 0)) / 2 : 0;
+    const fromAmount  = fromUsdMid > 0 ? tradeSizeUsd / fromUsdMid : 0;
+
     if (cross.aIsQuote) {
       // fromAsset is quote, toAsset is base. Going from→to BUYs the base.
-      // Rate: 1/ask (base units per quote unit)
-      const grossRate = 1 / bestAsk;
+      const effAsk = maker ? bestBid
+        : (fromAmount > 0 ? vwapBuy(book.asks, fromAmount) : null);
+      if (effAsk == null) continue; // book too thin for this size — drop edge
+      const slip = maker ? 0 : ((effAsk - bestAsk) / bestAsk) * 100;
+      const grossRate = 1 / effAsk;
       add(`kraken:${fromAsset}`, {
         to: `kraken:${toAsset}`, exchange: "kraken",
         pair: cross.pair, side: "buy",
         grossRate, netRate: grossRate * (1 - krakenFeesPct / 100),
-        feePct: krakenFeesPct, slippagePct: 0, limitPrice: bestBid,
+        feePct: krakenFeesPct, slippagePct: Math.max(0, slip), limitPrice: bestBid,
       });
     } else {
       // fromAsset is base, toAsset is quote. Going from→to SELLs the base.
-      // Rate: bid (quote units per base unit)
-      const grossRate = bestBid;
+      const effBid = maker ? bestAsk
+        : (fromAmount > 0 ? vwapSell(book.bids, fromAmount) : null);
+      if (effBid == null) continue; // book too thin for this size — drop edge
+      const slip = maker ? 0 : ((bestBid - effBid) / bestBid) * 100;
+      const grossRate = effBid;
       add(`kraken:${fromAsset}`, {
         to: `kraken:${toAsset}`, exchange: "kraken",
         pair: cross.pair, side: "sell",
         grossRate, netRate: grossRate * (1 - krakenFeesPct / 100),
-        feePct: krakenFeesPct, slippagePct: 0, limitPrice: bestAsk,
+        feePct: krakenFeesPct, slippagePct: Math.max(0, slip), limitPrice: bestAsk,
       });
     }
   }
@@ -352,8 +434,9 @@ export async function scanGraphOpportunities(
   krakenFeesPct: number,
   coinbaseFeesPct: number,
   maxHops = 4,
+  executionStyle: ExecutionStyle = "taker",
 ): Promise<GraphScanResult> {
-  const graph = await buildGraph(krakenFeesPct, coinbaseFeesPct);
+  const graph = await buildGraph(krakenFeesPct, coinbaseFeesPct, tradeSizeUsd, executionStyle);
 
   // Search from both USD nodes so we find cross-exchange cycles that begin on
   // either Kraken or Coinbase (e.g. USD[CB]→BTC[CB]→BTC[K]→USD[K]).
@@ -381,6 +464,7 @@ export async function scanGraphOpportunities(
     tradeSizeUsd,
     krakenFeesPct,
     coinbaseFeesPct,
+    executionStyle,
     assetsScanned,
     routesEvaluated: allRoutes.length,
     scannedAt: new Date().toISOString(),

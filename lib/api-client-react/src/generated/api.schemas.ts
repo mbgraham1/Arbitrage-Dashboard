@@ -260,6 +260,8 @@ export interface GraphScanResult {
   tradeSizeUsd: number;
   krakenFeesPct: number;
   coinbaseFeesPct: number;
+  /** Fee model applied to Kraken legs */
+  executionStyle: "taker" | "maker";
   assetsScanned: number;
   routesEvaluated: number;
   scannedAt: string;
@@ -383,6 +385,8 @@ export interface FeeTierRequest {
 export interface FeeTierResult {
   /** Actual taker fee percent per leg, or null if the lookup failed */
   takerFeePct: number | null;
+  /** Actual maker (post-only) fee percent per leg, or null if unavailable */
+  makerFeePct: number | null;
   source: "account" | "unavailable";
 }
 
@@ -398,6 +402,8 @@ export interface GraphExecuteRequest {
   coinbaseFeesPct?: number;
   minProfitUsd?: number;
   isDryRun?: boolean;
+  /** Kraken legs: taker (market) or maker (post-only limit, no fill guarantee) */
+  executionStyle?: "taker" | "maker";
 }
 
 export interface GraphExecuteResult {
@@ -542,6 +548,7 @@ export type GetGraphScanParams = {
   krakenFeesPct?: number;
   coinbaseFeesPct?: number;
   maxHops?: number;
+  executionStyle?: "taker" | "maker";
 };
 
 export type GetObScanParams = {

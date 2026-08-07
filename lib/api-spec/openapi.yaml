@@ -434,6 +434,7 @@ paths:
         - { name: krakenFeesPct,   in: query, schema: { type: number, default: 0.16 } }
         - { name: coinbaseFeesPct, in: query, schema: { type: number, default: 0.4 } }
         - { name: maxHops,         in: query, schema: { type: integer, default: 4 } }
+        - { name: executionStyle,  in: query, schema: { type: string, enum: [taker, maker], default: taker } }
       responses:
         "200":
           description: Ranked routes
@@ -999,9 +1000,10 @@ components:
 
     FeeTierResult:
       type: object
-      required: [takerFeePct, source]
+      required: [takerFeePct, makerFeePct, source]
       properties:
         takerFeePct: { type: number, nullable: true }
+        makerFeePct: { type: number, nullable: true }
         source: { type: string, enum: [account, unavailable] }
 
     GraphRouteHop:
@@ -1036,8 +1038,9 @@ components:
 
     GraphScanResult:
       type: object
-      required: [routes, tradeSizeUsd, krakenFeesPct, coinbaseFeesPct, assetsScanned, routesEvaluated, scannedAt]
+      required: [routes, tradeSizeUsd, krakenFeesPct, coinbaseFeesPct, executionStyle, assetsScanned, routesEvaluated, scannedAt]
       properties:
+        executionStyle: { type: string, enum: [taker, maker] }
         routes:
           type: array
           items: { $ref: "#/components/schemas/GraphRoute" }
@@ -1064,6 +1067,7 @@ components:
         coinbaseFeesPct: { type: number, default: 0.4 }
         minProfitUsd: { type: number, default: 0.02 }
         isDryRun: { type: boolean, default: true }
+        executionStyle: { type: string, enum: [taker, maker], default: taker }
 
     GraphExecuteResult:
       type: object

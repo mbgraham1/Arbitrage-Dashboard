@@ -1248,6 +1248,7 @@ export const getGraphScanUrl = (params?: GetGraphScanParams) => {
   if (params?.krakenFeesPct   != null) p.set("krakenFeesPct",   String(params.krakenFeesPct));
   if (params?.coinbaseFeesPct != null) p.set("coinbaseFeesPct", String(params.coinbaseFeesPct));
   if (params?.maxHops         != null) p.set("maxHops",         String(params.maxHops));
+  if (params?.executionStyle  != null) p.set("executionStyle",  params.executionStyle);
   const qs = p.toString();
   return `/api/arb/graph-scan${qs ? `?${qs}` : ""}`;
 };
@@ -1256,7 +1257,7 @@ export const getGraphScan = async (params?: GetGraphScanParams, options?: Reques
   customFetch<GraphScanResult>(getGraphScanUrl(params), { ...options, method: "GET" });
 
 export const getGetGraphScanQueryKey = (params?: GetGraphScanParams) =>
-  ["/api/arb/graph-scan", params?.tradeSizeUsd, params?.krakenFeesPct, params?.coinbaseFeesPct, params?.maxHops] as const;
+  ["/api/arb/graph-scan", params?.tradeSizeUsd, params?.krakenFeesPct, params?.coinbaseFeesPct, params?.maxHops, params?.executionStyle] as const;
 
 export const getGetGraphScanQueryOptions = <TData = Awaited<ReturnType<typeof getGraphScan>>, TError = ErrorType<unknown>>(
   params?: GetGraphScanParams,

@@ -109,6 +109,7 @@ export const FeeTierBody = zod.object({
 
 export const FeeTierResponse = zod.object({
   "takerFeePct": zod.number().nullable(),
+  "makerFeePct": zod.number().nullable(),
   "source": zod.enum(["account", "unavailable"])
 })
 
@@ -383,7 +384,8 @@ export const GraphExecuteBody = zod.object({
   "krakenFeesPct": zod.number().default(0.16),
   "coinbaseFeesPct": zod.number().default(0.4),
   "minProfitUsd": zod.number().default(0.02),
-  "isDryRun": zod.boolean().default(graphExecuteBodyIsDryRunDefault)
+  "isDryRun": zod.boolean().default(graphExecuteBodyIsDryRunDefault),
+  "executionStyle": zod.enum(["taker", "maker"]).optional()
 })
 
 export const GraphExecuteResponse = zod.object({

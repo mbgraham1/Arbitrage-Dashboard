@@ -234,12 +234,27 @@ export async function krakenOrderInfo(
  * the query fails or returns nothing.
  */
 export async function krakenTakerFeePct(creds: KrakenCreds, rawPairs: string[]): Promise<number | null> {
+  return (await krakenFeeTiers(creds, rawPairs))?.takerFeePct ?? null;
+}
+
+/**
+ * Actual taker AND maker fees (percent) from the account's real fee tier
+ * (/0/private/TradeVolume; `fees` = taker schedule, `fees_maker` = maker).
+ * MAX across pairs; null if the query fails or returns nothing.
+ */
+export async function krakenFeeTiers(creds: KrakenCreds, rawPairs: string[]): Promise<{ takerFeePct: number; makerFeePct: number | null } | null> {
   try {
-    const result = await krakenPrivateRequest<{ fees?: Record<string, { fee?: string }> }>(
-      "/0/private/TradeVolume", { pair: rawPairs.join(",") }, creds);
-    const fees = Object.values(result.fees ?? {})
-      .map(f => parseFloat(f.fee ?? "")).filter(f => Number.isFinite(f) && f > 0);
-    return fees.length > 0 ? Math.max(...fees) : null;
+    const result = await krakenPrivateRequest<{
+      fees?: Record<string, { fee?: string }>;
+      fees_maker?: Record<string, { fee?: string }>;
+    }>("/0/private/TradeVolume", { pair: rawPairs.join(","), "fee-info": "true" }, creds);
+    const pick = (rec?: Record<string, { fee?: string }>) => {
+      const v = Object.values(rec ?? {}).map(f => parseFloat(f.fee ?? "")).filter(f => Number.isFinite(f) && f > 0);
+      return v.length > 0 ? Math.max(...v) : null;
+    };
+    const taker = pick(result.fees);
+    const maker = pick(result.fees_maker);
+    return taker != null ? { takerFeePct: taker, makerFeePct: maker } : null;
   } catch {
     return null;
   }

@@ -23,6 +23,7 @@ import {
   krakenOrderFilled,
   krakenOrderInfo,
   krakenTakerFeePct,
+  krakenFeeTiers,
   krakenFillPrice,
   krakenCancelOrder,
   getCoinbaseBalances,
@@ -201,8 +202,9 @@ router.get("/arb/graph-scan", async (req, res): Promise<void> => {
   const krakenFeesPct   = Math.max(0,  parseFloat(String(req.query["krakenFeesPct"]   ?? "0.16")) || 0.16);
   const coinbaseFeesPct = Math.max(0,  parseFloat(String(req.query["coinbaseFeesPct"] ?? "0.40")) || 0.40);
   const maxHops         = Math.min(5, Math.max(2, parseInt(String(req.query["maxHops"] ?? "4"), 10) || 4));
+  const executionStyle  = String(req.query["executionStyle"] ?? "taker") === "maker" ? "maker" as const : "taker" as const;
   try {
-    const result = await scanGraphOpportunities(tradeSizeUsd, krakenFeesPct, coinbaseFeesPct, maxHops);
+    const result = await scanGraphOpportunities(tradeSizeUsd, krakenFeesPct, coinbaseFeesPct, maxHops, executionStyle);
     res.json(result);
   } catch (err) {
     req.log.error({ err }, "graph-scan error");
@@ -468,16 +470,18 @@ router.post("/arb/graph-execute", async (req, res): Promise<void> => {
   const krakenFeesPct   = Math.max(0, Number.isFinite(parsed.data.krakenFeesPct)   ? parsed.data.krakenFeesPct   : 0.16);
   const coinbaseFeesPct = Math.max(0, Number.isFinite(parsed.data.coinbaseFeesPct) ? parsed.data.coinbaseFeesPct : 0.40);
   const minProfitUsd    = isDryRun ? parsed.data.minProfitUsd : Math.max(0, parsed.data.minProfitUsd);
+  const executionStyle  = parsed.data.executionStyle ?? "taker";
   const asset = (node: string) => node.split(":")[1] ?? node;
 
   try {
-    // 0. Prefer the account's ACTUAL Kraken taker fee tier over the caller's
-    //    assumption (advisor recommendation) — fall back on query failure.
-    const actualKrakenFee = await krakenTakerFeePct({ krakenKey, krakenSecret }, ["XXBTZUSD", "ETHUSD", "SOLUSD"]);
-    const effectiveKrakenFeesPct = actualKrakenFee ?? krakenFeesPct;
+    // 0. Prefer the account's ACTUAL Kraken fee tier over the caller's
+    //    assumption — maker tier for post-only execution, taker for market.
+    const tiers = await krakenFeeTiers({ krakenKey, krakenSecret }, ["XXBTZUSD", "ETHUSD", "SOLUSD"]);
+    const effectiveKrakenFeesPct =
+      (executionStyle === "maker" ? tiers?.makerFeePct : tiers?.takerFeePct) ?? krakenFeesPct;
 
-    // 1. Fresh pre-flight scan
-    const scan = await scanGraphOpportunities(tradeSizeUsd, effectiveKrakenFeesPct, coinbaseFeesPct, 4);
+    // 1. Fresh pre-flight scan (depth-walked VWAP prices in taker mode)
+    const scan = await scanGraphOpportunities(tradeSizeUsd, effectiveKrakenFeesPct, coinbaseFeesPct, 4, executionStyle);
     const route = routeDescription
       ? scan.routes.find(r => r.description === routeDescription)
       : scan.routes[0];
@@ -485,9 +489,12 @@ router.post("/arb/graph-execute", async (req, res): Promise<void> => {
       res.json({ success: false, isDryRun, executed: false, route: routeDescription ?? "(top route)", preflightProfitUsd: null, error: "Route no longer present in a fresh scan — prices moved." });
       return;
     }
-    // 2. Gate on fresh net profit
-    if (route.netProfitUsd <= minProfitUsd) {
-      res.json({ success: false, isDryRun, executed: false, route: route.description, preflightProfitUsd: route.netProfitUsd, error: `Pre-flight failed — fresh net profit $${route.netProfitUsd.toFixed(4)} ≤ minimum $${minProfitUsd.toFixed(4)}.` });
+    // 2. ADAPTIVE gate: fresh net profit (already after real fees + depth
+    //    slippage in taker mode) must also clear a residual slippage buffer —
+    //    edge must exceed fees + slippage + your floor, not just fees.
+    const slippageBufferUsd = (route.slippagePct / 100) * tradeSizeUsd * 0.5; // half again, for movement between scan and fill
+    if (route.netProfitUsd - slippageBufferUsd <= minProfitUsd) {
+      res.json({ success: false, isDryRun, executed: false, route: route.description, preflightProfitUsd: route.netProfitUsd, error: `Pre-flight failed — fresh net profit $${route.netProfitUsd.toFixed(4)} minus slippage buffer $${slippageBufferUsd.toFixed(4)} (${route.slippagePct.toFixed(3)}% depth-walked) ≤ minimum $${minProfitUsd.toFixed(4)}.` });
       return;
     }
 
@@ -537,6 +544,14 @@ router.post("/arb/graph-execute", async (req, res): Promise<void> => {
     //     unconfirmed order.
     if (!isCrossInventory) {
       res.json({ success: false, isDryRun: false, executed: false, route: route.description, preflightProfitUsd: route.netProfitUsd, error: "Live execution supports Kraken triangles and 2-leg cross-exchange inventory routes only. Run as dry-run to record the opportunity." });
+      return;
+    }
+    // Maker-priced cross routes were approved on post-only join economics for
+    // EVERY Kraken leg; this path can only guarantee taker execution on the
+    // hedge leg, so the fills would not match the approved route. Refuse
+    // rather than execute under different economics than were approved.
+    if (executionStyle === "maker") {
+      res.json({ success: false, isDryRun: false, executed: false, route: route.description, preflightProfitUsd: route.netProfitUsd, error: "Maker-style LIVE execution is supported for Kraken triangles only (post-only on every leg). Cross-exchange routes require taker style, or run as dry-run." });
       return;
     }
     const [buyHop, sellHop] = [realHops[0]!, realHops[1]!];
@@ -1567,8 +1582,12 @@ router.post("/arb/fee-tier", async (req, res): Promise<void> => {
     res.status(400).json({ error: parsed.error.message });
     return;
   }
-  const takerFeePct = await krakenTakerFeePct(parsed.data, ["XXBTZUSD", "ETHUSD", "SOLUSD"]);
-  res.json({ takerFeePct, source: takerFeePct != null ? "account" : "unavailable" });
+  const tiers = await krakenFeeTiers(parsed.data, ["XXBTZUSD", "ETHUSD", "SOLUSD"]);
+  res.json({
+    takerFeePct: tiers?.takerFeePct ?? null,
+    makerFeePct: tiers?.makerFeePct ?? null,
+    source: tiers ? "account" : "unavailable",
+  });
 });
 
 // ── POST /test-kraken ─────────────────────────────────────────────────────────

@@ -729,14 +729,14 @@ const OB_SCALING_META: Record<string, { label: string; className: string }> = {
  * unavailable (no creds / lookup failed). One cached lookup shared by all
  * cards; refreshed every 10 min.
  */
-function useActualKrakenFee(): number | null {
+function useActualKrakenFees(): { taker: number | null; maker: number | null } {
   const { credentials } = useBotContext();
   const hasCreds = !!credentials.krakenKey && !!credentials.krakenSecret;
   const { data } = useGetFeeTier(
     { krakenKey: credentials.krakenKey, krakenSecret: credentials.krakenSecret },
     { query: { enabled: hasCreds, staleTime: 10 * 60_000, refetchInterval: 10 * 60_000 } },
   );
-  return data?.takerFeePct ?? null;
+  return { taker: data?.takerFeePct ?? null, maker: data?.makerFeePct ?? null };
 }
 
 function OrderBookHunterCard() {
@@ -757,7 +757,7 @@ function OrderBookHunterCard() {
   // Fee per leg: prefer the account's ACTUAL Kraken taker fee tier (fetched
   // once, shared across cards) over the configured assumption. A 0.40%
   // assumption makes a 1.2% 3-leg hurdle that hides every real edge.
-  const actualFee = useActualKrakenFee();
+  const actualFee = useActualKrakenFees().taker;
   const effectiveFeePct = actualFee ?? settings.obFeesPct;
   const obParams = { tradeSizeUsd: tradeSize, feesPct: effectiveFeePct, minProfitUsd: 0.02, maxSlippagePct: 0.5, volatilityFilter: true };
   const { data, isLoading } = useGetObScan(obParams, {
@@ -1146,13 +1146,18 @@ function GraphEngineCard() {
   }, [sizeInput]);
   const tradeSize = Math.max(1, parseFloat(debouncedSize) || settings.obTradeSize);
 
-  // Use the account's real Kraken taker fee when available (shared lookup).
-  const actualFee = useActualKrakenFee();
+  // Use the account's real Kraken fee tier when available (shared lookup).
+  // Maker style: post-only limit orders — better prices + maker fee, but no
+  // fill guarantee. Taker style: market orders priced by depth-walked VWAP.
+  const [style, setStyle] = useState<"taker" | "maker">("taker");
+  const fees = useActualKrakenFees();
+  const actualFee = style === "maker" ? (fees.maker ?? fees.taker) : fees.taker;
   const params = {
     tradeSizeUsd:    tradeSize,
     krakenFeesPct:   actualFee ?? settings.obFeesPct,
     coinbaseFeesPct: 0.40,
     maxHops:         4,
+    executionStyle:  style,
   };
   const { data, isLoading } = useGetGraphScan(params, {
     query: { queryKey: getGetGraphScanQueryKey(params), refetchInterval: 8_000, staleTime: 7_000 },
@@ -1188,6 +1193,7 @@ function GraphEngineCard() {
           coinbaseFeesPct: 0.40,
           minProfitUsd: minProfit,
           isDryRun: !liveMode,
+          executionStyle: style,
         },
       });
       if (r.success && r.executed) {
@@ -1232,6 +1238,18 @@ function GraphEngineCard() {
               aria-label="Minimum profit in USD to execute"
             /> profit
           </span>
+          <button
+            onClick={() => setStyle(s => s === "taker" ? "maker" : "taker")}
+            className={cn(
+              "text-[10px] font-mono font-bold px-1.5 py-0.5 border",
+              style === "maker" ? "border-success text-success" : "border-border text-muted-foreground",
+            )}
+            title={style === "maker"
+              ? "MAKER: post-only limit orders — lower fee + better price, fills not guaranteed. LIVE maker execution: Kraken triangles only."
+              : "TAKER: market orders — guaranteed fill, priced by depth-walked VWAP incl. slippage"}
+          >
+            {style.toUpperCase()}
+          </button>
         </CardTitle>
         <div className="flex items-center gap-2 text-[10px] font-mono text-muted-foreground">
           {isLoading && <RefreshCw className="h-3 w-3 animate-spin" />}
@@ -1267,7 +1285,8 @@ function GraphEngineCard() {
       {data && topRoute && (
         <div className="px-3 py-2 text-[10px] font-mono border-b border-border/50 bg-muted/30 grid grid-cols-2 sm:grid-cols-5 gap-x-4 gap-y-0.5">
           <span className="col-span-2 sm:col-span-5 font-bold uppercase text-muted-foreground">Fee Diagnostic</span>
-          <span className="text-muted-foreground">Kraken/leg: <span className="text-foreground">{data.krakenFeesPct.toFixed(2)}%</span>{actualFee != null && <span className="text-success"> ·actual tier</span>}</span>
+          <span className="text-muted-foreground">Kraken/leg: <span className="text-foreground">{data.krakenFeesPct.toFixed(2)}%</span>{actualFee != null && <span className="text-success"> ·actual {data.executionStyle} tier</span>}</span>
+          <span className="text-muted-foreground">Slippage (top): <span className="text-foreground">{topRoute.slippagePct.toFixed(3)}%{data.executionStyle === "maker" ? " (n/a maker)" : " depth-walked"}</span></span>
           <span className="text-muted-foreground">Coinbase/leg: <span className="text-foreground">{data.coinbaseFeesPct.toFixed(2)}%</span></span>
           <span className="text-muted-foreground">Break-even: <span className="text-foreground">{breakEvenPct}%</span></span>
           <span className="text-muted-foreground">Best raw edge: <span className={topRoute.grossProfitUsd > 0 ? "text-success" : "text-destructive"}>${topRoute.grossProfitUsd.toFixed(4)}</span></span>
