@@ -14,6 +14,7 @@ import {
   getScanCointegrationArbQueryKey,
   getListTradesQueryKey,
   getGetTradeSummaryQueryKey,
+  scanAllPairs,
 } from "@workspace/api-client-react";
 import type { ExchangeCredentials, PriceData, BalanceData, TriangularOpportunity, CointegrationSignal } from "@workspace/api-client-react";
 import { useQueryClient } from "@tanstack/react-query";
@@ -121,14 +122,16 @@ const SETTINGS_VERSION = 7;
 // ── Kelly Criterion position sizer ────────────────────────────────────────────
 // Direct port of Python KellySizer.calculate()
 // f* = (b·p − q) / b   where b = edge fraction, p = win rate, q = 1−p
-// Size = bankroll × min(f*, kellyFraction), converted to SOL and capped at maxPositionSol
+// maxPositionUsd is the hard USD cap (= settings.maxPositionSol × SOL reference price).
+// Capping in USD keeps BTC/ETH/ATOM positions at the same dollar risk as SOL,
+// regardless of the asset's unit price.
 function kellySize(
   edgePct: number,
   bankrollUsd: number,
   winRate: number,
   kellyFraction: number,
   buyPrice: number,
-  maxPositionSol: number,
+  maxPositionUsd: number,
 ): number {
   if (edgePct <= 0 || bankrollUsd <= 0 || buyPrice <= 0) return 0;
   const b = edgePct / 100;
@@ -136,9 +139,8 @@ function kellySize(
   const q = 1 - p;
   const fStar = b > 0 ? (b * p - q) / b : 0;
   const f = Math.max(0, Math.min(fStar, kellyFraction));
-  const sizeUsd = bankrollUsd * f;
-  const sizeSol = sizeUsd / buyPrice;
-  return Math.min(Math.max(sizeSol, 0), maxPositionSol);
+  const sizeUsd = Math.min(bankrollUsd * f, maxPositionUsd); // cap in USD, not base units
+  return Math.max(sizeUsd / buyPrice, 0);
 }
 
 export function BotProvider({ children }: { children: React.ReactNode }) {
@@ -353,8 +355,12 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
   const clearLog = useCallback(() => setActivityLog([]), []);
 
   // ── Shared execution (reads from refs, not closure) ───────────────────────────
+  // solRefPrice: SOL/USD price used to anchor the USD position cap. For SOL/USD
+  // trades this equals data.buyPrice (no change). For BTC/ETH/etc. pass the
+  // live SOL price so the cap stays at "maxPositionSol SOL-worth of USD" rather
+  // than "maxPositionSol base units of the traded asset".
   const runExecuteTrade = useCallback(
-    async (data: PriceData, forced: boolean) => {
+    async (data: PriceData, forced: boolean, solRefPrice?: number) => {
       const live = forced ? true : liveModeRef.current;
       const s = settingsRef.current;
       const creds = credentialsRef.current;
@@ -366,18 +372,26 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
       // Derive the base asset symbol from the active pair (e.g. "BTC" from "BTC/USD")
       const baseAsset = data.pair ? data.pair.split("/")[0] : "SOL";
 
+      // USD cap = maxPositionSol × SOL reference price.
+      // For SOL/USD: solRefPrice === data.buyPrice → same cap as before.
+      // For BTC/ETH/etc.: anchors the cap to SOL-equivalent USD risk, not BTC units.
+      const maxPositionUsd = s.maxPositionSol * (solRefPrice ?? data.buyPrice);
+
       let volume = kellySize(
         netEdge,
         cachedBalancesRef.current?.usdOnCoinbase ?? 0,
         s.winRate,
         s.kellyFraction,
         data.buyPrice,
-        s.maxPositionSol,
+        maxPositionUsd,
       );
-      // Port of Python: force-trade path uses 0.5 min test volume when Kelly < 0.1
-      if (forced && volume < 0.1) {
-        volume = 0.5;
-        addLog("info", `${tag} Kelly < 0.1 — using minimum test volume 0.5 ${baseAsset}`);
+      // Force-trade minimum: $10 USD equivalent in base units (asset-agnostic).
+      // Clamp to maxPositionUsd so the minimum never overrides the hard cap.
+      const minVolumeUsd = 10;
+      if (forced && volume * data.buyPrice < minVolumeUsd) {
+        const minVolume = Math.min(minVolumeUsd, maxPositionUsd) / data.buyPrice;
+        addLog("info", `${tag} Kelly below $${minVolumeUsd} — using minimum test volume ${minVolume.toFixed(6)} ${baseAsset}`);
+        volume = minVolume;
       }
       const expectedProfit = (netEdge / 100) * data.buyPrice * volume;
       addLog("trade",
@@ -466,54 +480,145 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
   }, [addLog, executeTriangularMutation, triOpportunities]);
 
   // ── Force Trade ───────────────────────────────────────────────────────────────
-  // Always executes on Kraken/Coinbase only — uses cached prices when available,
-  // falls back to a fresh fetch, then buys on the cheaper side and sells on the
-  // more expensive side (mirroring: k_price or kraken_rest(), c_price or coinbase_rest()).
+  // Calls /arb/scan to find the #1-ranked pair by gross spread, then routes
+  // execution to that pair. Falls back to the cached/fetched SOL/USD price if
+  // the scan returns no valid pairs.
   const forceTrade = useCallback(async () => {
     if (isExecutingRef.current) return;
     setIsForcingTrade(true);
     try {
-      // Use cached prices if present (from latest WS snapshot), else fetch fresh
-      let kPrice = latestPriceDataRef.current?.krakenPrice;
-      let cPrice = latestPriceDataRef.current?.coinbasePrice;
-      let priceData = latestPriceDataRef.current;
+      // ── Step 1: try the multi-pair ranker ─────────────────────────────────
+      let priceData: PriceData | null = null;
 
-      if (!kPrice || !cPrice) {
-        addLog("info", "[FORCE] Fetching prices...");
-        priceData = await fetchPricesMutation.mutateAsync({ data: credentialsRef.current });
-        latestPriceDataRef.current = priceData;
-        setLatestPriceData(priceData);
-        kPrice = priceData.krakenPrice;
-        cPrice = priceData.coinbasePrice;
+      // solRefPrice: SOL/USD price from the scan, used to anchor the USD position
+      // cap in runExecuteTrade. For SOL/USD trades this equals buyPrice (unchanged).
+      // For BTC/ETH/etc. it ensures the cap stays at "N SOL worth of USD" risk.
+      let solRefPrice: number | undefined;
+
+      try {
+        addLog("info", "[FORCE] Scanning all pairs for best spread...");
+        const entries = await scanAllPairs();
+
+        // Capture SOL reference price from scan before picking the best entry
+        const solEntry = entries?.find(e => e.pair === "SOL/USD");
+        if (solEntry) {
+          solRefPrice = (solEntry.krakenPrice + solEntry.coinbasePrice) / 2;
+        }
+
+        const best = entries && entries.length > 0 ? entries[0] : null;
+
+        if (best) {
+          // If the best pair is non-SOL and SOL/USD was absent from the scan (data
+          // outage), fetch SOL/USD exclusively so the USD cap is always correctly
+          // anchored. Pass enabledPairs:["SOL/USD"] so /prices cannot return another
+          // asset. Validate the response pair before trusting it; abort if unavailable.
+          if (!solRefPrice && best.pair !== "SOL/USD") {
+            addLog("info", "[FORCE] SOL/USD missing from scan — fetching SOL/USD reference price...");
+            try {
+              const solData = await fetchPricesMutation.mutateAsync({
+                data: { ...credentialsRef.current, enabledPairs: ["SOL/USD"] },
+              });
+              if (solData.pair !== "SOL/USD" || !solData.krakenPrice || !solData.coinbasePrice) {
+                addLog("error", "[FORCE] SOL/USD reference unavailable — aborting to prevent oversized position");
+                return;
+              }
+              solRefPrice = (solData.krakenPrice + solData.coinbasePrice) / 2;
+            } catch {
+              addLog("error", "[FORCE] Could not fetch SOL/USD reference — aborting to prevent oversized position");
+              return;
+            }
+          }
+
+          // Use executable ask/bid — the prices a market order actually fills at.
+          // Buy side pays the ask; sell side receives the bid.
+          const buyPrice  = best.buyExchange  === "Kraken" ? best.krakenAsk  : best.coinbaseAsk;
+          const sellPrice = best.sellExchange === "Kraken" ? best.krakenBid  : best.coinbaseBid;
+          // Recompute spread from executable prices (matches how the ranker scored it)
+          const execSpreadPct = buyPrice > 0 ? ((sellPrice - buyPrice) / buyPrice) * 100 : best.grossSpreadPct;
+          addLog("info", `[FORCE] Best pair: ${best.pair} via ${best.buyExchange}→${best.sellExchange} exec-spread ${execSpreadPct.toFixed(3)}%`);
+
+          // The server uses krakenPrice for Kraken orders and coinbasePrice for Coinbase orders.
+          // Populate each with the executable side price so order sizing uses ask/bid, not mid.
+          // Kraken is buying  → supply ask; Kraken is selling  → supply bid.
+          // Coinbase is buying → supply ask; Coinbase is selling → supply bid.
+          const execKrakenPrice   = best.buyExchange === "Kraken" ? best.krakenAsk  : best.krakenBid;
+          const execCoinbasePrice = best.buyExchange === "Coinbase" ? best.coinbaseAsk : best.coinbaseBid;
+
+          priceData = {
+            pair: best.pair,
+            krakenPrice: execKrakenPrice,
+            krakenBid: best.krakenBid,
+            krakenAsk: best.krakenAsk,
+            coinbasePrice: execCoinbasePrice,
+            coinbaseBid: best.coinbaseBid,
+            coinbaseAsk: best.coinbaseAsk,
+            grossSpreadPct: execSpreadPct,
+            netEdgePct: 0, // computed in runExecuteTrade
+            route: `${best.pair} ${best.buyExchange} → ${best.sellExchange}`,
+            buyExchange: best.buyExchange,
+            sellExchange: best.sellExchange,
+            bestBuyExchange: best.buyExchange,
+            bestSellExchange: best.sellExchange,
+            buyPrice,
+            sellPrice,
+            executable: true,
+            wsStatus: { kraken: true, coinbase: true },
+            timestamp: best.scannedAt,
+          };
+        }
+      } catch (scanErr) {
+        addLog("warning", `[FORCE] Scan failed (${scanErr instanceof Error ? scanErr.message : "unknown"}), falling back to /prices`);
       }
 
-      if (!kPrice || !cPrice || !priceData) {
-        addLog("error", "[FORCE] Could not get Kraken/Coinbase prices");
-        return;
+      // ── Step 2: fall back to a fresh SOL/USD-only fetch if scan gave nothing ──
+      // Always request SOL/USD explicitly (enabledPairs:["SOL/USD"]) so /prices
+      // cannot return a non-SOL pair whose price would be mistaken for solRefPrice.
+      if (!priceData) {
+        addLog("info", "[FORCE] Fetching SOL/USD prices (fallback)...");
+        let fetched: PriceData;
+        try {
+          fetched = await fetchPricesMutation.mutateAsync({
+            data: { ...credentialsRef.current, enabledPairs: ["SOL/USD"] },
+          });
+        } catch (err) {
+          addLog("error", `[FORCE] Could not fetch SOL/USD: ${err instanceof Error ? err.message : "Unknown"}`);
+          return;
+        }
+
+        if (fetched.pair !== "SOL/USD" || !fetched.krakenPrice || !fetched.coinbasePrice) {
+          addLog("error", "[FORCE] SOL/USD prices unavailable — cannot proceed safely");
+          return;
+        }
+
+        latestPriceDataRef.current = fetched;
+        setLatestPriceData(fetched);
+
+        const kPrice = fetched.krakenPrice;
+        const cPrice = fetched.coinbasePrice;
+        const buyEx       = kPrice < cPrice ? "Kraken" : "Coinbase";
+        const sellEx      = kPrice < cPrice ? "Coinbase" : "Kraken";
+        const buyPrice    = Math.min(kPrice, cPrice);
+        const sellPrice   = Math.max(kPrice, cPrice);
+        const grossSpreadPct = ((sellPrice - buyPrice) / buyPrice) * 100;
+
+        priceData = {
+          ...fetched,
+          bestBuyExchange: buyEx,
+          bestSellExchange: sellEx,
+          buyExchange: buyEx,
+          sellExchange: sellEx,
+          buyPrice,
+          sellPrice,
+          grossSpreadPct,
+          route: `Buy ${buyEx} → Sell ${sellEx}`,
+          executable: true,
+        };
+        // Pair is confirmed SOL/USD — solRefPrice = buyPrice (same asset)
+        solRefPrice = buyPrice;
       }
 
-      // Determine direction: buy on cheaper exchange, sell on more expensive
-      const buyEx  = kPrice < cPrice ? "Kraken"   : "Coinbase";
-      const sellEx = kPrice < cPrice ? "Coinbase"  : "Kraken";
-      const buyPrice      = Math.min(kPrice, cPrice);
-      const sellPrice     = Math.max(kPrice, cPrice);
-      const grossSpreadPct = ((sellPrice - buyPrice) / buyPrice) * 100;
-
-      // Build a price-data object forced to the Kraken/Coinbase route
-      const forcedData: PriceData = {
-        ...priceData,
-        bestBuyExchange: buyEx,
-        bestSellExchange: sellEx,
-        buyExchange: buyEx,
-        sellExchange: sellEx,
-        buyPrice,
-        sellPrice,
-        grossSpreadPct,
-        route: `Buy ${buyEx} → Sell ${sellEx}`,
-        executable: true,
-      };
-
-      await runExecuteTrade(forcedData, true);
+      // Pass solRefPrice so Kelly cap is always USD-denominated at SOL-equivalent risk
+      await runExecuteTrade(priceData, true, solRefPrice);
     } catch (err) {
       addLog("error", `[FORCE] Error: ${err instanceof Error ? err.message : "Unknown"}`);
     } finally {
