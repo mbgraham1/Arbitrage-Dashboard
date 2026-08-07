@@ -12,3 +12,5 @@ Rule: every live-order path must (1) validate order ACCEPTANCE (txid/orderId pre
 ## Scan-vs-execution economics must match leg-by-leg
 - A route approved under maker (post-only join) economics must not be executed with any taker leg — refuse live execution instead of silently mixing styles. (Kraken triangles are all-post-only, so maker style is only allowed live there.)
 - Depth-walked VWAP pricing: if the visible book cannot absorb the full trade size, DROP the edge entirely. A partial-depth VWAP applied to the whole size overstates the fillable edge — never fall back to top-of-book.
+- Auto-execution needs BOTH a synchronous client in-flight ref (React state lags a render) and a server-side global lease for live orders — otherwise a manual click racing an auto-fire double-spends.
+- Feedback-loop penalties must be size-normalized (shortfall as % of trade size, scaled to the current size); pooling absolute USD shortfalls across sizes mis-gates.

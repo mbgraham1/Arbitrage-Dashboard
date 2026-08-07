@@ -390,6 +390,18 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
 
+  /arb/execution-quality:
+    get:
+      operationId: getExecutionQuality
+      tags: [trades]
+      summary: Per-route execution quality aggregates (fill rate, expected vs realized profit)
+      responses:
+        "200":
+          description: Aggregated execution-quality records
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ExecutionQualityResult"
   /arb/fee-tier:
     post:
       operationId: getFeeTier
@@ -998,6 +1010,29 @@ components:
         krakenKey: { type: string }
         krakenSecret: { type: string }
 
+    ExecutionQualityRoute:
+      type: object
+      required: [route, style, attempts, liveAttempts, liveFillRate, avgExpectedProfitUsd, avgRealizedProfitUsd, avgShortfallUsd, avgSlippagePct, totalRealizedProfitUsd, lastAttemptAt]
+      properties:
+        route: { type: string }
+        style: { type: string, enum: [taker, maker] }
+        attempts: { type: integer }
+        liveAttempts: { type: integer }
+        liveFillRate: { type: number, nullable: true }
+        avgExpectedProfitUsd: { type: number, nullable: true }
+        avgRealizedProfitUsd: { type: number, nullable: true }
+        avgShortfallUsd: { type: number, nullable: true }
+        avgSlippagePct: { type: number, nullable: true }
+        totalRealizedProfitUsd: { type: number, nullable: true }
+        lastAttemptAt: { type: string }
+    ExecutionQualityResult:
+      type: object
+      required: [routes, totalRecords]
+      properties:
+        routes:
+          type: array
+          items: { $ref: "#/components/schemas/ExecutionQualityRoute" }
+        totalRecords: { type: integer }
     FeeTierResult:
       type: object
       required: [takerFeePct, makerFeePct, source]
@@ -1078,6 +1113,10 @@ components:
         executed: { type: boolean }
         route: { type: string }
         preflightProfitUsd: { type: number, nullable: true }
+        realizedProfitUsd:
+          type: number
+          nullable: true
+          description: "Actual USD profit from confirmed fills (cost/fee accounting); null when unknown"
         orderIds:
           type: array
           items: { type: string }

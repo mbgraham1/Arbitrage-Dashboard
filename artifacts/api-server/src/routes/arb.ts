@@ -1,6 +1,7 @@
 import { Router, type IRouter } from "express";
 import { desc, sql, sum, count, max, avg } from "drizzle-orm";
-import { db, tradesTable, triScanTable } from "@workspace/db";
+import { db, tradesTable, triScanTable, executionQualityTable } from "@workspace/db";
+import { desc as dbDesc, eq as dbEq, and as dbAnd } from "drizzle-orm";
 import {
   FetchPricesBody,
   FetchBalancesBody,
@@ -456,6 +457,102 @@ async function runKrakenTriangle(input: TriangleExecInput, reqLog: ReqLog): Prom
 //     USD[K]→X[K]→X[CB]→USD[CB]) — buys X on one venue and sells X on the
 //     other simultaneously (market orders; requires inventory on both venues).
 // Anything else executes as dry-run only.
+// ── GET /arb/execution-quality ────────────────────────────────────────────────
+// Per route+style aggregates of recorded execution attempts: fill rate and
+// expected-vs-realized profit — the data that separates routes that LOOK
+// profitable from routes that actually PAY.
+router.get("/arb/execution-quality", async (req, res): Promise<void> => {
+  try {
+    const rows = await db.select().from(executionQualityTable)
+      .orderBy(dbDesc(executionQualityTable.id)).limit(1000);
+    const byKey = new Map<string, typeof rows>();
+    for (const r of rows) {
+      const key = `${r.route}|${r.style}`;
+      if (!byKey.has(key)) byKey.set(key, []);
+      byKey.get(key)!.push(r);
+    }
+    const routes = Array.from(byKey.entries()).map(([key, rs]) => {
+      const [route, style] = key.split("|") as [string, string];
+      const live = rs.filter(r => !r.isDryRun);
+      const liveFilled = live.filter(r => r.filled);
+      const realized = liveFilled.filter(r => r.realizedProfitUsd != null);
+      const avg = (xs: number[]) => xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : null;
+      const avgExpected = avg(realized.map(r => parseFloat(r.expectedProfitUsd)));
+      const avgRealized = avg(realized.map(r => parseFloat(r.realizedProfitUsd!)));
+      const slipRows = rs.filter(r => r.slippagePct != null);
+      const avgSlippagePct = avg(slipRows.map(r => parseFloat(r.slippagePct!)));
+      return {
+        route, style,
+        attempts: rs.length,
+        liveAttempts: live.length,
+        liveFillRate: live.length > 0 ? liveFilled.length / live.length : null,
+        avgExpectedProfitUsd: avgExpected,
+        avgRealizedProfitUsd: avgRealized,
+        avgShortfallUsd: avgExpected != null && avgRealized != null ? avgExpected - avgRealized : null,
+        avgSlippagePct,
+        totalRealizedProfitUsd: realized.length ? realized.reduce((s, r) => s + parseFloat(r.realizedProfitUsd!), 0) : null,
+        lastAttemptAt: rs[0]!.createdAt.toISOString(),
+      };
+    }).sort((a, b) => b.attempts - a.attempts).slice(0, 50);
+    res.json({ routes, totalRecords: rows.length });
+  } catch (err) {
+    req.log.error({ err }, "execution-quality error");
+    res.status(500).json({ error: (err as Error).message });
+  }
+});
+
+// ── Execution-quality feedback loop ──────────────────────────────────────────
+// Every execution ATTEMPT is recorded (expected vs realized, filled or not).
+// The gate consults this history: routes whose realized profit historically
+// falls short of the scanner's expectation must clear a correspondingly
+// higher bar before real money is committed again.
+
+async function recordQuality(row: {
+  route: string; style: string; isDryRun: boolean; filled: boolean;
+  tradeSizeUsd: number; expectedProfitUsd: number; realizedProfitUsd: number | null; slippagePct?: number; note?: string;
+}, log: { error: (o: object, m: string) => void }): Promise<void> {
+  try {
+    await db.insert(executionQualityTable).values({
+      route: row.route, style: row.style, isDryRun: row.isDryRun, filled: row.filled,
+      tradeSizeUsd: row.tradeSizeUsd.toFixed(2),
+      expectedProfitUsd: row.expectedProfitUsd.toFixed(6),
+      realizedProfitUsd: row.realizedProfitUsd != null ? row.realizedProfitUsd.toFixed(6) : null,
+      slippagePct: row.slippagePct != null ? row.slippagePct.toFixed(4) : null,
+      note: row.note ?? null,
+    });
+  } catch (err) { log.error({ err }, "failed to record execution quality"); }
+}
+
+/**
+ * Historical penalty for a route+style, from LIVE attempts only:
+ *  - shortfallUsd: average (expected − realized) across filled live attempts
+ *    (≥2 samples) — added to the edge the route must clear.
+ *  - blockReason: set when the route has ≥3 live attempts and <50% ever
+ *    filled — history says this opportunity doesn't actually execute.
+ */
+async function routeQualityPenalty(route: string, style: string, tradeSizeUsd: number): Promise<{ shortfallUsd: number; attempts: number; blockReason: string | null }> {
+  try {
+    const rows = await db.select().from(executionQualityTable)
+      .where(dbAnd(dbEq(executionQualityTable.route, route), dbEq(executionQualityTable.style, style), dbEq(executionQualityTable.isDryRun, false)))
+      .orderBy(dbDesc(executionQualityTable.id)).limit(20);
+    if (rows.length === 0) return { shortfallUsd: 0, attempts: 0, blockReason: null };
+    const fills = rows.filter(r => r.filled);
+    if (rows.length >= 3 && fills.length / rows.length < 0.5) {
+      return { shortfallUsd: 0, attempts: rows.length, blockReason: `historical fill rate ${fills.length}/${rows.length} — this route rarely executes; not committing funds` };
+    }
+    const realized = fills.filter(r => r.realizedProfitUsd != null && parseFloat(r.tradeSizeUsd) > 0);
+    if (realized.length < 2) return { shortfallUsd: 0, attempts: rows.length, blockReason: null };
+    // Normalize shortfall by each attempt's trade size, then scale to the
+    // CURRENT size — a $5 miss on a $1,000 trade must not block a $10 trade.
+    const avgShortfallPct = realized.reduce((s, r) =>
+      s + (parseFloat(r.expectedProfitUsd) - parseFloat(r.realizedProfitUsd!)) / parseFloat(r.tradeSizeUsd), 0) / realized.length;
+    return { shortfallUsd: Math.max(0, avgShortfallPct * tradeSizeUsd), attempts: rows.length, blockReason: null };
+  } catch { return { shortfallUsd: 0, attempts: 0, blockReason: null }; }
+}
+
+/** Global lease: at most ONE live graph execution at a time (any client/tab). */
+let liveGraphExecInFlight = false;
+
 router.post("/arb/graph-execute", async (req, res): Promise<void> => {
   const parsed = GraphExecuteBody.safeParse(req.body);
   if (!parsed.success) {
@@ -473,6 +570,17 @@ router.post("/arb/graph-execute", async (req, res): Promise<void> => {
   const executionStyle  = parsed.data.executionStyle ?? "taker";
   const asset = (node: string) => node.split(":")[1] ?? node;
 
+  // Global execution lease — a second live request (another tab, an auto-fire
+  // racing a manual click) must never run concurrently and double-spend.
+  let holdsLease = false;
+  if (!isDryRun) {
+    if (liveGraphExecInFlight) {
+      res.json({ success: false, isDryRun, executed: false, route: routeDescription ?? "(top route)", preflightProfitUsd: null, error: "Another LIVE execution is already in progress — refused to run concurrently." });
+      return;
+    }
+    liveGraphExecInFlight = true;
+    holdsLease = true;
+  }
   try {
     // 0. Prefer the account's ACTUAL Kraken fee tier over the caller's
     //    assumption — maker tier for post-only execution, taker for market.
@@ -497,6 +605,20 @@ router.post("/arb/graph-execute", async (req, res): Promise<void> => {
       res.json({ success: false, isDryRun, executed: false, route: route.description, preflightProfitUsd: route.netProfitUsd, error: `Pre-flight failed — fresh net profit $${route.netProfitUsd.toFixed(4)} minus slippage buffer $${slippageBufferUsd.toFixed(4)} (${route.slippagePct.toFixed(3)}% depth-walked) ≤ minimum $${minProfitUsd.toFixed(4)}.` });
       return;
     }
+    // 2b. FEEDBACK-LOOP gate (live only): this route's own execution history.
+    //     Routes that historically filled short of expectation must clear the
+    //     average shortfall too; routes that rarely fill are blocked outright.
+    if (!isDryRun) {
+      const hist = await routeQualityPenalty(route.description, executionStyle, tradeSizeUsd);
+      if (hist.blockReason) {
+        res.json({ success: false, isDryRun, executed: false, route: route.description, preflightProfitUsd: route.netProfitUsd, error: `Feedback-loop gate: ${hist.blockReason} (${hist.attempts} recorded live attempts).` });
+        return;
+      }
+      if (hist.shortfallUsd > 0 && route.netProfitUsd - slippageBufferUsd - hist.shortfallUsd <= minProfitUsd) {
+        res.json({ success: false, isDryRun, executed: false, route: route.description, preflightProfitUsd: route.netProfitUsd, error: `Feedback-loop gate: this route historically realizes $${hist.shortfallUsd.toFixed(4)} less than the scanner expects (${hist.attempts} live attempts); edge after that shortfall ≤ minimum $${minProfitUsd.toFixed(4)}.` });
+        return;
+      }
+    }
 
     const realHops = route.hops.filter(h => h.exchange !== "bridge");
     const isKrakenTriangle = route.hops.length === 3 && realHops.length === 3 && realHops.every(h => h.exchange === "kraken");
@@ -515,7 +637,27 @@ router.post("/arb/graph-execute", async (req, res): Promise<void> => {
       }, req.log);
       if (out.badRequest) { res.status(400).json({ error: out.badRequest }); return; }
       const b = out.body!;
-      res.json({ success: b["success"], isDryRun: b["isDryRun"], executed: b["executed"], route: route.description, preflightProfitUsd: b["preflightProfitUsd"], orderIds: [b["leg1OrderId"], b["leg2OrderId"], b["leg3OrderId"]].filter(Boolean), error: b["error"] ?? null });
+      const errText = typeof b["error"] === "string" ? b["error"] : "";
+      // Record EVERY real attempt: executed runs (filled or not), plus live
+      // failures past pre-flight (a leg may have been accepted before the
+      // error). Pre-flight rejections placed no orders and are excluded so
+      // they cannot skew the fill-rate gate.
+      const wasPreflightReject = !b["executed"] && (errText.startsWith("Pre-flight failed") || errText.startsWith("Could not fetch"));
+      const isLiveTri = b["isDryRun"] === false;
+      // Live triangles report realized profit (actual cost/fee accounting)
+      // in preflightProfitUsd when all legs filled.
+      const realizedTri = isLiveTri && b["success"] === true && typeof b["preflightProfitUsd"] === "number" ? b["preflightProfitUsd"] as number : null;
+      if (b["executed"] === true || (isLiveTri && !wasPreflightReject)) {
+        await recordQuality({
+          route: route.description, style: executionStyle, isDryRun: !!b["isDryRun"],
+          filled: b["success"] === true, tradeSizeUsd,
+          expectedProfitUsd: route.netProfitUsd,
+          realizedProfitUsd: realizedTri,
+          slippagePct: route.slippagePct,
+          note: errText || undefined,
+        }, req.log);
+      }
+      res.json({ success: b["success"], isDryRun: b["isDryRun"], executed: b["executed"], route: route.description, preflightProfitUsd: b["preflightProfitUsd"], realizedProfitUsd: realizedTri, orderIds: [b["leg1OrderId"], b["leg2OrderId"], b["leg3OrderId"]].filter(Boolean), error: b["error"] ?? null });
       return;
     }
 
@@ -532,6 +674,10 @@ router.post("/arb/graph-execute", async (req, res): Promise<void> => {
         krakenPrice: "0",
         coinbasePrice: "0",
       });
+      await recordQuality({
+        route: route.description, style: executionStyle, isDryRun: true, filled: true,
+        tradeSizeUsd, expectedProfitUsd: route.netProfitUsd, realizedProfitUsd: null, slippagePct: route.slippagePct,
+      }, req.log);
       req.log.info({ route: route.description, tradeSizeUsd, profit: route.netProfitUsd }, "Graph execute (dry run)");
       res.json({ success: true, isDryRun: true, executed: true, route: route.description, preflightProfitUsd: route.netProfitUsd, orderIds: [] });
       return;
@@ -589,7 +735,7 @@ router.post("/arb/graph-execute", async (req, res): Promise<void> => {
       // Timed out — cancel, then read FINAL fills (a partial fill may exist).
       try { await coinbaseCancelOrder(cbCreds, orderId); } catch { /* best effort */ }
       try { return await coinbaseOrderDetails(cbCreds, orderId); }
-      catch { return { status: "UNKNOWN", filledSize: 0, filledValue: 0, avgPrice: 0 }; }
+      catch { return { status: "UNKNOWN", filledSize: 0, filledValue: 0, avgPrice: 0, totalFees: 0 }; }
     };
     // Failure ledger row — persisted whenever ANY order was accepted, so
     // manual reconciliation always has the order ids and actual volume.
@@ -614,6 +760,8 @@ router.post("/arb/graph-execute", async (req, res): Promise<void> => {
     };
 
     let filledVolume = 0;
+    // Realized USD accounting from ACTUAL fills (cost/fee), for the feedback loop.
+    let buySpendUsd = 0, sellProceedsUsd = 0;
     try {
       // ── Buy leg: place, confirm acceptance AND fill, learn ACTUAL volume ───
       if (buyHop.exchange === "kraken") {
@@ -623,6 +771,7 @@ router.post("/arb/graph-execute", async (req, res): Promise<void> => {
         anyAccepted = true;
         const fill = await waitKrakenFill(buyOrderId);
         filledVolume = fill.volExec;
+        buySpendUsd = fill.cost + fill.fee;
         if (fill.status !== "closed" || filledVolume <= 0) {
           if (filledVolume > 0) await tryUnwindMarket(kCreds, "sell", filledVolume, buyHop.pair, "sell partial buy-leg fill (graph cross)", log);
           throw new Error(`Kraken buy leg did not fully fill (status ${fill.status}, ${filledVolume.toFixed(8)}/${plannedVolume.toFixed(8)}); partial fill unwound. Nothing sold.`);
@@ -634,6 +783,7 @@ router.post("/arb/graph-execute", async (req, res): Promise<void> => {
         anyAccepted = true;
         const d = await waitCoinbaseFill(buyOrderId);
         filledVolume = d.filledSize; // ACTUAL base units acquired (never assumed)
+        buySpendUsd = d.filledValue + d.totalFees;
         if (d.status !== "FILLED") {
           if (filledVolume > 0) {
             // Partial fill exists — neutralize it on Coinbase.
@@ -651,6 +801,7 @@ router.post("/arb/graph-execute", async (req, res): Promise<void> => {
           sellOrderId = r.txid[0] ?? "";
           if (!sellOrderId) throw new Error("Kraken sell order was not accepted (no txid returned).");
           const fill = await waitKrakenFill(sellOrderId);
+          sellProceedsUsd = fill.cost - fill.fee;
           if (fill.status !== "closed" || fill.volExec < filledVolume * 0.999) {
             // Only the UNSOLD remainder is residual exposure.
             const residual = Math.max(0, filledVolume - fill.volExec);
@@ -661,6 +812,7 @@ router.post("/arb/graph-execute", async (req, res): Promise<void> => {
           sellOrderId = r.orderId ?? "";
           if (!sellOrderId || r.success === false) throw new Error("Coinbase sell order was rejected (no order id).");
           const d = await waitCoinbaseFill(sellOrderId);
+          sellProceedsUsd = d.filledValue - d.totalFees;
           if (d.status !== "FILLED") {
             const residual = Math.max(0, filledVolume - d.filledSize);
             throw new ResidualError(`Coinbase sell order ${sellOrderId} ended ${d.status} with ${d.filledSize.toFixed(8)}/${filledVolume.toFixed(8)} sold.`, residual);
@@ -682,7 +834,13 @@ router.post("/arb/graph-execute", async (req, res): Promise<void> => {
       }
     } catch (execErr) {
       const msg = (execErr as Error).message;
-      if (anyAccepted) await recordFailure(filledVolume, msg);
+      if (anyAccepted) {
+        await recordFailure(filledVolume, msg);
+        await recordQuality({
+          route: route.description, style: executionStyle, isDryRun: false, filled: false,
+          tradeSizeUsd, expectedProfitUsd: route.netProfitUsd, realizedProfitUsd: null, slippagePct: route.slippagePct, note: msg.slice(0, 300),
+        }, req.log);
+      }
       req.log.error({ route: route.description, buyOrderId, sellOrderId, filledVolume, err: msg }, "Graph execute LIVE — failed");
       res.json({ success: false, isDryRun: false, executed: anyAccepted, route: route.description, preflightProfitUsd: route.netProfitUsd, orderIds: [buyOrderId, sellOrderId].filter(Boolean), error: msg });
       return;
@@ -701,11 +859,18 @@ router.post("/arb/graph-execute", async (req, res): Promise<void> => {
       buyOrderId: buyOrderId || null,
       sellOrderId: sellOrderId || null,
     });
-    req.log.info({ route: route.description, tradeSizeUsd, filledVolume, buyOrderId, sellOrderId }, "Graph execute LIVE — both legs confirmed filled");
-    res.json({ success: true, isDryRun: false, executed: true, route: route.description, preflightProfitUsd: route.netProfitUsd, orderIds: [buyOrderId, sellOrderId] });
+    const realizedProfitUsd = buySpendUsd > 0 && sellProceedsUsd > 0 ? sellProceedsUsd - buySpendUsd : null;
+    await recordQuality({
+      route: route.description, style: executionStyle, isDryRun: false, filled: true,
+      tradeSizeUsd, expectedProfitUsd: route.netProfitUsd, realizedProfitUsd, slippagePct: route.slippagePct,
+    }, req.log);
+    req.log.info({ route: route.description, tradeSizeUsd, filledVolume, buyOrderId, sellOrderId, realizedProfitUsd }, "Graph execute LIVE — both legs confirmed filled");
+    res.json({ success: true, isDryRun: false, executed: true, route: route.description, preflightProfitUsd: route.netProfitUsd, realizedProfitUsd, orderIds: [buyOrderId, sellOrderId] });
   } catch (err) {
     req.log.error({ err }, "graph-execute error");
     res.json({ success: false, isDryRun, executed: false, route: routeDescription ?? "(top route)", preflightProfitUsd: null, error: (err as Error).message });
+  } finally {
+    if (holdsLease) liveGraphExecInFlight = false;
   }
 });
 

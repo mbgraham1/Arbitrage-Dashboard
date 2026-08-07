@@ -388,12 +388,32 @@ export const GraphExecuteBody = zod.object({
   "executionStyle": zod.enum(["taker", "maker"]).optional()
 })
 
+export const ExecutionQualityRouteResponse = zod.object({
+  "route": zod.string(),
+  "style": zod.enum(["taker", "maker"]),
+  "attempts": zod.number(),
+  "liveAttempts": zod.number(),
+  "liveFillRate": zod.number().nullable(),
+  "avgExpectedProfitUsd": zod.number().nullable(),
+  "avgRealizedProfitUsd": zod.number().nullable(),
+  "avgShortfallUsd": zod.number().nullable(),
+  "avgSlippagePct": zod.number().nullable(),
+  "totalRealizedProfitUsd": zod.number().nullable(),
+  "lastAttemptAt": zod.string()
+})
+
+export const ExecutionQualityResponse = zod.object({
+  "routes": zod.array(ExecutionQualityRouteResponse),
+  "totalRecords": zod.number()
+})
+
 export const GraphExecuteResponse = zod.object({
   "success": zod.boolean(),
   "isDryRun": zod.boolean(),
   "executed": zod.boolean(),
   "route": zod.string(),
   "preflightProfitUsd": zod.number().nullish(),
+  "realizedProfitUsd": zod.number().nullish(),
   "orderIds": zod.array(zod.string()).nullish(),
   "error": zod.string().nullish()
 })

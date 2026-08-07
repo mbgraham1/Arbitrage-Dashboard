@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { useBotContext } from "@/store/bot-context";
@@ -8,7 +8,7 @@ import {
 } from "lucide-react";
 import { format } from "date-fns";
 import { cn } from "@/lib/utils";
-import { useGetTradeSummary, useListTrades, useScanAllPairs, useGetObScan, getGetObScanQueryKey, useObExecute, useGetAllPairSnapshots, getGetAllPairSnapshotsQueryKey, useGetGraphScan, getGetGraphScanQueryKey, useGraphExecute, useGetFeeTier, TradeRecord, PairScanEntry, ObCycleEntry, AllPairSnapshot, GraphRoute, GraphRouteHop } from "@workspace/api-client-react";
+import { useGetTradeSummary, useListTrades, useScanAllPairs, useGetObScan, getGetObScanQueryKey, useObExecute, useGetAllPairSnapshots, getGetAllPairSnapshotsQueryKey, useGetGraphScan, getGetGraphScanQueryKey, useGraphExecute, useGetFeeTier, useGetExecutionQuality, TradeRecord, PairScanEntry, ObCycleEntry, AllPairSnapshot, GraphRoute, GraphRouteHop } from "@workspace/api-client-react";
 
 // ── Small helpers ──────────────────────────────────────────────────────────────
 
@@ -507,6 +507,7 @@ export default function Dashboard() {
       <TriangularCard opportunities={triOpportunities} isRunning={isRunning} isExecutingTri={isExecutingTriangular} priceSource={triPriceSource} />
       <OrderBookHunterCard />
       <GraphEngineCard />
+      <ExecutionQualityCard />
 
       {/* Trade History Table */}
       <TradeHistoryTable />
@@ -1171,13 +1172,19 @@ function GraphEngineCard() {
     : "—";
   const canExecute = !!topRoute && !executeMutation.isPending;
 
+  // Synchronous in-flight guard: React Query's isPending only updates on the
+  // next render, so a rapid auto-fire + manual click could otherwise both
+  // pass the check and submit two executions.
+  const execInFlight = useRef(false);
   const executeTopRoute = async () => {
     if (!topRoute) return;
+    if (execInFlight.current) return;
     if (!credentials.krakenKey || !credentials.krakenSecret) {
       addLog("warning", "[GRAPH·EXEC] Add Kraken credentials in Config first.");
       setExecResult("❌ No Kraken credentials — add them in Config.");
       return;
     }
+    execInFlight.current = true;
     setExecResult(null);
     addLog("trade", `[GRAPH·EXEC] ${topRoute.description} | $${tradeSize} | ${liveMode ? "LIVE" : "dry run"} — pre-flight…`);
     try {
@@ -1197,9 +1204,10 @@ function GraphEngineCard() {
         },
       });
       if (r.success && r.executed) {
-        const profit = r.preflightProfitUsd ?? 0;
-        addLog("success", `[GRAPH·EXEC] ✅ ${r.route} | profit $${profit.toFixed(4)}${r.isDryRun ? " (dry run)" : ` | orders ${(r.orderIds ?? []).join(", ")}`}`);
-        setExecResult(`✅ Executed ${r.route} — $${profit.toFixed(4)}${r.isDryRun ? " (dry run, recorded to ledger)" : ""}`);
+        const profit = r.realizedProfitUsd ?? r.preflightProfitUsd ?? 0;
+        const label = r.realizedProfitUsd != null ? "realized" : "expected";
+        addLog("success", `[GRAPH·EXEC] ✅ ${r.route} | ${label} $${profit.toFixed(4)}${r.isDryRun ? " (dry run)" : ` | orders ${(r.orderIds ?? []).join(", ")}`}`);
+        setExecResult(`✅ Executed ${r.route} — ${label} $${profit.toFixed(4)}${r.isDryRun ? " (dry run, recorded to ledger)" : ""}`);
       } else {
         addLog("warning", `[GRAPH·EXEC] ❌ ${r.error ?? "Pre-flight failed."}`);
         setExecResult(`❌ ${r.error ?? "Pre-flight failed — edge disappeared."}`);
@@ -1208,8 +1216,34 @@ function GraphEngineCard() {
       const msg = e instanceof Error ? e.message : "Unknown error";
       addLog("error", `[GRAPH·EXEC] Exception: ${msg}`);
       setExecResult(`❌ ${msg}`);
+    } finally {
+      execInFlight.current = false;
     }
   };
+
+  // ── Auto-execution loop ────────────────────────────────────────────────────
+  // When armed, fires executeTopRoute whenever a fresh scan shows a top route
+  // whose net edge (already after fees + slippage) clears the profit floor.
+  // The server re-validates everything (fresh scan, slippage buffer, feedback
+  // -loop history) before any order — this loop only saves the button click.
+  const [autoArmed, setAutoArmed] = useState(false);
+  const AUTO_COOLDOWN_MS = 30_000;
+  const lastAutoFire = useRef(0);
+  const executeRef = useRef(executeTopRoute);
+  executeRef.current = executeTopRoute;
+  useEffect(() => {
+    if (!autoArmed || !topRoute || executeMutation.isPending) return;
+    if (topRoute.netProfitUsd <= minProfit) return;
+    if (Date.now() - lastAutoFire.current < AUTO_COOLDOWN_MS) return;
+    lastAutoFire.current = Date.now();
+    addLog("info", `[GRAPH·AUTO] Edge $${topRoute.netProfitUsd.toFixed(4)} > floor $${minProfit.toFixed(2)} — auto-firing ${topRoute.description}`);
+    void executeRef.current();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoArmed, topRoute?.description, topRoute?.netProfitUsd, minProfit, executeMutation.isPending]);
+  useEffect(() => {
+    if (autoArmed) addLog("warning", `[GRAPH·AUTO] Armed (${liveMode ? "LIVE" : "dry run"}, ${style}) — fires when top route edge > $${minProfit.toFixed(2)}, 30s cooldown.`);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoArmed]);
 
   return (
     <Card className="mt-6">
@@ -1249,6 +1283,16 @@ function GraphEngineCard() {
               : "TAKER: market orders — guaranteed fill, priced by depth-walked VWAP incl. slippage"}
           >
             {style.toUpperCase()}
+          </button>
+          <button
+            onClick={() => setAutoArmed(a => !a)}
+            className={cn(
+              "text-[10px] font-mono font-bold px-1.5 py-0.5 border",
+              autoArmed ? "border-destructive text-destructive animate-pulse" : "border-border text-muted-foreground",
+            )}
+            title="Auto-execution: fires EXECUTE automatically whenever the top route's net edge clears your profit floor (30s cooldown). Server re-validates fees, slippage, and this route's execution history before any order."
+          >
+            {autoArmed ? "AUTO·ON" : "AUTO"}
           </button>
         </CardTitle>
         <div className="flex items-center gap-2 text-[10px] font-mono text-muted-foreground">
@@ -1360,6 +1404,69 @@ function GraphEngineCard() {
             Kraken {data.krakenFeesPct}%/leg (post-only maker) · Coinbase {data.coinbaseFeesPct}%/leg · Bridge edges: inventory model, no transfer fee · Scanned {format(new Date(data.scannedAt), "HH:mm:ss")}
           </div>
         )}
+      </CardContent>
+    </Card>
+  );
+}
+
+// ── Execution Quality panel ───────────────────────────────────────────────────
+// Per-route feedback loop: fill rate + expected vs realized profit from every
+// recorded execution attempt. This is what separates routes that LOOK
+// profitable from routes that actually PAY.
+function ExecutionQualityCard() {
+  const { data } = useGetExecutionQuality({ query: { refetchInterval: 30_000, staleTime: 25_000 } });
+  const rows = data?.routes ?? [];
+  if (rows.length === 0) return null;
+  return (
+    <Card className="mt-6">
+      <CardHeader className="py-3">
+        <CardTitle className="text-sm flex items-center gap-2">
+          <Activity className="h-4 w-4 text-primary" />
+          Execution Quality
+          <span className="text-[10px] font-mono text-muted-foreground font-normal">
+            expected vs realized · feedback loop gates live execution
+          </span>
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="p-0">
+        <div className="overflow-x-auto">
+          <table className="w-full text-xs font-mono border-collapse">
+            <thead>
+              <tr className="border-b-2 border-border bg-muted/50">
+                {["Route", "Style", "Attempts", "Live", "Expected", "Realized", "Fill Rate", "Slippage", "Net P&L"].map(h => (
+                  <th key={h} className="text-left px-3 py-2 text-[10px] uppercase font-bold text-muted-foreground whitespace-nowrap">{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((r, i) => (
+                <tr key={`${r.route}|${r.style}`} className={cn("border-b border-border/50", i % 2 === 0 ? "" : "bg-muted/20")}>
+                  <td className="px-3 py-1.5 font-bold whitespace-nowrap max-w-[240px] truncate" title={r.route}>{r.route}</td>
+                  <td className="px-3 py-1.5 uppercase text-muted-foreground">{r.style}</td>
+                  <td className="px-3 py-1.5">{r.attempts}</td>
+                  <td className="px-3 py-1.5">{r.liveAttempts}</td>
+                  <td className="px-3 py-1.5">{r.avgExpectedProfitUsd == null ? "—" : `$${r.avgExpectedProfitUsd.toFixed(4)}`}</td>
+                  <td className={cn("px-3 py-1.5 font-bold", r.avgRealizedProfitUsd == null ? "text-muted-foreground" : r.avgRealizedProfitUsd > 0 ? "text-success" : "text-destructive")}
+                    title={r.avgShortfallUsd == null ? undefined : `Shortfall vs expected: $${r.avgShortfallUsd.toFixed(4)}`}>
+                    {r.avgRealizedProfitUsd == null ? "—" : `$${r.avgRealizedProfitUsd.toFixed(4)}`}
+                  </td>
+                  <td className={cn("px-3 py-1.5 font-bold", r.liveFillRate == null ? "text-muted-foreground" : r.liveFillRate >= 0.8 ? "text-success" : r.liveFillRate >= 0.5 ? "text-yellow-500" : "text-destructive")}>
+                    {r.liveFillRate == null ? "—" : `${(r.liveFillRate * 100).toFixed(0)}%`}
+                  </td>
+                  <td className="px-3 py-1.5 text-muted-foreground">
+                    {r.avgSlippagePct == null ? "—" : `${r.avgSlippagePct.toFixed(3)}%`}
+                  </td>
+                  <td className={cn("px-3 py-1.5 font-bold", r.totalRealizedProfitUsd == null ? "text-muted-foreground" : r.totalRealizedProfitUsd > 0 ? "text-success" : "text-destructive")}>
+                    {r.totalRealizedProfitUsd == null ? "—" : `$${r.totalRealizedProfitUsd.toFixed(4)}`}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        <div className="px-3 py-1.5 text-[9px] font-mono text-muted-foreground border-t border-border/50">
+          Shortfall = scanner expectation − realized fills. Routes with ≥3 live attempts and &lt;50% fill rate are blocked from live execution; persistent shortfalls raise the edge a route must clear.
+        </div>
       </CardContent>
     </Card>
   );

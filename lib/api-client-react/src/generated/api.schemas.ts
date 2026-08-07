@@ -406,12 +406,36 @@ export interface GraphExecuteRequest {
   executionStyle?: "taker" | "maker";
 }
 
+export interface ExecutionQualityRoute {
+  route: string;
+  style: "taker" | "maker";
+  attempts: number;
+  liveAttempts: number;
+  /** Share of live attempts where every leg confirmed filled; null with no live attempts */
+  liveFillRate: number | null;
+  avgExpectedProfitUsd: number | null;
+  avgRealizedProfitUsd: number | null;
+  /** expected − realized (positive = scanner overestimates this route) */
+  avgShortfallUsd: number | null;
+  /** Avg depth-walked slippage % across recorded attempts (0 for maker joins) */
+  avgSlippagePct: number | null;
+  totalRealizedProfitUsd: number | null;
+  lastAttemptAt: string;
+}
+
+export interface ExecutionQualityResult {
+  routes: ExecutionQualityRoute[];
+  totalRecords: number;
+}
+
 export interface GraphExecuteResult {
   success: boolean;
   isDryRun: boolean;
   executed: boolean;
   route: string;
   preflightProfitUsd?: number | null;
+  /** Actual USD profit from confirmed fills (cost/fee accounting); null when unknown */
+  realizedProfitUsd?: number | null;
   orderIds?: string[] | null;
   error?: string | null;
 }

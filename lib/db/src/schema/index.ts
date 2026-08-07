@@ -19,3 +19,4 @@
 
 export * from "./trades";
 export * from "./tri-scan";
+export * from "./execution-quality";

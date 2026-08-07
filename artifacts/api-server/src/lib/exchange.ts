@@ -380,14 +380,15 @@ export async function coinbaseMarketOrder(
   return { orderId: data.success_response?.order_id ?? data.order_id, success: data.success };
 }
 
-interface CoinbaseOrderInfo { status?: string; average_filled_price?: string; filled_size?: string; filled_value?: string; }
+interface CoinbaseOrderInfo { status?: string; average_filled_price?: string; filled_size?: string; filled_value?: string; total_fees?: string; }
 
 /**
  * Full order details incl. cumulative fills. filledSize is BASE units,
- * filledValue is QUOTE (USD). Terminal statuses: FILLED, CANCELLED, EXPIRED, FAILED.
+ * filledValue is QUOTE (USD), totalFees is QUOTE (USD).
+ * Terminal statuses: FILLED, CANCELLED, EXPIRED, FAILED.
  */
 export async function coinbaseOrderDetails(creds: CoinbaseCreds, orderId: string): Promise<{
-  status: string; filledSize: number; filledValue: number; avgPrice: number;
+  status: string; filledSize: number; filledValue: number; avgPrice: number; totalFees: number;
 }> {
   const data = await coinbaseRequest<{ order?: CoinbaseOrderInfo }>(
     creds, "GET", `/api/v3/brokerage/orders/historical/${orderId}`
@@ -397,6 +398,7 @@ export async function coinbaseOrderDetails(creds: CoinbaseCreds, orderId: string
     filledSize:  parseFloat(data.order?.filled_size  ?? "0") || 0,
     filledValue: parseFloat(data.order?.filled_value ?? "0") || 0,
     avgPrice:    parseFloat(data.order?.average_filled_price ?? "0") || 0,
+    totalFees:   parseFloat(data.order?.total_fees   ?? "0") || 0,
   };
 }
 

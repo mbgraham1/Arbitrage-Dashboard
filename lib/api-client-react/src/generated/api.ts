@@ -31,6 +31,7 @@ import type {
   GetObScanParams,
   GraphExecuteRequest,
   GraphExecuteResult,
+  ExecutionQualityResult,
   FeeTierRequest,
   FeeTierResult,
   GraphScanResult,
@@ -1277,6 +1278,24 @@ export function useGetGraphScan<TData = Awaited<ReturnType<typeof getGraphScan>>
   const queryOptions = getGetGraphScanQueryOptions(params, options);
   const query = useQuery(queryOptions) as UseQueryResult<TData, TError> & { queryKey: QueryKey };
   return withQueryKey(query, queryOptions.queryKey);
+}
+
+export const getExecutionQuality = async (options?: RequestInit): Promise<ExecutionQualityResult> =>
+  customFetch<ExecutionQualityResult>(`/api/arb/execution-quality`, { ...options, method: "GET" });
+
+export const getGetExecutionQualityQueryKey = () => ["/api/arb/execution-quality"] as const;
+
+/** Per-route execution quality: fill rate + expected vs realized profit. */
+export function useGetExecutionQuality<TData = ExecutionQualityResult, TError = ErrorType<unknown>>(
+  options?: { query?: Partial<UseQueryOptions<ExecutionQualityResult, TError, TData>>; request?: SecondParameter<typeof customFetch> },
+): UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+  const queryKey = options?.query?.queryKey ?? getGetExecutionQualityQueryKey();
+  const query = useQuery({
+    queryKey,
+    queryFn: ({ signal }) => getExecutionQuality({ signal, ...options?.request }),
+    ...options?.query,
+  } as UseQueryOptions<ExecutionQualityResult, TError, TData>) as UseQueryResult<TData, TError> & { queryKey: QueryKey };
+  return withQueryKey(query, queryKey);
 }
 
 export const getFeeTier = async (feeTierRequest: FeeTierRequest, options?: RequestInit): Promise<FeeTierResult> =>
