@@ -1,0 +1,65 @@
+# ---------- MULTI-COIN SCANNER ----------
+def scan_all_coins():
+    """Fetch prices for 10 coins and rank them by net edge."""
+    # Kraken symbol map (some are different)
+    kraken_map = {
+        "BTC": "XBTUSD",
+        "ETH": "ETHUSD",
+        "SOL": "SOLUSD",
+        "XRP": "XRPUSD",
+        "LINK": "LINKUSD",
+        "AVAX": "AVAXUSD",
+        "ADA": "ADAUSD",
+        "DOGE": "DOGEUSD",
+        "LTC": "LTCUSD",
+        "SUI": "SUIUSD",
+    }
+    # Coinbase uses standard tickers
+    cb_map = {
+        "BTC": "BTC-USD",
+        "ETH": "ETH-USD",
+        "SOL": "SOL-USD",
+        "XRP": "XRP-USD",
+        "LINK": "LINK-USD",
+        "AVAX": "AVAX-USD",
+        "ADA": "ADA-USD",
+        "DOGE": "DOGE-USD",
+        "LTC": "LTC-USD",
+        "SUI": "SUI-USD",
+    }
+    results = []
+    for coin, kraken_pair in kraken_map.items():
+        try:
+            # Kraken price
+            r = requests.get(f"https://api.kraken.com/0/public/Ticker?pair={kraken_pair}", timeout=2)
+            k_data = r.json()
+            if k_data.get("error"):
+                continue
+            k_price = Decimal(list(k_data["result"].values())[0]["c"][0])
+
+            # Coinbase price
+            r = requests.get(f"https://api.coinbase.com/v2/prices/{cb_map[coin]}/spot", timeout=2)
+            c_price = Decimal(r.json()["data"]["amount"])
+
+            if not k_price or not c_price:
+                continue
+
+            # Calculate spreads (using global fee variable)
+            gross = (abs(k_price - c_price) / min(k_price, c_price)) * 100
+            net = gross - float(total_fees) - float(slippage)  # total_fees and slippage from sidebar
+
+            buy_ex = "Kraken" if k_price < c_price else "Coinbase"
+            sell_ex = "Coinbase" if k_price < c_price else "Kraken"
+
+            results.append({
+                "Coin": coin,
+                "Buy": buy_ex,
+                "Sell": sell_ex,
+                "Gross %": round(gross, 2),
+                "Net %": round(net, 2),
+                "K Price": round(k_price, 2),
+                "C Price": round(c_price, 2),
+            })
+        except:
+            pass
+    return sorted(results, key=lambda x: x["Net %"], reverse=True)
