@@ -793,7 +793,7 @@ components:
 
     TradeRecord:
       type: object
-      required: [id, createdAt, buyExchange, sellExchange, volumeSol, estimatedProfitUsd, netEdgePct, isDryRun, krakenPrice, coinbasePrice]
+      required: [id, createdAt, buyExchange, sellExchange, volume, estimatedProfitUsd, netEdgePct, isDryRun, krakenPrice, coinbasePrice]
       properties:
         id:
           type: integer
@@ -806,7 +806,7 @@ components:
           type: string
         sellExchange:
           type: string
-        volumeSol:
+        volume:
           type: number
         estimatedProfitUsd:
           type: number

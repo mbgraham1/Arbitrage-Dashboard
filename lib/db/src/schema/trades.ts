@@ -8,7 +8,7 @@ export const tradesTable = pgTable("trades", {
   pair: text("pair"),                          // e.g. "SOL/USD", "BTC/USD" — null for old rows
   buyExchange: text("buy_exchange").notNull(),
   sellExchange: text("sell_exchange").notNull(),
-  volumeSol: numeric("volume_sol", { precision: 18, scale: 8 }).notNull(),
+  volume: numeric("volume", { precision: 18, scale: 8 }).notNull(),
   estimatedProfitUsd: numeric("estimated_profit_usd", { precision: 18, scale: 6 }).notNull(),
   netEdgePct: numeric("net_edge_pct", { precision: 10, scale: 4 }).notNull(),
   isDryRun: boolean("is_dry_run").notNull().default(true),

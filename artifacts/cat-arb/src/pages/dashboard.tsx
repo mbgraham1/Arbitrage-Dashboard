@@ -1849,7 +1849,7 @@ function TradeHistoryTable() {
                     </td>
                     <td className="px-3 py-1.5 text-success font-bold">{t.buyExchange}</td>
                     <td className="px-3 py-1.5 text-primary font-bold">{t.sellExchange}</td>
-                    <td className="px-3 py-1.5">{Number(t.volumeSol).toFixed(4)} {t.pair ? t.pair.split("/")[0] : "SOL"}</td>
+                    <td className="px-3 py-1.5">{Number(t.volume).toFixed(4)} {t.pair ? t.pair.split("/")[0] : "SOL"}</td>
                     <td className="px-3 py-1.5">${Number(buyPrice).toFixed(4)}</td>
                     <td className="px-3 py-1.5">${Number(sellPrice).toFixed(4)}</td>
                     <td className={cn("px-3 py-1.5 font-bold", profit >= 0 ? "text-success" : "text-destructive")}>

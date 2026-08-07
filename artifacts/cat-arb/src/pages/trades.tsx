@@ -159,7 +159,7 @@ export default function Trades() {
                         </div>
                       </td>
                       <td className="px-4 py-3 text-right">
-                        {trade.volumeSol.toFixed(4)}{" "}
+                        {trade.volume.toFixed(4)}{" "}
                         <span className="text-muted-foreground text-[10px]">{(trade.pair ?? "SOL/USD").split("/")[0]}</span>
                       </td>
                       <td className="px-4 py-3 text-right">

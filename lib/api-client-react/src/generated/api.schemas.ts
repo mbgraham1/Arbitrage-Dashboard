@@ -148,7 +148,7 @@ export interface TradeRecord {
   pair?: string | null;
   buyExchange: string;
   sellExchange: string;
-  volumeSol: number;
+  volume: number;
   estimatedProfitUsd: number;
   netEdgePct: number;
   isDryRun: boolean;
