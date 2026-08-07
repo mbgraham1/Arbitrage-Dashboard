@@ -374,16 +374,16 @@ export default function Settings() {
 
             <div className="space-y-3">
               <div className="flex flex-col gap-1">
-                <Label>Max Position (SOL)</Label>
-                <span className="text-xs text-muted-foreground font-mono">Hard cap per trade regardless of Kelly output</span>
+                <Label>Max Position (USD notional)</Label>
+                <span className="text-xs text-muted-foreground font-mono">Hard USD cap per trade — applies to BTC, ETH, SOL equally</span>
               </div>
               <Input
                 type="number"
-                step="0.1"
-                min="0.1"
-                max="10"
-                value={localSettings.maxPositionSol}
-                onChange={(e) => setLocalSettings({ ...localSettings, maxPositionSol: parseFloat(e.target.value) || 1.0 })}
+                step="10"
+                min="10"
+                max="100000"
+                value={localSettings.maxPositionUsd}
+                onChange={(e) => setLocalSettings({ ...localSettings, maxPositionUsd: parseFloat(e.target.value) || 150 })}
               />
             </div>
 

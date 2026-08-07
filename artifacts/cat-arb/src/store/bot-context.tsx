@@ -47,7 +47,7 @@ export interface BotSettings {
   // Kelly Criterion position sizing
   winRate: number;       // estimated win rate (default 0.55)
   kellyFraction: number; // fractional Kelly cap (default 0.25 = quarter-Kelly)
-  maxPositionSol: number; // hard cap in SOL (default 1.0)
+  maxPositionUsd: number; // hard cap in USD notional (default $150 ≈ 1 SOL at $150)
   // Pair selection — which of the 10 pairs the scanner watches
   enabledPairs: string[];
   // Order Book Hunter parameters
@@ -122,20 +122,20 @@ const DEFAULT_SETTINGS: BotSettings = {
   pollInterval: 5,
   winRate: 0.55,        // Kelly: estimated historical win rate
   kellyFraction: 0.25,  // Kelly: quarter-Kelly for conservative sizing
-  maxPositionSol: 1.0,  // Kelly: hard cap per trade (SOL)
+  maxPositionUsd: 150,  // Kelly: hard cap per trade in USD notional (~1 SOL at $150)
   enabledPairs: [...ALL_PAIRS], // all 10 pairs enabled by default
   obTradeSize: 10,      // v8: OB Hunter default $10 trade size
   obFeesPct: 0.16,      // v8: OB Hunter default 0.16% fee per leg (Kraken post-only maker rate)
 };
 
 // Bump this when defaults change meaningfully — forces a one-time reset for existing users
-const SETTINGS_VERSION = 8;
+const SETTINGS_VERSION = 9;
 
 // ── Kelly Criterion position sizer ────────────────────────────────────────────
 // Direct port of Python KellySizer.calculate()
 // f* = (b·p − q) / b   where b = edge fraction, p = win rate, q = 1−p
-// maxPositionUsd is the hard USD cap (= settings.maxPositionSol × SOL reference price).
-// Capping in USD keeps BTC/ETH/ATOM positions at the same dollar risk as SOL,
+// maxPositionUsd is the hard USD cap read directly from settings.
+// Capping in USD keeps BTC/ETH/ATOM positions at the same dollar risk,
 // regardless of the asset's unit price.
 function kellySize(
   edgePct: number,
@@ -477,12 +477,8 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
   const clearLog = useCallback(() => setActivityLog([]), []);
 
   // ── Shared execution (reads from refs, not closure) ───────────────────────────
-  // solRefPrice: SOL/USD price used to anchor the USD position cap. For SOL/USD
-  // trades this equals data.buyPrice (no change). For BTC/ETH/etc. pass the
-  // live SOL price so the cap stays at "maxPositionSol SOL-worth of USD" rather
-  // than "maxPositionSol base units of the traded asset".
   const runExecuteTrade = useCallback(
-    async (data: PriceData, forced: boolean, solRefPrice?: number) => {
+    async (data: PriceData, forced: boolean) => {
       const live = forced ? true : liveModeRef.current;
       const s = settingsRef.current;
       const creds = credentialsRef.current;
@@ -494,10 +490,8 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
       // Derive the base asset symbol from the active pair (e.g. "BTC" from "BTC/USD")
       const baseAsset = data.pair ? data.pair.split("/")[0] : "SOL";
 
-      // USD cap = maxPositionSol × SOL reference price.
-      // For SOL/USD: solRefPrice === data.buyPrice → same cap as before.
-      // For BTC/ETH/etc.: anchors the cap to SOL-equivalent USD risk, not BTC units.
-      const maxPositionUsd = s.maxPositionSol * (solRefPrice ?? data.buyPrice);
+      // USD cap read directly from settings — pair-agnostic, no unit conversion needed.
+      const maxPositionUsd = s.maxPositionUsd;
 
       let volume = kellySize(
         netEdge,
@@ -613,45 +607,13 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
       // ── Step 1: try the multi-pair ranker ─────────────────────────────────
       let priceData: PriceData | null = null;
 
-      // solRefPrice: SOL/USD price from the scan, used to anchor the USD position
-      // cap in runExecuteTrade. For SOL/USD trades this equals buyPrice (unchanged).
-      // For BTC/ETH/etc. it ensures the cap stays at "N SOL worth of USD" risk.
-      let solRefPrice: number | undefined;
-
       try {
         addLog("info", "[FORCE] Scanning all pairs for best spread...");
         const entries = await scanAllPairs();
 
-        // Capture SOL reference price from scan before picking the best entry
-        const solEntry = entries?.find(e => e.pair === "SOL/USD");
-        if (solEntry) {
-          solRefPrice = (solEntry.krakenPrice + solEntry.coinbasePrice) / 2;
-        }
-
         const best = entries && entries.length > 0 ? entries[0] : null;
 
         if (best) {
-          // If the best pair is non-SOL and SOL/USD was absent from the scan (data
-          // outage), fetch SOL/USD exclusively so the USD cap is always correctly
-          // anchored. Pass enabledPairs:["SOL/USD"] so /prices cannot return another
-          // asset. Validate the response pair before trusting it; abort if unavailable.
-          if (!solRefPrice && best.pair !== "SOL/USD") {
-            addLog("info", "[FORCE] SOL/USD missing from scan — fetching SOL/USD reference price...");
-            try {
-              const solData = await fetchPricesMutation.mutateAsync({
-                data: { ...credentialsRef.current, enabledPairs: ["SOL/USD"] },
-              });
-              if (solData.pair !== "SOL/USD" || !solData.krakenPrice || !solData.coinbasePrice) {
-                addLog("error", "[FORCE] SOL/USD reference unavailable — aborting to prevent oversized position");
-                return;
-              }
-              solRefPrice = (solData.krakenPrice + solData.coinbasePrice) / 2;
-            } catch {
-              addLog("error", "[FORCE] Could not fetch SOL/USD reference — aborting to prevent oversized position");
-              return;
-            }
-          }
-
           // Use executable ask/bid — the prices a market order actually fills at.
           // Buy side pays the ask; sell side receives the bid.
           const buyPrice  = best.buyExchange  === "Kraken" ? best.krakenAsk  : best.coinbaseAsk;
@@ -695,7 +657,7 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
 
       // ── Step 2: fall back to a fresh SOL/USD-only fetch if scan gave nothing ──
       // Always request SOL/USD explicitly (enabledPairs:["SOL/USD"]) so /prices
-      // cannot return a non-SOL pair whose price would be mistaken for solRefPrice.
+      // cannot return a non-SOL pair whose price would be used for sizing.
       if (!priceData) {
         addLog("info", "[FORCE] Fetching SOL/USD prices (fallback)...");
         let fetched: PriceData;
@@ -736,12 +698,9 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
           route: `Buy ${buyEx} → Sell ${sellEx}`,
           executable: true,
         };
-        // Pair is confirmed SOL/USD — solRefPrice = buyPrice (same asset)
-        solRefPrice = buyPrice;
       }
 
-      // Pass solRefPrice so Kelly cap is always USD-denominated at SOL-equivalent risk
-      await runExecuteTrade(priceData, true, solRefPrice);
+      await runExecuteTrade(priceData, true);
     } catch (err) {
       addLog("error", `[FORCE] Error: ${err instanceof Error ? err.message : "Unknown"}`);
     } finally {
@@ -826,7 +785,7 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
           return;
         }
 
-        const kellyVol = kellySize(netEdge, cachedBalancesRef.current?.usdOnCoinbase ?? 0, s.winRate, s.kellyFraction, data.buyPrice ?? 0, s.maxPositionSol);
+        const kellyVol = kellySize(netEdge, cachedBalancesRef.current?.usdOnCoinbase ?? 0, s.winRate, s.kellyFraction, data.buyPrice ?? 0, s.maxPositionUsd);
         const estimatedNetProfit = (netEdge / 100) * (data.buyPrice ?? 0) * kellyVol;
         if (estimatedNetProfit < s.minProfitUsd) {
           addLog("info", `No trade — est. profit $${estimatedNetProfit.toFixed(2)} < $${s.minProfitUsd.toFixed(2)} minimum ${wsInfo}`);
