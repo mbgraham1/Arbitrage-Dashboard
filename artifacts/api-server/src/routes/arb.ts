@@ -509,6 +509,34 @@ router.get("/arb/triangular/history", async (req, res): Promise<void> => {
   }
 });
 
+// ── GET /arb/triangular/history/summary ───────────────────────────────────────
+// Returns aggregate stats across all recorded triangular scan rows.
+// Query param: tradeSizeUsd (default 1000) — used for counterfactual P&L.
+router.get("/arb/triangular/history/summary", async (req, res): Promise<void> => {
+  const tradeSizeUsd = Math.max(1, parseFloat(String(req.query["tradeSizeUsd"] ?? "1000")) || 1000);
+  try {
+    const [row] = await db
+      .select({
+        total:        count(),
+        avgProfitPct: sql<number>`AVG(CAST(${triScanTable.profitPct} AS NUMERIC))`,
+        bestProfitPct: sql<number>`MAX(CAST(${triScanTable.profitPct} AS NUMERIC))`,
+        sumProfitPct: sql<number>`SUM(CAST(${triScanTable.profitPct} AS NUMERIC))`,
+      })
+      .from(triScanTable);
+
+    const total         = Number(row?.total          ?? 0);
+    const avgProfitPct  = parseFloat(String(row?.avgProfitPct  ?? "0")) || 0;
+    const bestProfitPct = parseFloat(String(row?.bestProfitPct ?? "0")) || 0;
+    const sumProfitPct  = parseFloat(String(row?.sumProfitPct  ?? "0")) || 0;
+    // Counterfactual P&L: if every detected opportunity had been traded at tradeSizeUsd
+    const counterfactualPnlUsd = (sumProfitPct / 100) * tradeSizeUsd;
+
+    res.json({ total, avgProfitPct, bestProfitPct, counterfactualPnlUsd, tradeSizeUsd });
+  } catch (err) {
+    res.status(500).json({ error: (err as Error).message });
+  }
+});
+
 // ── Triangular execution helpers ───────────────────────────────────────────────
 
 /** Attempt to cancel a limit order to unwind a partial triangular trade. */

@@ -1,7 +1,7 @@
 import React, { useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { useListTrades, useGetTradeSummary, useGetTriangularHistory } from "@workspace/api-client-react";
+import { useListTrades, useGetTradeSummary, useGetTriangularHistory, useGetTriangularHistorySummary } from "@workspace/api-client-react";
 import { format } from "date-fns";
 import { ArrowRight, BarChart2, DollarSign, Activity, Triangle } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -17,11 +17,16 @@ export default function Trades() {
     { limit: 100 },
     { refetchInterval: 30_000, enabled: tab === "triangular" },
   );
+  const triSummaryQuery = useGetTriangularHistorySummary(
+    { tradeSizeUsd: 1000 },
+    { refetchInterval: 30_000, enabled: tab === "triangular" },
+  );
 
   const trades = tradesQuery.data || [];
   const summary = summaryQuery.data;
   const triItems = triHistoryQuery.data?.items ?? [];
   const triTotal = triHistoryQuery.data?.total ?? 0;
+  const triSummary = triSummaryQuery.data;
 
   return (
     <div className="flex flex-col gap-6">
@@ -168,7 +173,46 @@ export default function Trades() {
         </Card>
       )}
 
-      {/* ── Triangular Scans tab ── */}
+      {/* ── Triangular Scans tab — summary cards ── */}
+      {tab === "triangular" && (
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+          <Card>
+            <CardContent className="p-4 flex flex-col gap-1">
+              <span className="text-xs font-bold text-muted-foreground uppercase">Total Opportunities</span>
+              <span className="text-2xl font-mono font-bold">
+                {triSummary?.total ?? triTotal ?? 0}
+              </span>
+            </CardContent>
+          </Card>
+          <Card>
+            <CardContent className="p-4 flex flex-col gap-1">
+              <span className="text-xs font-bold text-muted-foreground uppercase">Avg Profit %</span>
+              <span className="text-2xl font-mono font-bold text-primary">
+                {triSummary ? `+${triSummary.avgProfitPct.toFixed(4)}%` : "—"}
+              </span>
+            </CardContent>
+          </Card>
+          <Card>
+            <CardContent className="p-4 flex flex-col gap-1">
+              <span className="text-xs font-bold text-muted-foreground uppercase">Best Opportunity</span>
+              <span className="text-2xl font-mono font-bold text-success">
+                {triSummary ? `+${triSummary.bestProfitPct.toFixed(4)}%` : "—"}
+              </span>
+            </CardContent>
+          </Card>
+          <Card className="bg-primary text-primary-foreground border-primary">
+            <CardContent className="p-4 flex flex-col gap-1">
+              <span className="text-xs font-bold uppercase opacity-80">Counterfactual P&amp;L</span>
+              <span className="text-2xl font-mono font-bold">
+                {triSummary ? `$${triSummary.counterfactualPnlUsd.toFixed(2)}` : "—"}
+              </span>
+              <span className="text-[10px] opacity-70 font-mono">@ $1k/trade</span>
+            </CardContent>
+          </Card>
+        </div>
+      )}
+
+      {/* ── Triangular Scans tab — history table ── */}
       {tab === "triangular" && (
         <Card>
           <CardHeader className="py-3">

@@ -46,6 +46,51 @@ export const getGetTriangularHistoryQueryKey = (params?: {
   offset?: number;
 }) => [getTriangularHistoryUrl(params)] as const;
 
+// ── Summary hook ──────────────────────────────────────────────────────────────
+
+export interface TriScanHistorySummary {
+  total: number;
+  avgProfitPct: number;
+  bestProfitPct: number;
+  counterfactualPnlUsd: number;
+  tradeSizeUsd: number;
+}
+
+export const getTriangularHistorySummaryUrl = (params?: { tradeSizeUsd?: number }) => {
+  const sp = new URLSearchParams();
+  if (params?.tradeSizeUsd !== undefined) sp.set("tradeSizeUsd", String(params.tradeSizeUsd));
+  const qs = sp.toString();
+  return `/api/arb/triangular/history/summary${qs ? `?${qs}` : ""}`;
+};
+
+export const getTriangularHistorySummary = (params?: {
+  tradeSizeUsd?: number;
+}): Promise<TriScanHistorySummary> =>
+  customFetch<TriScanHistorySummary>(getTriangularHistorySummaryUrl(params), {
+    method: "GET",
+  });
+
+export const getGetTriangularHistorySummaryQueryKey = (params?: { tradeSizeUsd?: number }) =>
+  [getTriangularHistorySummaryUrl(params)] as const;
+
+export const useGetTriangularHistorySummary = (
+  params?: { tradeSizeUsd?: number },
+  options?: Omit<
+    UseQueryOptions<
+      TriScanHistorySummary,
+      Error,
+      TriScanHistorySummary,
+      readonly [string]
+    >,
+    "queryKey" | "queryFn"
+  >,
+): UseQueryResult<TriScanHistorySummary, Error> =>
+  useQuery({
+    queryKey: getGetTriangularHistorySummaryQueryKey(params),
+    queryFn: () => getTriangularHistorySummary(params),
+    ...options,
+  });
+
 export const useGetTriangularHistory = (
   params?: { limit?: number; offset?: number },
   options?: Omit<
