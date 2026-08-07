@@ -308,6 +308,9 @@ components:
       type: object
       required: [krakenPrice, krakenBid, krakenAsk, coinbasePrice, coinbaseBid, coinbaseAsk, grossSpreadPct, netEdgePct, route, timestamp, bestBuyExchange, bestSellExchange, buyPrice, sellPrice, executable, wsStatus]
       properties:
+        pair:
+          type: string
+          description: "Canonical pair symbol with the best spread (e.g. SOL/USD, BTC/USD)"
         krakenPrice:
           type: number
         krakenBid:
@@ -439,6 +442,9 @@ components:
           type: string
           enum: [market, limit]
           default: market
+        pair:
+          type: string
+          description: "Trading pair symbol (e.g. SOL/USD, BTC/USD). Defaults to SOL/USD."
 
     TradeResult:
       type: object
@@ -470,6 +476,9 @@ components:
           type: integer
         createdAt:
           type: string
+        pair:
+          type: ["string", "null"]
+          description: "Trading pair symbol (e.g. SOL/USD, BTC/USD). Null for records before multi-pair support."
         buyExchange:
           type: string
         sellExchange:

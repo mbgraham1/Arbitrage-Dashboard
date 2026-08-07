@@ -9,6 +9,8 @@
 export interface TradeRecord {
   id: number;
   createdAt: string;
+  /** Trading pair symbol (e.g. SOL/USD, BTC/USD). Null for records before multi-pair support. @nullable */
+  pair?: string | null;
   buyExchange: string;
   sellExchange: string;
   volumeSol: number;

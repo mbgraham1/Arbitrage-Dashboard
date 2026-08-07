@@ -5,6 +5,44 @@
 import crypto from "node:crypto";
 
 // ---------------------------------------------------------------------------
+// Pair symbol mappings
+// ---------------------------------------------------------------------------
+
+export const PAIRS = [
+  "BTC/USD", "ETH/USD", "SOL/USD", "AVAX/USD", "DOT/USD",
+  "POL/USD", "LINK/USD", "UNI/USD", "ATOM/USD", "ADA/USD",
+] as const;
+export type Pair = typeof PAIRS[number];
+
+/** Kraken REST API pair symbols (used in /0/public/Ticker and AddOrder). */
+export const KRAKEN_REST_PAIRS: Record<Pair, string> = {
+  "BTC/USD":  "XBTUSD",
+  "ETH/USD":  "ETHUSD",
+  "SOL/USD":  "SOLUSD",
+  "AVAX/USD": "AVAXUSD",
+  "DOT/USD":  "DOTUSD",
+  "POL/USD":  "POLUSD",    // Polygon rebranded from MATIC → POL
+  "LINK/USD": "LINKUSD",
+  "UNI/USD":  "UNIUSD",
+  "ATOM/USD": "ATOMUSD",
+  "ADA/USD":  "ADAUSD",    // Cardano — replaces FTM (no Coinbase USD market)
+};
+
+/** Coinbase product IDs (dash-notation). */
+export const COINBASE_PRODUCTS: Record<Pair, string> = {
+  "BTC/USD":  "BTC-USD",
+  "ETH/USD":  "ETH-USD",
+  "SOL/USD":  "SOL-USD",
+  "AVAX/USD": "AVAX-USD",
+  "DOT/USD":  "DOT-USD",
+  "POL/USD":  "POL-USD",   // Coinbase uses POL-USD (Polygon rebrand)
+  "LINK/USD": "LINK-USD",
+  "UNI/USD":  "UNI-USD",
+  "ATOM/USD": "ATOM-USD",
+  "ADA/USD":  "ADA-USD",
+};
+
+// ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
@@ -28,7 +66,6 @@ export interface CoinbaseCreds {
 // ---------------------------------------------------------------------------
 
 const KRAKEN_BASE = "https://api.kraken.com";
-const KRAKEN_PAIR = "SOLUSD";
 
 function krakenSign(path: string, nonce: string, postData: string, secret: string): string {
   const encoded = Buffer.from(nonce + postData);
@@ -69,8 +106,9 @@ async function krakenPrivateRequest<T>(path: string, data: Record<string, string
   return json.result as T;
 }
 
-export async function getKrakenPrice(): Promise<number> {
-  const result = await krakenPublicRequest<Record<string, { c: string[] }>>("/0/public/Ticker", { pair: KRAKEN_PAIR });
+export async function getKrakenPrice(pair: Pair = "SOL/USD"): Promise<number> {
+  const krakenPair = KRAKEN_REST_PAIRS[pair];
+  const result = await krakenPublicRequest<Record<string, { c: string[] }>>("/0/public/Ticker", { pair: krakenPair });
   const ticker = Object.values(result)[0];
   return parseFloat(ticker.c[0]);
 }
@@ -85,10 +123,11 @@ export async function getKrakenBalances(creds: KrakenCreds): Promise<BalanceEntr
 export async function krakenMarketOrder(
   creds: KrakenCreds,
   side: "buy" | "sell",
-  volume: number
+  volume: number,
+  pair: Pair = "SOL/USD",
 ): Promise<{ txid: string[] }> {
   return krakenPrivateRequest<{ txid: string[] }>("/0/private/AddOrder", {
-    pair: KRAKEN_PAIR,
+    pair: KRAKEN_REST_PAIRS[pair],
     type: side,
     ordertype: "market",
     volume: volume.toFixed(8),
@@ -99,10 +138,11 @@ export async function krakenLimitOrder(
   creds: KrakenCreds,
   side: "buy" | "sell",
   volume: number,
-  price: number
+  price: number,
+  pair: Pair = "SOL/USD",
 ): Promise<{ txid: string[] }> {
   return krakenPrivateRequest<{ txid: string[] }>("/0/private/AddOrder", {
-    pair: KRAKEN_PAIR,
+    pair: KRAKEN_REST_PAIRS[pair],
     type: side,
     ordertype: "limit",
     post_only: "true",
@@ -134,7 +174,6 @@ export async function krakenCancelOrder(creds: KrakenCreds, txid: string): Promi
 // ---------------------------------------------------------------------------
 
 const COINBASE_BASE = "https://api.coinbase.com";
-const COINBASE_PRODUCT = "SOL-USD";
 
 function buildCoinbaseJwt(apiKeyName: string, privateKeyPem: string, method: string, path: string): string {
   const now = Math.floor(Date.now() / 1000);
@@ -178,16 +217,17 @@ async function coinbaseRequest<T>(
   return resp.json() as Promise<T>;
 }
 
-/** Public endpoint — no API key required. Fixes 401 errors from Advanced Trade auth. */
-export async function getCoinbasePrice(): Promise<number> {
-  const resp = await fetch("https://api.coinbase.com/v2/prices/SOL-USD/spot", {
+/** Public endpoint — no API key required. */
+export async function getCoinbasePrice(pair: Pair = "SOL/USD"): Promise<number> {
+  const product = COINBASE_PRODUCTS[pair];
+  const resp = await fetch(`https://api.exchange.coinbase.com/products/${product}/ticker`, {
     signal: AbortSignal.timeout(10_000),
   });
   if (!resp.ok) throw new Error(`Coinbase public price HTTP ${resp.status}`);
-  const json = await resp.json() as { data?: { amount?: string } };
-  const amount = json.data?.amount;
-  if (!amount) throw new Error("Coinbase: missing price in public response");
-  return parseFloat(amount);
+  const json = await resp.json() as { price?: string };
+  const price = json.price;
+  if (!price) throw new Error("Coinbase: missing price in public response");
+  return parseFloat(price);
 }
 
 export async function getCoinbaseBalances(creds: CoinbaseCreds): Promise<BalanceEntry[]> {
@@ -205,9 +245,11 @@ export async function coinbaseMarketOrder(
   creds: CoinbaseCreds,
   side: "BUY" | "SELL",
   volume: number,
-  price: number
+  price: number,
+  pair: Pair = "SOL/USD",
 ): Promise<{ orderId?: string; success?: boolean }> {
   const clientOrderId = crypto.randomUUID();
+  const productId = COINBASE_PRODUCTS[pair];
   let orderConfig: unknown;
   if (side === "BUY") {
     const quoteSize = (volume * price).toFixed(2);
@@ -221,7 +263,7 @@ export async function coinbaseMarketOrder(
     "/api/v3/brokerage/orders",
     {
       client_order_id: clientOrderId,
-      product_id: COINBASE_PRODUCT,
+      product_id: productId,
       side,
       order_configuration: orderConfig,
     }
@@ -255,9 +297,11 @@ export async function coinbaseLimitOrder(
   creds: CoinbaseCreds,
   side: "BUY" | "SELL",
   volume: number,
-  price: number
+  price: number,
+  pair: Pair = "SOL/USD",
 ): Promise<{ orderId?: string; success?: boolean }> {
   const clientOrderId = crypto.randomUUID();
+  const productId = COINBASE_PRODUCTS[pair];
   const orderConfig = {
     limit_limit_gtc: {
       base_size: volume.toFixed(4),
@@ -271,7 +315,7 @@ export async function coinbaseLimitOrder(
     "/api/v3/brokerage/orders",
     {
       client_order_id: clientOrderId,
-      product_id: COINBASE_PRODUCT,
+      product_id: productId,
       side,
       order_configuration: orderConfig,
     }

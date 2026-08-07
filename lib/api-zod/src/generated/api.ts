@@ -28,6 +28,7 @@ export const FetchPricesBody = zod.object({
 })
 
 export const FetchPricesResponse = zod.object({
+  "pair": zod.string().optional(),
   "krakenPrice": zod.number(),
   "krakenBid": zod.number(),
   "krakenAsk": zod.number(),
@@ -145,7 +146,8 @@ export const ExecuteTradeBody = zod.object({
   "coinbasePrice": zod.number(),
   "liveMode": zod.boolean(),
   "netEdgePct": zod.number().optional(),
-  "orderType": zod.enum(['market', 'limit']).default(executeTradeBodyOrderTypeDefault)
+  "orderType": zod.enum(['market', 'limit']).default(executeTradeBodyOrderTypeDefault),
+  "pair": zod.enum(['BTC/USD','ETH/USD','SOL/USD','AVAX/USD','DOT/USD','POL/USD','LINK/USD','UNI/USD','ATOM/USD','ADA/USD']).optional()
 })
 
 export const ExecuteTradeResponse = zod.object({
@@ -174,6 +176,7 @@ export const ListTradesQueryParams = zod.object({
 export const ListTradesResponseItem = zod.object({
   "id": zod.number(),
   "createdAt": zod.string(),
+  "pair": zod.string().nullish(),
   "buyExchange": zod.string(),
   "sellExchange": zod.string(),
   "volumeSol": zod.number(),

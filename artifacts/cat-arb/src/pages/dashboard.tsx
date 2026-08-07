@@ -282,7 +282,12 @@ export default function Dashboard() {
               <div className="flex justify-between items-center">
                 <div className="flex flex-col">
                   <span className="text-xs font-bold text-muted-foreground uppercase">Route</span>
-                  <span className="font-mono text-sm leading-tight">{latestPriceData?.route || "—"}</span>
+                  <div className="flex items-center gap-1.5">
+                    {latestPriceData?.pair && (
+                      <span className="text-[9px] font-mono font-bold px-1 border border-muted-foreground text-muted-foreground">{latestPriceData.pair}</span>
+                    )}
+                    <span className="font-mono text-sm leading-tight">{latestPriceData?.route || "—"}</span>
+                  </div>
                 </div>
                 <ArrowRight className="h-4 w-4 text-muted-foreground shrink-0" />
                 <div className="flex flex-col items-end">
@@ -546,7 +551,7 @@ function TradeHistoryTable() {
           <table className="w-full text-xs font-mono border-collapse">
             <thead>
               <tr className="border-b-2 border-border bg-muted/50">
-                {["Time","Trade ID","Buy","Sell","Volume","Buy Price","Sell Price","Profit","Order IDs"].map((h) => (
+                {["Time","Trade ID","Pair","Buy","Sell","Volume","Buy Price","Sell Price","Profit","Order IDs"].map((h) => (
                   <th key={h} className="text-left px-3 py-2 text-[10px] uppercase font-bold text-muted-foreground whitespace-nowrap">{h}</th>
                 ))}
               </tr>
@@ -560,6 +565,9 @@ function TradeHistoryTable() {
                   <tr key={t.id} className={cn("border-b border-border/50", i % 2 === 0 ? "" : "bg-muted/20")}>
                     <td className="px-3 py-1.5 whitespace-nowrap text-muted-foreground">{format(new Date(t.createdAt), "MM/dd HH:mm:ss")}</td>
                     <td className="px-3 py-1.5 font-bold">#{t.id}</td>
+                    <td className="px-3 py-1.5">
+                      <span className="text-[9px] font-mono font-bold px-1 border border-border text-muted-foreground">{t.pair ?? "SOL/USD"}</span>
+                    </td>
                     <td className="px-3 py-1.5 text-success font-bold">{t.buyExchange}</td>
                     <td className="px-3 py-1.5 text-primary font-bold">{t.sellExchange}</td>
                     <td className="px-3 py-1.5">{Number(t.volumeSol).toFixed(4)} SOL</td>

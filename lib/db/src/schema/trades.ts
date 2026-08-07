@@ -5,6 +5,7 @@ import { z } from "zod/v4";
 export const tradesTable = pgTable("trades", {
   id: serial("id").primaryKey(),
   createdAt: timestamp("created_at").defaultNow().notNull(),
+  pair: text("pair"),                          // e.g. "SOL/USD", "BTC/USD" — null for old rows
   buyExchange: text("buy_exchange").notNull(),
   sellExchange: text("sell_exchange").notNull(),
   volumeSol: numeric("volume_sol", { precision: 18, scale: 8 }).notNull(),

@@ -289,6 +289,7 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
             liveMode: live,
             netEdgePct: netEdge,
             orderType,
+            pair: data.pair ?? "SOL/USD",
           },
         });
         if (res.success) {
@@ -425,8 +426,8 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
         const netEdge = data.grossSpreadPct - s.totalFees - s.slippage;
         const wsInfo = `[K:${data.wsStatus.kraken ? "WS" : "REST"} C:${data.wsStatus.coinbase ? "WS" : "REST"}]`;
 
-        addLog("info", `K Bid:${data.krakenBid?.toFixed(4) ?? "—"} Ask:${data.krakenAsk?.toFixed(4) ?? "—"} | C Bid:${data.coinbaseBid?.toFixed(4) ?? "—"} Ask:${data.coinbaseAsk?.toFixed(4) ?? "—"}`);
-        addLog("info", `Gross:${data.grossSpreadPct.toFixed(3)}% | Net:${netEdge.toFixed(3)}%`);
+        addLog("info", `[${data.pair ?? "SOL/USD"}] K Bid:${data.krakenBid?.toFixed(4) ?? "—"} Ask:${data.krakenAsk?.toFixed(4) ?? "—"} | C Bid:${data.coinbaseBid?.toFixed(4) ?? "—"} Ask:${data.coinbaseAsk?.toFixed(4) ?? "—"}`);
+        addLog("info", `[${data.pair ?? "SOL/USD"}] Gross:${data.grossSpreadPct.toFixed(3)}% | Net:${netEdge.toFixed(3)}%`);
 
         if (emergencyStopRef.current) {
           addLog("error", "🛑 Emergency stop activated.");

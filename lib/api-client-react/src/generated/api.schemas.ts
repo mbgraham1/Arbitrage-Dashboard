@@ -36,6 +36,8 @@ export interface WsStatus {
 }
 
 export interface PriceData {
+  /** Canonical pair symbol with the best spread (e.g. SOL/USD, BTC/USD) */
+  pair?: string;
   krakenPrice: number;
   krakenBid: number;
   krakenAsk: number;
@@ -107,6 +109,8 @@ export interface TradeRequest {
   liveMode: boolean;
   netEdgePct?: number;
   orderType?: TradeRequestOrderType;
+  /** Trading pair symbol (e.g. SOL/USD, BTC/USD). Defaults to SOL/USD. */
+  pair?: string;
 }
 
 export interface TradeResult {
@@ -127,6 +131,8 @@ export interface TradeResult {
 export interface TradeRecord {
   id: number;
   createdAt: string;
+  /** Trading pair symbol. Null for records before multi-pair support. @nullable */
+  pair?: string | null;
   buyExchange: string;
   sellExchange: string;
   volumeSol: number;

@@ -8,6 +8,8 @@
 import type { WsStatus } from './wsStatus';
 
 export interface PriceData {
+  /** Canonical pair symbol with the best spread (e.g. SOL/USD, BTC/USD) */
+  pair?: string;
   krakenPrice: number;
   krakenBid: number;
   krakenAsk: number;

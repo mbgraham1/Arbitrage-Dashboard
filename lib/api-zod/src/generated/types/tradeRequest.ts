@@ -20,4 +20,6 @@ export interface TradeRequest {
   liveMode: boolean;
   netEdgePct?: number;
   orderType?: TradeRequestOrderType;
+  /** Trading pair symbol (e.g. SOL/USD, BTC/USD). Defaults to SOL/USD. */
+  pair?: string;
 }

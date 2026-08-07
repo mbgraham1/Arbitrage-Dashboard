@@ -69,8 +69,9 @@ export default function Trades() {
                 <tr className="border-b-2 border-border bg-muted/50">
                   <th className="px-4 py-3 text-left font-bold uppercase text-xs">Date</th>
                   <th className="px-4 py-3 text-left font-bold uppercase text-xs">Mode</th>
+                  <th className="px-4 py-3 text-left font-bold uppercase text-xs">Pair</th>
                   <th className="px-4 py-3 text-left font-bold uppercase text-xs">Route</th>
-                  <th className="px-4 py-3 text-right font-bold uppercase text-xs">Volume (SOL)</th>
+                  <th className="px-4 py-3 text-right font-bold uppercase text-xs">Volume</th>
                   <th className="px-4 py-3 text-right font-bold uppercase text-xs">Net Edge</th>
                   <th className="px-4 py-3 text-right font-bold uppercase text-xs">Profit (USD)</th>
                 </tr>
@@ -87,6 +88,9 @@ export default function Trades() {
                       ) : (
                         <Badge variant="default" className="text-[10px]">LIVE</Badge>
                       )}
+                    </td>
+                    <td className="px-4 py-3">
+                      <span className="text-[10px] font-mono font-bold px-1.5 py-0.5 border border-border text-muted-foreground">{trade.pair ?? "SOL/USD"}</span>
                     </td>
                     <td className="px-4 py-3">
                       <div className="flex items-center gap-2">
