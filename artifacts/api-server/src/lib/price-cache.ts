@@ -455,6 +455,65 @@ export async function getBestPairPrices(): Promise<PairPrices | null> {
   return bestPrices;
 }
 
+// ── Full scan — all 10 pairs ranked by gross spread ───────────────────────────
+
+export interface PairScanEntry {
+  coin: string;                   // "BTC", "ETH", "SOL", …
+  pair: Pair;                     // "BTC/USD"
+  krakenPrice: number;
+  coinbasePrice: number;
+  krakenBid: number;
+  krakenAsk: number;
+  coinbaseBid: number;
+  coinbaseAsk: number;
+  grossSpreadPct: number;
+  buyExchange: "Kraken" | "Coinbase";
+  sellExchange: "Kraken" | "Coinbase";
+  scannedAt: string;
+}
+
+/**
+ * Port of Python scan_all_coins().
+ * Fetches prices for all 10 pairs and returns them sorted by gross spread
+ * (Kraken ↔ Coinbase, best direction) descending.
+ */
+export async function scanAllPairs(): Promise<PairScanEntry[]> {
+  const allPrices = await Promise.all(PAIRS.map(p => getPairPrices(p)));
+  const scannedAt = new Date().toISOString();
+  const results: PairScanEntry[] = [];
+
+  for (const pp of allPrices) {
+    const { krakenBid, krakenAsk, coinbaseBid, coinbaseAsk } = pp;
+    if (!krakenBid || !krakenAsk || !coinbaseBid || !coinbaseAsk) continue;
+
+    // Route 1: buy Kraken ask → sell Coinbase bid
+    const kToC = ((coinbaseBid - krakenAsk) / krakenAsk) * 100;
+    // Route 2: buy Coinbase ask → sell Kraken bid
+    const cToK = ((krakenBid - coinbaseAsk) / coinbaseAsk) * 100;
+
+    const useKraken = kToC >= cToK;
+    const grossSpreadPct = useKraken ? kToC : cToK;
+    const coin = pp.pair.split("/")[0]!;   // "BTC/USD" → "BTC"
+
+    results.push({
+      coin,
+      pair: pp.pair,
+      krakenPrice:   pp.kraken   ?? (krakenBid  + krakenAsk)  / 2,
+      coinbasePrice: pp.coinbase ?? (coinbaseBid + coinbaseAsk) / 2,
+      krakenBid,
+      krakenAsk,
+      coinbaseBid,
+      coinbaseAsk,
+      grossSpreadPct,
+      buyExchange:  useKraken ? "Kraken"   : "Coinbase",
+      sellExchange: useKraken ? "Coinbase" : "Kraken",
+      scannedAt,
+    });
+  }
+
+  return results.sort((a, b) => b.grossSpreadPct - a.grossSpreadPct);
+}
+
 // ── Legacy AllPrices interface (kept for backward compat) ──────────────────────
 
 export interface AllPrices {

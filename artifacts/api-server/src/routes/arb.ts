@@ -26,7 +26,7 @@ import {
   PAIRS,
   type Pair,
 } from "../lib/exchange";
-import { getBestPairPrices, getTriPrices } from "../lib/price-cache";
+import { getBestPairPrices, getTriPrices, scanAllPairs } from "../lib/price-cache";
 
 // ── Triangular arb helpers ─────────────────────────────────────────────────────
 
@@ -84,6 +84,16 @@ function computeTriLoops(
 }
 
 const router: IRouter = Router();
+
+// ── GET /arb/scan — all 10 pairs ranked by gross spread ───────────────────────
+router.get("/arb/scan", async (_req, res): Promise<void> => {
+  try {
+    const entries = await scanAllPairs();
+    res.json(entries);
+  } catch (err) {
+    res.status(500).json({ error: (err as Error).message });
+  }
+});
 
 // ── GET /arb/triangular ────────────────────────────────────────────────────────
 router.get("/arb/triangular", async (_req, res): Promise<void> => {

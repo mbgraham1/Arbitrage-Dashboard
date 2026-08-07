@@ -28,6 +28,7 @@ import type {
   HealthStatus,
   KrakenCredentials,
   ListTradesParams,
+  PairScanEntry,
   PreloadedCredentials,
   PriceData,
   TradeRecord,
@@ -735,6 +736,58 @@ export function useScanTriangularArb<TData = Awaited<ReturnType<typeof scanTrian
 
 
 
+
+// ── /arb/scan ─────────────────────────────────────────────────────────────────
+
+export const getScanAllPairsUrl = () => `/api/arb/scan`;
+
+/**
+ * Port of Python scan_all_coins(). Fetches bid/ask for all 10 configured
+ * pairs and returns them sorted by gross spread descending.
+ * @summary Scan all 10 pairs and rank by cross-exchange gross spread
+ */
+export const scanAllPairs = async (options?: RequestInit): Promise<PairScanEntry[]> => {
+  return customFetch<PairScanEntry[]>(getScanAllPairsUrl(), {
+    ...options,
+    method: "GET",
+  });
+};
+
+export const getScanAllPairsQueryKey = () => [`/api/arb/scan`] as const;
+
+export const getScanAllPairsQueryOptions = <
+  TData = Awaited<ReturnType<typeof scanAllPairs>>,
+  TError = ErrorType<ErrorResponse>,
+>(
+  options?: { query?: UseQueryOptions<Awaited<ReturnType<typeof scanAllPairs>>, TError, TData>; request?: SecondParameter<typeof customFetch> },
+) => {
+  const { query: queryOptions, request: requestOptions } = options ?? {};
+  const queryKey = queryOptions?.queryKey ?? getScanAllPairsQueryKey();
+  const queryFn: QueryFunction<Awaited<ReturnType<typeof scanAllPairs>>> = ({ signal }) =>
+    scanAllPairs({ signal, ...requestOptions });
+  return { queryKey, queryFn, ...queryOptions } as UseQueryOptions<
+    Awaited<ReturnType<typeof scanAllPairs>>,
+    TError,
+    TData
+  > & { queryKey: QueryKey };
+};
+
+export type ScanAllPairsQueryResult = NonNullable<Awaited<ReturnType<typeof scanAllPairs>>>;
+export type ScanAllPairsQueryError = ErrorType<ErrorResponse>;
+
+/**
+ * @summary Scan all 10 pairs and rank by cross-exchange gross spread
+ */
+export function useScanAllPairs<
+  TData = Awaited<ReturnType<typeof scanAllPairs>>,
+  TError = ErrorType<ErrorResponse>,
+>(
+  options?: { query?: UseQueryOptions<Awaited<ReturnType<typeof scanAllPairs>>, TError, TData>; request?: SecondParameter<typeof customFetch> },
+): UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+  const queryOptions = getScanAllPairsQueryOptions(options);
+  const query = useQuery(queryOptions) as UseQueryResult<TData, TError> & { queryKey: QueryKey };
+  return withQueryKey(query, queryOptions.queryKey);
+}
 
 export const getGetTradeSummaryUrl = () => {
 

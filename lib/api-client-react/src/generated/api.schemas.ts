@@ -190,3 +190,21 @@ limit?: number;
 offset?: number;
 };
 
+export interface PairScanEntry {
+  /** Short coin symbol, e.g. BTC, ETH, SOL */
+  coin: string;
+  /** Canonical pair, e.g. BTC/USD */
+  pair: string;
+  krakenPrice: number;
+  coinbasePrice: number;
+  krakenBid: number;
+  krakenAsk: number;
+  coinbaseBid: number;
+  coinbaseAsk: number;
+  /** Gross cross-exchange spread % using bid/ask (best direction) */
+  grossSpreadPct: number;
+  buyExchange: string;
+  sellExchange: string;
+  scannedAt: string;
+}
+

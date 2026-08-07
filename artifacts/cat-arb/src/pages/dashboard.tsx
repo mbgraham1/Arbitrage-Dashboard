@@ -8,7 +8,7 @@ import {
 } from "lucide-react";
 import { format } from "date-fns";
 import { cn } from "@/lib/utils";
-import { useGetTradeSummary, useListTrades, TradeRecord } from "@workspace/api-client-react";
+import { useGetTradeSummary, useListTrades, useScanAllPairs, TradeRecord, PairScanEntry } from "@workspace/api-client-react";
 
 // ── Small helpers ──────────────────────────────────────────────────────────────
 
@@ -456,12 +456,110 @@ export default function Dashboard() {
         </div>
       </div>
 
+      {/* Multi-Coin Opportunity Ranker */}
+      <MultiCoinRankerCard settings={settings} />
+
       {/* Triangular Arb Opportunities */}
       <TriangularCard opportunities={triOpportunities} isRunning={isRunning} />
 
       {/* Trade History Table */}
       <TradeHistoryTable />
     </div>
+  );
+}
+
+// ── Multi-Coin Opportunity Ranker ─────────────────────────────────────────────
+
+function MultiCoinRankerCard({ settings }: { settings: { totalFees: number; slippage: number; minNetEdge: number } }) {
+  const scanQuery = useScanAllPairs();
+  // Refresh every 5 s independently of the bot poll loop
+  useEffect(() => {
+    const id = setInterval(() => { scanQuery.refetch(); }, 5_000);
+    return () => clearInterval(id);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  const entries: PairScanEntry[] = scanQuery.data ?? [];
+  const feesAndSlip = settings.totalFees + settings.slippage;
+
+  // Annotate with net edge and sort descending (scan already sorted by gross; re-sort by net)
+  const rows = entries
+    .map(e => ({ ...e, netEdgePct: e.grossSpreadPct - feesAndSlip }))
+    .sort((a, b) => b.netEdgePct - a.netEdgePct);
+
+  const bestSol = rows.find(r => r.coin === "SOL");
+
+  return (
+    <Card>
+      <CardHeader className="py-3 flex flex-row items-center justify-between space-y-0">
+        <CardTitle className="text-sm flex items-center gap-2">
+          <Zap className="h-4 w-4" /> Multi-Coin Opportunity Ranker
+          <span className="text-[9px] font-mono font-bold px-1 border border-primary text-primary">10 PAIRS</span>
+          <span className="text-[10px] font-mono text-muted-foreground">Kraken ↔ Coinbase · ranked by net edge</span>
+        </CardTitle>
+        {scanQuery.isFetching && (
+          <span className="text-[10px] font-mono text-muted-foreground flex items-center gap-1">
+            <RefreshCw className="h-3 w-3 animate-spin" /> scanning…
+          </span>
+        )}
+      </CardHeader>
+      <CardContent className="p-0">
+        {bestSol && (
+          <div className={cn(
+            "px-4 py-2 text-xs font-mono border-b border-border flex items-center gap-2",
+            bestSol.netEdgePct >= settings.minNetEdge ? "bg-success/10 text-success" : "bg-muted/30 text-muted-foreground"
+          )}>
+            <ArrowRight className="h-3 w-3 shrink-0" />
+            SOL Current Edge: <span className="font-bold">{bestSol.netEdgePct.toFixed(3)}%</span>
+            <span className="text-muted-foreground">({bestSol.buyExchange} → {bestSol.sellExchange})</span>
+            {bestSol.netEdgePct >= settings.minNetEdge && (
+              <span className="ml-1 text-[9px] font-bold px-1 border border-success animate-pulse">EXECUTABLE</span>
+            )}
+          </div>
+        )}
+        {rows.length === 0 ? (
+          <div className="p-6 text-center text-sm font-mono text-muted-foreground">
+            {scanQuery.isLoading ? "Fetching prices for all 10 pairs…" : "Could not fetch multi-coin data."}
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs font-mono border-collapse">
+              <thead>
+                <tr className="border-b-2 border-border bg-muted/50">
+                  {["#", "Coin", "Route", "Kraken", "Coinbase", "Gross %", "Net %"].map(h => (
+                    <th key={h} className="text-left px-3 py-2 text-[10px] uppercase font-bold text-muted-foreground whitespace-nowrap">{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((row, i) => (
+                  <tr key={row.pair} className={cn(
+                    "border-b border-border/50",
+                    i % 2 === 0 ? "" : "bg-muted/20",
+                    row.coin === "SOL" && "ring-1 ring-inset ring-primary/30"
+                  )}>
+                    <td className="px-3 py-1.5 text-muted-foreground">{i + 1}</td>
+                    <td className="px-3 py-1.5 font-bold">
+                      {row.coin}
+                      {row.coin === "SOL" && (
+                        <span className="ml-1 text-[8px] font-bold px-0.5 border border-primary text-primary">BOT</span>
+                      )}
+                    </td>
+                    <td className="px-3 py-1.5 text-muted-foreground whitespace-nowrap">
+                      {row.buyExchange} → {row.sellExchange}
+                    </td>
+                    <td className="px-3 py-1.5">${row.krakenPrice.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 4 })}</td>
+                    <td className="px-3 py-1.5">${row.coinbasePrice.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 4 })}</td>
+                    <td className="px-3 py-1.5 text-muted-foreground">{row.grossSpreadPct.toFixed(3)}%</td>
+                    <td className={cn("px-3 py-1.5 font-bold", row.netEdgePct > 0 ? "text-success" : "text-destructive")}>
+                      {row.netEdgePct >= 0 ? "+" : ""}{row.netEdgePct.toFixed(3)}%
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </CardContent>
+    </Card>
   );
 }
 

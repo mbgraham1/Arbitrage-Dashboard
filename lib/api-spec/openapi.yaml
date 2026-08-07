@@ -211,6 +211,32 @@ paths:
                 items:
                   $ref: "#/components/schemas/TradeRecord"
 
+  /arb/scan:
+    get:
+      operationId: scanAllPairs
+      tags: [exchange]
+      summary: Scan all 10 pairs and rank by cross-exchange gross spread
+      description: >
+        Port of Python scan_all_coins(). Fetches bid/ask for all 10 configured
+        pairs from Kraken and Coinbase and returns them sorted by gross spread
+        (best direction per pair) descending. Net edge = grossSpreadPct minus
+        the client's fee + slippage settings.
+      responses:
+        "200":
+          description: All pairs ranked by gross spread descending
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/PairScanEntry"
+        "500":
+          description: Price fetch error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
   /arb/triangular:
     get:
       operationId: scanTriangularArb
@@ -499,6 +525,38 @@ components:
           type: ["string", "null"]
         sellOrderId:
           type: ["string", "null"]
+
+    PairScanEntry:
+      type: object
+      required: [coin, pair, krakenPrice, coinbasePrice, krakenBid, krakenAsk, coinbaseBid, coinbaseAsk, grossSpreadPct, buyExchange, sellExchange, scannedAt]
+      properties:
+        coin:
+          type: string
+          description: "Short coin symbol, e.g. BTC, ETH, SOL"
+        pair:
+          type: string
+          description: "Canonical pair, e.g. BTC/USD"
+        krakenPrice:
+          type: number
+        coinbasePrice:
+          type: number
+        krakenBid:
+          type: number
+        krakenAsk:
+          type: number
+        coinbaseBid:
+          type: number
+        coinbaseAsk:
+          type: number
+        grossSpreadPct:
+          type: number
+          description: "Gross cross-exchange spread % using bid/ask (best direction)"
+        buyExchange:
+          type: string
+        sellExchange:
+          type: string
+        scannedAt:
+          type: string
 
     TriangularOpportunity:
       type: object
