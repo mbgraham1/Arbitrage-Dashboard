@@ -5,6 +5,7 @@ import {
   FetchPricesBody,
   FetchBalancesBody,
   TestKrakenBody,
+  FeeTierBody,
   TestCoinbaseBody,
   ExecuteTradeBody,
   ExecuteTriangularBody,
@@ -470,8 +471,13 @@ router.post("/arb/graph-execute", async (req, res): Promise<void> => {
   const asset = (node: string) => node.split(":")[1] ?? node;
 
   try {
+    // 0. Prefer the account's ACTUAL Kraken taker fee tier over the caller's
+    //    assumption (advisor recommendation) — fall back on query failure.
+    const actualKrakenFee = await krakenTakerFeePct({ krakenKey, krakenSecret }, ["XXBTZUSD", "ETHUSD", "SOLUSD"]);
+    const effectiveKrakenFeesPct = actualKrakenFee ?? krakenFeesPct;
+
     // 1. Fresh pre-flight scan
-    const scan = await scanGraphOpportunities(tradeSizeUsd, krakenFeesPct, coinbaseFeesPct, 4);
+    const scan = await scanGraphOpportunities(tradeSizeUsd, effectiveKrakenFeesPct, coinbaseFeesPct, 4);
     const route = routeDescription
       ? scan.routes.find(r => r.description === routeDescription)
       : scan.routes[0];
@@ -1551,6 +1557,18 @@ router.post("/balances", async (req, res): Promise<void> => {
     req.log.error({ err }, "Failed to fetch balances");
     res.status(500).json({ error: (err as Error).message });
   }
+});
+
+// ── POST /fee-tier ────────────────────────────────────────────────────────────
+// Actual Kraken taker fee tier for the account (max across major pairs).
+router.post("/arb/fee-tier", async (req, res): Promise<void> => {
+  const parsed = FeeTierBody.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: parsed.error.message });
+    return;
+  }
+  const takerFeePct = await krakenTakerFeePct(parsed.data, ["XXBTZUSD", "ETHUSD", "SOLUSD"]);
+  res.json({ takerFeePct, source: takerFeePct != null ? "account" : "unavailable" });
 });
 
 // ── POST /test-kraken ─────────────────────────────────────────────────────────

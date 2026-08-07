@@ -390,6 +390,36 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
 
+  /arb/fee-tier:
+    post:
+      operationId: getFeeTier
+      tags: [trades]
+      summary: Look up the account's actual Kraken taker fee tier
+      description: >
+        Queries Kraken /0/private/TradeVolume for the caller's real taker fee
+        on major pairs (max across pairs). Returns null when the query fails
+        (bad keys, network) so callers can fall back to their configured
+        assumption.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/FeeTierRequest"
+      responses:
+        "200":
+          description: Actual taker fee (percent per leg) or null
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FeeTierResult"
+        "400":
+          description: Bad request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
   /arb/graph-scan:
     get:
       operationId: getGraphScan
@@ -959,6 +989,20 @@ components:
         isDryRun:
           type: boolean
           default: true
+
+    FeeTierRequest:
+      type: object
+      required: [krakenKey, krakenSecret]
+      properties:
+        krakenKey: { type: string }
+        krakenSecret: { type: string }
+
+    FeeTierResult:
+      type: object
+      required: [takerFeePct, source]
+      properties:
+        takerFeePct: { type: number, nullable: true }
+        source: { type: string, enum: [account, unavailable] }
 
     GraphRouteHop:
       type: object

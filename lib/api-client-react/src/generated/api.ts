@@ -31,6 +31,8 @@ import type {
   GetObScanParams,
   GraphExecuteRequest,
   GraphExecuteResult,
+  FeeTierRequest,
+  FeeTierResult,
   GraphScanResult,
   HealthStatus,
   KrakenCredentials,
@@ -1274,6 +1276,34 @@ export function useGetGraphScan<TData = Awaited<ReturnType<typeof getGraphScan>>
   const queryOptions = getGetGraphScanQueryOptions(params, options);
   const query = useQuery(queryOptions) as UseQueryResult<TData, TError> & { queryKey: QueryKey };
   return withQueryKey(query, queryOptions.queryKey);
+}
+
+export const getFeeTier = async (feeTierRequest: FeeTierRequest, options?: RequestInit): Promise<FeeTierResult> =>
+  customFetch<FeeTierResult>(`/api/arb/fee-tier`, {
+    ...options,
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...options?.headers },
+    body: JSON.stringify(feeTierRequest),
+  });
+
+export const getGetFeeTierQueryKey = (body: FeeTierRequest) =>
+  ["/api/arb/fee-tier", body.krakenKey] as const;
+
+/**
+ * Actual Kraken taker fee tier for the account. Query (not mutation) so
+ * multiple cards share one cached lookup; pass `enabled` when creds exist.
+ */
+export function useGetFeeTier<TData = FeeTierResult, TError = ErrorType<unknown>>(
+  body: FeeTierRequest,
+  options?: { query?: Partial<UseQueryOptions<FeeTierResult, TError, TData>>; request?: SecondParameter<typeof customFetch> },
+): UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+  const queryKey = options?.query?.queryKey ?? getGetFeeTierQueryKey(body);
+  const query = useQuery({
+    queryKey,
+    queryFn: ({ signal }) => getFeeTier(body, { signal, ...options?.request }),
+    ...options?.query,
+  } as UseQueryOptions<FeeTierResult, TError, TData>) as UseQueryResult<TData, TError> & { queryKey: QueryKey };
+  return withQueryKey(query, queryKey);
 }
 
 export const graphExecute = async (graphExecuteRequest: GraphExecuteRequest, options?: RequestInit): Promise<GraphExecuteResult> =>

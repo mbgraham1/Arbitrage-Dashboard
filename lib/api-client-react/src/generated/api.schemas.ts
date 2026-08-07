@@ -375,6 +375,17 @@ export interface CointegrationScanResult {
   scannedAt: string;
 }
 
+export interface FeeTierRequest {
+  krakenKey: string;
+  krakenSecret: string;
+}
+
+export interface FeeTierResult {
+  /** Actual taker fee percent per leg, or null if the lookup failed */
+  takerFeePct: number | null;
+  source: "account" | "unavailable";
+}
+
 export interface GraphExecuteRequest {
   krakenKey: string;
   krakenSecret: string;

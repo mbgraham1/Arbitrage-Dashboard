@@ -8,7 +8,7 @@ import {
 } from "lucide-react";
 import { format } from "date-fns";
 import { cn } from "@/lib/utils";
-import { useGetTradeSummary, useListTrades, useScanAllPairs, useGetObScan, getGetObScanQueryKey, useObExecute, useGetAllPairSnapshots, getGetAllPairSnapshotsQueryKey, useGetGraphScan, getGetGraphScanQueryKey, useGraphExecute, TradeRecord, PairScanEntry, ObCycleEntry, AllPairSnapshot, GraphRoute, GraphRouteHop } from "@workspace/api-client-react";
+import { useGetTradeSummary, useListTrades, useScanAllPairs, useGetObScan, getGetObScanQueryKey, useObExecute, useGetAllPairSnapshots, getGetAllPairSnapshotsQueryKey, useGetGraphScan, getGetGraphScanQueryKey, useGraphExecute, useGetFeeTier, TradeRecord, PairScanEntry, ObCycleEntry, AllPairSnapshot, GraphRoute, GraphRouteHop } from "@workspace/api-client-react";
 
 // ── Small helpers ──────────────────────────────────────────────────────────────
 
@@ -724,6 +724,21 @@ const OB_SCALING_META: Record<string, { label: string; className: string }> = {
   REJECTED:      { label: "✕ REJECTED",      className: "text-muted-foreground border-border" },
 };
 
+/**
+ * Actual Kraken taker fee (percent per leg) for the account, or null when
+ * unavailable (no creds / lookup failed). One cached lookup shared by all
+ * cards; refreshed every 10 min.
+ */
+function useActualKrakenFee(): number | null {
+  const { credentials } = useBotContext();
+  const hasCreds = !!credentials.krakenKey && !!credentials.krakenSecret;
+  const { data } = useGetFeeTier(
+    { krakenKey: credentials.krakenKey, krakenSecret: credentials.krakenSecret },
+    { query: { enabled: hasCreds, staleTime: 10 * 60_000, refetchInterval: 10 * 60_000 } },
+  );
+  return data?.takerFeePct ?? null;
+}
+
 function OrderBookHunterCard() {
   const { credentials, liveMode, addLog, settings } = useBotContext();
   const executeMutation = useObExecute();
@@ -739,9 +754,12 @@ function OrderBookHunterCard() {
   // Min-profit floor: skip few-cent edges (advisor rec). Default $0.10.
   const [minProfitInput, setMinProfitInput] = useState("0.10");
   const minProfit = Math.max(0, parseFloat(minProfitInput) || 0);
-  // Fee per leg comes from settings (OB Hunter fees %) — server overrides with
-  // the account's ACTUAL fee tier during pre-flight, but this controls the scan estimate.
-  const obParams = { tradeSizeUsd: tradeSize, feesPct: settings.obFeesPct, minProfitUsd: 0.02, maxSlippagePct: 0.5, volatilityFilter: true };
+  // Fee per leg: prefer the account's ACTUAL Kraken taker fee tier (fetched
+  // once, shared across cards) over the configured assumption. A 0.40%
+  // assumption makes a 1.2% 3-leg hurdle that hides every real edge.
+  const actualFee = useActualKrakenFee();
+  const effectiveFeePct = actualFee ?? settings.obFeesPct;
+  const obParams = { tradeSizeUsd: tradeSize, feesPct: effectiveFeePct, minProfitUsd: 0.02, maxSlippagePct: 0.5, volatilityFilter: true };
   const { data, isLoading } = useGetObScan(obParams, {
     query: { queryKey: getGetObScanQueryKey(obParams), refetchInterval: 5_000, staleTime: 4_000 },
   });
@@ -857,7 +875,7 @@ function OrderBookHunterCard() {
         {data && topCycle && (
           <div className="px-3 py-2 text-[10px] font-mono border-b border-border/50 bg-muted/30 grid grid-cols-2 sm:grid-cols-5 gap-x-4 gap-y-0.5">
             <span className="col-span-2 sm:col-span-5 font-bold uppercase text-muted-foreground">Kraken Fee Diagnostic</span>
-            <span className="text-muted-foreground">Fee/leg: <span className="text-foreground">{data.feesPct.toFixed(2)}%</span></span>
+            <span className="text-muted-foreground">Fee/leg: <span className="text-foreground">{data.feesPct.toFixed(2)}%</span>{actualFee != null && <span className="text-success"> ·actual tier</span>}</span>
             <span className="text-muted-foreground">3-leg drag: <span className="text-foreground">${topCycle.feeUsd.toFixed(4)} ({((topCycle.feeUsd / tradeSize) * 100).toFixed(3)}%)</span></span>
             <span className="text-muted-foreground">Break-even edge: <span className="text-foreground">{((topCycle.feeUsd / tradeSize) * 100).toFixed(3)}%</span></span>
             <span className="text-muted-foreground">Best raw edge: <span className={topCycle.grossProfitUsd > 0 ? "text-success" : "text-destructive"}>${topCycle.grossProfitUsd.toFixed(4)} ({((topCycle.grossProfitUsd / tradeSize) * 100).toFixed(3)}%)</span></span>
@@ -1128,9 +1146,11 @@ function GraphEngineCard() {
   }, [sizeInput]);
   const tradeSize = Math.max(1, parseFloat(debouncedSize) || settings.obTradeSize);
 
+  // Use the account's real Kraken taker fee when available (shared lookup).
+  const actualFee = useActualKrakenFee();
   const params = {
     tradeSizeUsd:    tradeSize,
-    krakenFeesPct:   settings.obFeesPct,
+    krakenFeesPct:   actualFee ?? settings.obFeesPct,
     coinbaseFeesPct: 0.40,
     maxHops:         4,
   };
@@ -1247,7 +1267,7 @@ function GraphEngineCard() {
       {data && topRoute && (
         <div className="px-3 py-2 text-[10px] font-mono border-b border-border/50 bg-muted/30 grid grid-cols-2 sm:grid-cols-5 gap-x-4 gap-y-0.5">
           <span className="col-span-2 sm:col-span-5 font-bold uppercase text-muted-foreground">Fee Diagnostic</span>
-          <span className="text-muted-foreground">Kraken/leg: <span className="text-foreground">{data.krakenFeesPct.toFixed(2)}%</span></span>
+          <span className="text-muted-foreground">Kraken/leg: <span className="text-foreground">{data.krakenFeesPct.toFixed(2)}%</span>{actualFee != null && <span className="text-success"> ·actual tier</span>}</span>
           <span className="text-muted-foreground">Coinbase/leg: <span className="text-foreground">{data.coinbaseFeesPct.toFixed(2)}%</span></span>
           <span className="text-muted-foreground">Break-even: <span className="text-foreground">{breakEvenPct}%</span></span>
           <span className="text-muted-foreground">Best raw edge: <span className={topRoute.grossProfitUsd > 0 ? "text-success" : "text-destructive"}>${topRoute.grossProfitUsd.toFixed(4)}</span></span>

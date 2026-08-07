@@ -102,6 +102,16 @@ export const GetPreloadedCredentialsResponse = zod.object({
 /**
  * @summary Test Kraken connection
  */
+export const FeeTierBody = zod.object({
+  "krakenKey": zod.string(),
+  "krakenSecret": zod.string()
+})
+
+export const FeeTierResponse = zod.object({
+  "takerFeePct": zod.number().nullable(),
+  "source": zod.enum(["account", "unavailable"])
+})
+
 export const TestKrakenBody = zod.object({
   "krakenKey": zod.string(),
   "krakenSecret": zod.string()
