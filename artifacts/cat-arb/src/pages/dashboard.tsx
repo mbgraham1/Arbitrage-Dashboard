@@ -830,7 +830,7 @@ function OrderBookHunterCard() {
               </thead>
               <tbody>
                 {cycles.map((c, i) => {
-                  const meta = OB_STATUS_META[c.status] ?? OB_STATUS_META["LOW_PROFIT"]!;
+                  const meta = OB_SCALING_META[c.status] ?? OB_SCALING_META["REJECTED"]!;
                   return (
                     <tr key={`${c.route}-${i}`} className={cn(
                       "border-b border-border/50",
