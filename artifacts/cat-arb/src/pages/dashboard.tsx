@@ -8,7 +8,7 @@ import {
 } from "lucide-react";
 import { format } from "date-fns";
 import { cn } from "@/lib/utils";
-import { useGetTradeSummary, useListTrades, useScanAllPairs, useGetObScan, getObScanQueryKey, TradeRecord, PairScanEntry, ObCycleEntry } from "@workspace/api-client-react";
+import { useGetTradeSummary, useListTrades, useScanAllPairs, useGetObScan, getObScanQueryKey, useObExecute, TradeRecord, PairScanEntry, ObCycleEntry } from "@workspace/api-client-react";
 
 // ── Small helpers ──────────────────────────────────────────────────────────────
 
@@ -594,6 +594,9 @@ const OB_SCALING_META: Record<string, { label: string; className: string }> = {
 };
 
 function OrderBookHunterCard() {
+  const { credentials, liveMode, addLog } = useBotContext();
+  const executeMutation = useObExecute();
+  const [execResult, setExecResult] = useState<string | null>(null);
   const [tradeSizeInput, setTradeSizeInput] = useState("10");
   // Debounce so we don't fire a Kraken scan on every keystroke (e.g. 10→1→100)
   const [debouncedSize, setDebouncedSize] = useState("10");
@@ -607,6 +610,47 @@ function OrderBookHunterCard() {
   });
 
   const cycles: ObCycleEntry[] = data?.cycles ?? [];
+  const topCycle = cycles[0];
+  // Python v18: button shows when top cycle beats min profit (scaled by size/10)
+  const threshold = 0.02 * (tradeSize / 10);
+  const canExecute = !!topCycle && topCycle.estimatedProfitUsd > threshold && !executeMutation.isPending;
+
+  const executeTopRoute = async () => {
+    if (!topCycle) return;
+    if (!credentials.krakenKey || !credentials.krakenSecret) {
+      addLog("warning", "[OB·EXEC] Add Kraken credentials in Config first.");
+      setExecResult("❌ No Kraken credentials — add them in Config.");
+      return;
+    }
+    setExecResult(null);
+    addLog("trade", `[OB·EXEC] ${topCycle.route} | $${tradeSize} | ${liveMode ? "LIVE" : "dry run"} — pre-flight…`);
+    try {
+      const r = await executeMutation.mutateAsync({
+        data: {
+          krakenKey: credentials.krakenKey,
+          krakenSecret: credentials.krakenSecret,
+          assetA: topCycle.assetA,
+          assetB: topCycle.assetB,
+          tradeSizeUsd: tradeSize,
+          feesPct: 0.5,
+          minProfitUsd: 0.02,
+          isDryRun: !liveMode,
+        },
+      });
+      if (r.success && r.executed) {
+        const profit = r.preflightProfitUsd ?? 0;
+        addLog("success", `[OB·EXEC] ✅ ${r.route} | profit $${profit.toFixed(4)}${r.isDryRun ? " (dry run)" : ` | orders ${[r.leg1OrderId, r.leg2OrderId, r.leg3OrderId].filter(Boolean).join(", ")}`}`);
+        setExecResult(`✅ Executed ${r.route} — $${profit.toFixed(4)}${r.isDryRun ? " (dry run, recorded to ledger)" : ""}`);
+      } else {
+        addLog("warning", `[OB·EXEC] ❌ ${r.error ?? "Pre-flight failed."}`);
+        setExecResult(`❌ ${r.error ?? "Pre-flight failed — edge disappeared."}`);
+      }
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "Unknown error";
+      addLog("error", `[OB·EXEC] Exception: ${msg}`);
+      setExecResult(`❌ ${msg}`);
+    }
+  };
 
   return (
     <Card>
@@ -636,9 +680,25 @@ function OrderBookHunterCard() {
         <div className="flex items-center gap-2 text-[10px] font-mono text-muted-foreground">
           {isLoading && <RefreshCw className="h-3 w-3 animate-spin" />}
           {data && `${data.activeAssets.length} active assets · ${data.pairsScanned}/${data.pairsRequested} pairs · ${data.cycles.length} cycles ranked`}
+          <Button
+            size="sm"
+            variant={liveMode ? "destructive" : "outline"}
+            className="h-6 px-2 text-[10px] font-mono font-bold"
+            disabled={!canExecute}
+            onClick={executeTopRoute}
+            title={topCycle ? `Pre-flight + execute ${topCycle.route} at $${tradeSize}${liveMode ? " (LIVE ORDERS)" : " (dry run)"}` : "No executable route"}
+          >
+            {executeMutation.isPending ? "EXECUTING…" : `🔴 EXECUTE TOP ROUTE${liveMode ? "" : " (DRY)"}`}
+          </Button>
         </div>
       </CardHeader>
       <CardContent className="px-0 pb-0">
+        {execResult && (
+          <div className={cn("px-3 py-2 text-[11px] font-mono border-b border-border/50", execResult.startsWith("✅") ? "text-success" : "text-destructive")}>
+            {execResult}
+            {topCycle && !execResult.startsWith("✅") && ` · Current best: ${topCycle.route} | $${topCycle.estimatedProfitUsd.toFixed(4)}`}
+          </div>
+        )}
         {cycles.length === 0 ? (
           <div className="p-6 text-center text-sm font-mono text-muted-foreground">
             {isLoading

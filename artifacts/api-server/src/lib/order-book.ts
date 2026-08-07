@@ -404,6 +404,66 @@ function simulateCycle(
   return { profitUsd: netProfit, avg1, avg2, avg3, volA: aAmt, slippagePct, confidencePct };
 }
 
+// ── v18: manual execution pre-flight ─────────────────────────────────────────
+
+/** Execution plan for one leg: Kraken pair, side, and volume in the pair's BASE asset. */
+export interface ObExecutionLeg { pair: string; side: "buy" | "sell"; volume: number; }
+
+export interface ObPreflightResult {
+  profitUsd: number;
+  slippagePct: number;
+  confidencePct: number;
+  /** Orientation-aware legs ready for AddOrder (volumes in each pair's base asset). */
+  legs: [ObExecutionLeg, ObExecutionLeg, ObExecutionLeg];
+  volumeA: number;
+  volumeB: number;
+}
+
+/**
+ * v18 manual-execute pre-flight: re-fetches FRESH order books (cache bypassed)
+ * for the route's three pairs and re-simulates at the given size.
+ * Returns null when books can't be fetched or depth can't absorb the size.
+ *
+ * NOTE: the Python v18 button sizes leg 2 as an unconditional "sell" of vol_A
+ * and leg 3 with `vol × profit/size` — both wrong (ignores cross orientation).
+ * We derive all three legs from the simulation instead.
+ */
+export async function preflightObCycle(
+  assetA: ObAsset,
+  assetB: ObAsset,
+  sizeUsd: number,
+  feesPct: number,
+): Promise<ObPreflightResult | null> {
+  const cross = CROSS_LOOKUP.get(`${assetA}-${assetB}`);
+  if (!cross) return null;
+  const pairA = OB_USD_PAIRS[assetA];
+  const pairB = OB_USD_PAIRS[assetB];
+
+  // Bypass the shared 5s cache — execution needs the freshest books.
+  for (const p of [pairA, cross.pair, pairB]) obCache.delete(p);
+  const [obA, obX, obB] = await Promise.all([
+    fetchOrderBook(pairA, 10), fetchOrderBook(cross.pair, 10), fetchOrderBook(pairB, 10),
+  ]);
+  if (!obA || !obX || !obB) return null;
+
+  const books = new Map<string, OrderBook>([[pairA, obA], [cross.pair, obX], [pairB, obB]]);
+  const sim = simulateCycle(assetA, assetB, sizeUsd, books, feesPct);
+  if (!sim) return null;
+
+  const volumeA = sim.volA;
+  const volumeB = sim.volA * sim.avg2; // B acquired in leg 2 (avg2 = B per A)
+
+  const legs: [ObExecutionLeg, ObExecutionLeg, ObExecutionLeg] = [
+    { pair: pairA, side: "buy", volume: volumeA },
+    cross.aIsQuote
+      ? { pair: cross.pair, side: "buy",  volume: volumeB }  // A is quote → buy base B
+      : { pair: cross.pair, side: "sell", volume: volumeA }, // A is base  → sell base A
+    { pair: pairB, side: "sell", volume: volumeB },
+  ];
+
+  return { profitUsd: sim.profitUsd, slippagePct: sim.slippagePct, confidencePct: sim.confidencePct, legs, volumeA, volumeB };
+}
+
 // ── Full scan ─────────────────────────────────────────────────────────────────
 
 const VOLATILITY_THRESHOLD_PCT = 1.5; // v17: |24h change| must exceed this

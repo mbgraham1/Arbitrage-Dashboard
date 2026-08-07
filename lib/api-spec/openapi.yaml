@@ -313,6 +313,38 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
 
+  /arb/ob-execute:
+    post:
+      operationId: obExecute
+      tags: [trades]
+      summary: Manually execute the top Order Book Hunter route (v18 port)
+      description: >
+        Port of the Python v18 MANUAL EXECUTION BUTTON. Re-fetches fresh order
+        books for the route (cache bypassed), re-simulates the cycle
+        (pre-flight), and only places 3 sequential Kraken market orders when
+        the fresh profit exceeds minProfitUsd × (size/10). Dry-run records a
+        ledger row without placing orders. Legs are sized from the pre-flight
+        simulation with orientation-aware cross-pair sides.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ObExecuteRequest"
+      responses:
+        "200":
+          description: Execution (or pre-flight rejection) result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ObExecuteResult"
+        "400":
+          description: Bad request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
   /arb/execute-triangular:
     post:
       operationId: executeTriangular
@@ -710,6 +742,58 @@ components:
             $ref: "#/components/schemas/ObScalingRow"
           description: "v18 — top route re-simulated at $10/$50/$100/$500/$1,000; unabsorbable sizes omitted"
         scannedAt: {type: string}
+
+    ObExecuteRequest:
+      type: object
+      required: [krakenKey, krakenSecret, assetA, assetB]
+      properties:
+        krakenKey:
+          type: string
+        krakenSecret:
+          type: string
+        assetA:
+          type: string
+          description: "Asset A of the displayed top route (server re-verifies via fresh pre-flight)"
+        assetB:
+          type: string
+        tradeSizeUsd:
+          type: number
+          default: 10
+        feesPct:
+          type: number
+          default: 0.5
+        minProfitUsd:
+          type: number
+          default: 0.02
+          description: "Min net profit ($) at $10; pre-flight gate scales it by size/10"
+        isDryRun:
+          type: boolean
+          default: true
+
+    ObExecuteResult:
+      type: object
+      required: [success, isDryRun, executed, route]
+      properties:
+        success:
+          type: boolean
+        isDryRun:
+          type: boolean
+        executed:
+          type: boolean
+          description: "True when orders were placed (or dry-run recorded); false when pre-flight rejected"
+        route:
+          type: string
+        preflightProfitUsd:
+          type: ["number", "null"]
+          description: "Fresh pre-flight net profit ($); null when books couldn't be fetched"
+        leg1OrderId:
+          type: ["string", "null"]
+        leg2OrderId:
+          type: ["string", "null"]
+        leg3OrderId:
+          type: ["string", "null"]
+        error:
+          type: ["string", "null"]
 
     TriExecuteRequest:
       type: object

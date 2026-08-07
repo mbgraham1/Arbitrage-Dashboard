@@ -38,6 +38,8 @@ import type {
   TradeResult,
   TradeSummary,
   TriangularScanResult,
+  ObExecuteRequest,
+  ObExecuteResult,
   TriExecuteRequest,
   TriExecuteResult,
 } from './api.schemas';
@@ -708,6 +710,55 @@ export const useGetObScan = <
   const queryOptions = getObScanQueryOptions(tradeSizeUsd, feesPct, minProfitUsd, maxSlippagePct, volatilityFilter, options);
   const query = useQuery(queryOptions) as UseQueryResult<TData, TError> & { queryKey: QueryKey };
   return withQueryKey(query, queryOptions.queryKey);
+};
+
+// ── /arb/ob-execute ───────────────────────────────────────────────────────────
+
+export const getObExecuteUrl = () => `/api/arb/ob-execute`;
+
+/**
+ * Port of Python v18 MANUAL EXECUTION BUTTON. Fresh pre-flight re-simulation,
+ * then 3 sequential Kraken market orders (or a dry-run ledger row).
+ * @summary Manually execute the top Order Book Hunter route (v18 port)
+ */
+export const obExecute = async (
+  obExecuteRequest: ObExecuteRequest,
+  options?: RequestInit,
+): Promise<ObExecuteResult> => {
+  return customFetch<ObExecuteResult>(getObExecuteUrl(), {
+    ...options,
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...options?.headers },
+    body: JSON.stringify(obExecuteRequest),
+  });
+};
+
+export const getObExecuteMutationOptions = <
+  TError = ErrorType<ErrorResponse>,
+  TContext = unknown,
+>(
+  options?: { mutation?: UseMutationOptions<Awaited<ReturnType<typeof obExecute>>, TError, { data: BodyType<ObExecuteRequest> }, TContext>; request?: SecondParameter<typeof customFetch> },
+): UseMutationOptions<Awaited<ReturnType<typeof obExecute>>, TError, { data: BodyType<ObExecuteRequest> }, TContext> => {
+  const { mutation: mutationOptions, request: requestOptions } = options ?? {};
+  const mutationKey = ["obExecute"];
+  const mutationFn: MutationFunction<Awaited<ReturnType<typeof obExecute>>, { data: BodyType<ObExecuteRequest> }> = (props) => {
+    const { data } = props ?? {};
+    return obExecute(data, requestOptions);
+  };
+  return { mutationKey, mutationFn, ...mutationOptions };
+};
+
+export type ObExecuteMutationResult = NonNullable<Awaited<ReturnType<typeof obExecute>>>;
+export type ObExecuteMutationError = ErrorType<ErrorResponse>;
+
+/**
+ * @summary Manually execute the top Order Book Hunter route (v18 port)
+ */
+export const useObExecute = <TError = ErrorType<ErrorResponse>, TContext = unknown>(
+  options?: { mutation?: UseMutationOptions<Awaited<ReturnType<typeof obExecute>>, TError, { data: BodyType<ObExecuteRequest> }, TContext>; request?: SecondParameter<typeof customFetch> },
+): UseMutationResult<Awaited<ReturnType<typeof obExecute>>, TError, { data: BodyType<ObExecuteRequest> }, TContext> => {
+  const mutationOptions = getObExecuteMutationOptions(options);
+  return useMutation(mutationOptions);
 };
 
 // ── /arb/execute-triangular ───────────────────────────────────────────────────

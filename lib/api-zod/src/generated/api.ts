@@ -181,6 +181,35 @@ export const ExecuteTriangularBody = zod.object({
   orderType: zod.enum(["market", "limit"]).optional().default("market"),
 })
 
+/**
+ * @summary Manually execute the top Order Book Hunter route (v18 port)
+ */
+export const ObExecuteBody = zod.object({
+  krakenKey: zod.string(),
+  krakenSecret: zod.string(),
+  /** Asset A of the route shown in the dashboard (server re-verifies with a fresh pre-flight) */
+  assetA: zod.string(),
+  assetB: zod.string(),
+  tradeSizeUsd: zod.number().positive().max(10_000).optional().default(10),
+  feesPct: zod.number().min(0).optional().default(0.5),
+  /** Min net profit ($) at $10; scaled by size/10 for the pre-flight gate */
+  minProfitUsd: zod.number().min(0).optional().default(0.02),
+  isDryRun: zod.boolean().optional().default(true),
+})
+
+export const ObExecuteResponse = zod.object({
+  success: zod.boolean(),
+  isDryRun: zod.boolean(),
+  executed: zod.boolean(),
+  route: zod.string(),
+  /** Fresh pre-flight net profit ($); null when pre-flight could not simulate */
+  preflightProfitUsd: zod.number().nullish(),
+  leg1OrderId: zod.string().nullish(),
+  leg2OrderId: zod.string().nullish(),
+  leg3OrderId: zod.string().nullish(),
+  error: zod.string().nullish(),
+})
+
 export const ExecuteTriangularResponse = zod.object({
   success: zod.boolean(),
   isDryRun: zod.boolean(),

@@ -8,6 +8,7 @@ import {
   TestCoinbaseBody,
   ExecuteTradeBody,
   ExecuteTriangularBody,
+  ObExecuteBody,
   ListTradesQueryParams,
 } from "@workspace/api-zod";
 import {
@@ -18,6 +19,7 @@ import {
   krakenRawMarketOrder,
   krakenRawLimitOrder,
   krakenOrderFilled,
+  krakenOrderInfo,
   krakenFillPrice,
   krakenCancelOrder,
   getCoinbaseBalances,
@@ -30,7 +32,7 @@ import {
   type Pair,
 } from "../lib/exchange";
 import { getBestPairPrices, getTriPrices, getBtcTriPrices, scanAllPairs, getPairPrices } from "../lib/price-cache";
-import { scanOrderBookCycles, OB_USD_PAIRS, CROSS_LOOKUP } from "../lib/order-book";
+import { scanOrderBookCycles, preflightObCycle, OB_ASSETS, OB_USD_PAIRS, CROSS_LOOKUP, type ObAsset } from "../lib/order-book";
 import { createPairHistory, updatePairHistory, type PairHistory } from "../lib/kalman";
 
 // ── Cointegration pairs-trading state (in-process memory) ─────────────────────
@@ -193,6 +195,188 @@ router.get("/arb/ob-scan", async (req, res): Promise<void> => {
   } catch (err) {
     req.log.error({ err }, "OB scan error");
     res.status(500).json({ error: (err as Error).message });
+  }
+});
+
+// ── POST /arb/ob-execute ──────────────────────────────────────────────────────
+// Port of Python v18 "MANUAL EXECUTION BUTTON": re-fetches FRESH order books
+// for the top route, re-simulates (pre-flight), and only places orders when
+// the edge survives (profit > minProfitUsd × size/10). Three sequential Kraken
+// market orders with orientation-aware legs.
+// NOTE: the Python's leg math is buggy (unconditional "sell" on the cross leg,
+// nonsense leg-3 volume `vol × profit/size`) — we size all legs from the
+// pre-flight simulation instead. On leg failure, previously filled legs are
+// unwound with reverse market orders (best effort).
+router.post("/arb/ob-execute", async (req, res): Promise<void> => {
+  const parsed = ObExecuteBody.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: parsed.error.message });
+    return;
+  }
+  const { krakenKey, krakenSecret, assetA, assetB, tradeSizeUsd, feesPct, minProfitUsd, isDryRun } = parsed.data;
+  const creds = { krakenKey, krakenSecret };
+  const route = `USD→${assetA}→${assetB}→USD`;
+
+  if (!(OB_ASSETS as readonly string[]).includes(assetA) || !(OB_ASSETS as readonly string[]).includes(assetB)) {
+    res.status(400).json({ error: `Unknown asset(s): ${assetA}/${assetB}` });
+    return;
+  }
+
+  try {
+    // 1. Fresh pre-flight (cache bypassed, depth 10)
+    const pf = await preflightObCycle(assetA as ObAsset, assetB as ObAsset, tradeSizeUsd, feesPct);
+    if (!pf) {
+      res.json({ success: false, isDryRun, executed: false, route, preflightProfitUsd: null, error: "Could not fetch fresh order books (or depth can't absorb the size)." });
+      return;
+    }
+    const threshold = minProfitUsd * (tradeSizeUsd / 10);
+    if (pf.profitUsd <= threshold) {
+      res.json({ success: false, isDryRun, executed: false, route, preflightProfitUsd: pf.profitUsd, error: `Pre-flight failed — edge disappeared (fresh profit $${pf.profitUsd.toFixed(4)} ≤ threshold $${threshold.toFixed(4)}).` });
+      return;
+    }
+
+    // 2. Dry run — record a ledger row, no orders
+    if (isDryRun) {
+      await db.insert(tradesTable).values({
+        pair: route,
+        buyExchange: "kraken",
+        sellExchange: "kraken",
+        volumeSol: pf.volumeA.toFixed(8),
+        estimatedProfitUsd: pf.profitUsd.toFixed(6),
+        netEdgePct: ((pf.profitUsd / tradeSizeUsd) * 100).toFixed(4),
+        isDryRun: true,
+        krakenPrice: "0",
+        coinbasePrice: "0",
+      });
+      req.log.info({ route, tradeSizeUsd, profit: pf.profitUsd }, "OB manual execute (dry run)");
+      res.json({ success: true, isDryRun: true, executed: true, route, preflightProfitUsd: pf.profitUsd, leg1OrderId: null, leg2OrderId: null, leg3OrderId: null });
+      return;
+    }
+
+    // 3. Live — three sequential market orders. Each leg must FULLY fill or
+    //    the execution aborts and unwinds the ACTUAL residual positions
+    //    (queried from the exchange, never assumed from the plan). Success is
+    //    only reported when the position ends flat.
+    const log = { info: (m: string) => req.log.info(m), error: (m: string) => req.log.error(m) };
+    const [l1, l2, l3] = pf.legs;
+    const cross = CROSS_LOOKUP.get(`${assetA}-${assetB}`)!; // validated by pre-flight
+    const pairA = OB_USD_PAIRS[assetA as ObAsset];
+    const pairB = OB_USD_PAIRS[assetB as ObAsset];
+    const FILL_TOLERANCE = 0.999; // volExec must reach 99.9% of ordered volume
+
+    // Never-throwing order info — used in recovery paths to learn actual fills.
+    const safeInfo = async (txid: string) => {
+      try { return await krakenOrderInfo(creds, txid); }
+      catch { return { status: "unknown", volExec: 0, price: 0, cost: 0, fee: 0 }; }
+    };
+
+    // Poll QueryOrders until closed; returns final info regardless of fill %.
+    const waitFill = async (txid: string, label: string) => {
+      for (let i = 0; i < 12; i++) {
+        await new Promise(r => setTimeout(r, 500));
+        const info = await safeInfo(txid);
+        if (info.status === "closed" || info.status === "canceled" || info.status === "expired") return info;
+      }
+      await tryCancel(creds, txid, label, log); // timed out — stop it, then read final state
+      return safeInfo(txid);
+    };
+
+    let leg1Id = "", leg2Id = "", leg3Id = "";
+    let usdSpent = 0, usdReceived = 0, totalFees = 0;
+
+    // ── Leg 1: buy A with USD. volExec = A acquired, cost = USD spent ────────
+    let aHeld = 0;
+    try {
+      const r1 = await krakenRawMarketOrder(creds, l1.side, l1.volume, l1.pair);
+      leg1Id = r1.txid[0] ?? "";
+    } catch (e) {
+      throw new Error(`Leg 1 failed (no order placed): ${(e as Error).message}`);
+    }
+    {
+      const f1 = await waitFill(leg1Id, "leg1");
+      aHeld = f1.volExec;
+      usdSpent = f1.cost + f1.fee;
+      totalFees += f1.fee;
+      if (aHeld < l1.volume * FILL_TOLERANCE) {
+        if (aHeld > 0) await tryUnwindMarket(creds, "sell", aHeld, pairA, `sell ${assetA} (unwind partial leg1)`, log);
+        throw new Error(`Leg 1 did not fully fill (${aHeld.toFixed(8)}/${l1.volume.toFixed(8)} ${assetA}); partial position unwound.`);
+      }
+    }
+
+    // ── Leg 2: convert A → B on the cross pair ───────────────────────────────
+    const l2Volume = l2.volume * (aHeld / pf.volumeA); // scale plan to actual leg-1 fill
+    let bHeld = 0;
+    try {
+      const r2 = await krakenRawMarketOrder(creds, l2.side, l2Volume, l2.pair);
+      leg2Id = r2.txid[0] ?? "";
+    } catch (e) {
+      // Order never placed — we hold all of A; sell it back.
+      await tryUnwindMarket(creds, "sell", aHeld, pairA, `sell ${assetA} (unwind after leg2 rejection)`, log);
+      throw new Error(`Leg 2 failed (${assetA} position sold back): ${(e as Error).message}`);
+    }
+    {
+      const f2 = await waitFill(leg2Id, "leg2");
+      // aIsQuote → bought base B: volExec = B acquired, cost+fee = A consumed.
+      // else     → sold base A:   volExec = A consumed, cost−fee = B received.
+      const aConsumed = cross.aIsQuote ? f2.cost + f2.fee : f2.volExec;
+      bHeld = cross.aIsQuote ? f2.volExec : Math.max(0, f2.cost - f2.fee);
+      const fullFill = f2.volExec >= l2Volume * FILL_TOLERANCE;
+      if (!fullFill) {
+        // Unwind BOTH residuals from actual fills: leftover A + acquired B.
+        const aResidual = Math.max(0, aHeld - aConsumed);
+        if (aResidual > 0) await tryUnwindMarket(creds, "sell", aResidual, pairA, `sell residual ${assetA} (partial leg2)`, log);
+        if (bHeld > 0)     await tryUnwindMarket(creds, "sell", bHeld,     pairB, `sell acquired ${assetB} (partial leg2)`, log);
+        throw new Error(`Leg 2 did not fully fill (${f2.volExec.toFixed(8)}/${l2Volume.toFixed(8)}); residual ${assetA} and acquired ${assetB} unwound.`);
+      }
+      // Cross-leg fee is charged in A or B units and is implicitly captured in
+      // the final USD delta (less B acquired → less USD out), so it is not
+      // added to totalFees (which tracks USD-denominated fees only).
+      if (bHeld <= 0) {
+        throw new Error("Leg 2 reported zero acquired volume despite full fill.");
+      }
+    }
+
+    // ── Leg 3: sell B for USD ─────────────────────────────────────────────────
+    try {
+      const r3 = await krakenRawMarketOrder(creds, l3.side, bHeld, l3.pair);
+      leg3Id = r3.txid[0] ?? "";
+    } catch (e) {
+      await tryUnwindMarket(creds, "sell", bHeld, pairB, `sell ${assetB} (unwind after leg3 rejection)`, log);
+      throw new Error(`Leg 3 failed (${assetB} position sold via unwind): ${(e as Error).message}`);
+    }
+    {
+      const f3 = await waitFill(leg3Id, "leg3");
+      usdReceived = Math.max(0, f3.cost - f3.fee);
+      totalFees += f3.fee;
+      const bResidual = Math.max(0, bHeld - f3.volExec);
+      if (f3.volExec < bHeld * FILL_TOLERANCE) {
+        // Sell the residual B; report as a partial (failed) execution, not success.
+        if (bResidual > 0) await tryUnwindMarket(creds, "sell", bResidual, pairB, `sell residual ${assetB} (partial leg3)`, log);
+        throw new Error(`Leg 3 partially filled (${f3.volExec.toFixed(8)}/${bHeld.toFixed(8)} ${assetB}); residual sold via unwind. USD received so far: $${usdReceived.toFixed(4)}.`);
+      }
+    }
+
+    // Realized P&L from actual fills, fee-inclusive (cost fields exclude fees;
+    // usdSpent includes leg1 fee, usdReceived deducts leg3 fee).
+    const realizedProfit = usdSpent > 0 && usdReceived > 0 ? usdReceived - usdSpent : pf.profitUsd;
+    await db.insert(tradesTable).values({
+      pair: route,
+      buyExchange: "kraken",
+      sellExchange: "kraken",
+      volumeSol: aHeld.toFixed(8),
+      estimatedProfitUsd: realizedProfit.toFixed(6),
+      netEdgePct: usdSpent > 0 ? ((realizedProfit / usdSpent) * 100).toFixed(4) : ((pf.profitUsd / tradeSizeUsd) * 100).toFixed(4),
+      isDryRun: false,
+      krakenPrice: "0",
+      coinbasePrice: "0",
+      buyOrderId: leg1Id || null,
+      sellOrderId: leg3Id || null,
+    });
+    req.log.info({ route, tradeSizeUsd, realizedProfit, usdSpent, usdReceived, totalFees, leg1Id, leg2Id, leg3Id }, "OB manual execute LIVE");
+    res.json({ success: true, isDryRun: false, executed: true, route, preflightProfitUsd: realizedProfit, leg1OrderId: leg1Id, leg2OrderId: leg2Id, leg3OrderId: leg3Id });
+  } catch (err) {
+    req.log.error({ err, route }, "OB manual execute error");
+    res.json({ success: false, isDryRun, executed: false, route, preflightProfitUsd: null, error: (err as Error).message });
   }
 });
 

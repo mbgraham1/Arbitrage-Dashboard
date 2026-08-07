@@ -206,6 +206,28 @@ export async function krakenFillPrice(creds: KrakenCreds, txid: string): Promise
   return parseFloat(result[txid]?.price ?? "0") || 0;
 }
 
+interface KrakenOrderInfoFull { status?: string; price?: string; vol_exec?: string; cost?: string; fee?: string; }
+
+/**
+ * Full order fill info: status, executed volume (base units), avg price, cost
+ * (quote units, ex-fees), and fee (quote units). Used to size subsequent legs
+ * from ACTUAL fills and to compute fee-inclusive realized P&L.
+ */
+export async function krakenOrderInfo(
+  creds: KrakenCreds,
+  txid: string,
+): Promise<{ status: string; volExec: number; price: number; cost: number; fee: number }> {
+  const result = await krakenPrivateRequest<Record<string, KrakenOrderInfoFull>>("/0/private/QueryOrders", { txid, trades: "false" }, creds);
+  const o = result[txid];
+  return {
+    status:  o?.status ?? "unknown",
+    volExec: parseFloat(o?.vol_exec ?? "0") || 0,
+    price:   parseFloat(o?.price ?? "0") || 0,
+    cost:    parseFloat(o?.cost ?? "0") || 0,
+    fee:     parseFloat(o?.fee ?? "0") || 0,
+  };
+}
+
 export async function krakenCancelOrder(creds: KrakenCreds, txid: string): Promise<void> {
   await krakenPrivateRequest<unknown>("/0/private/CancelOrder", { txid }, creds);
 }

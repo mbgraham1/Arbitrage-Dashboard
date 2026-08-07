@@ -230,6 +230,33 @@ export const ObCycleEntryStatus = {
   LOW_PROFIT: "LOW_PROFIT",
 } as const;
 
+export interface ObExecuteRequest {
+  krakenKey: string;
+  krakenSecret: string;
+  /** Asset A of the displayed top route (server re-verifies via fresh pre-flight) */
+  assetA: string;
+  assetB: string;
+  tradeSizeUsd?: number;
+  feesPct?: number;
+  /** Min net profit ($) at $10; pre-flight gate scales it by size/10 */
+  minProfitUsd?: number;
+  isDryRun?: boolean;
+}
+
+export interface ObExecuteResult {
+  success: boolean;
+  isDryRun: boolean;
+  /** True when orders were placed (or dry-run recorded); false when pre-flight rejected */
+  executed: boolean;
+  route: string;
+  /** Fresh pre-flight net profit ($); null when books couldn't be fetched */
+  preflightProfitUsd?: number | null;
+  leg1OrderId?: string | null;
+  leg2OrderId?: string | null;
+  leg3OrderId?: string | null;
+  error?: string | null;
+}
+
 export type ObScalingRowStatus = (typeof ObScalingRowStatus)[keyof typeof ObScalingRowStatus];
 
 // eslint-disable-next-line @typescript-eslint/no-redeclare
