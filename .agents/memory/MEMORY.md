@@ -1,0 +1,1 @@
+- [Kraken cross-pair orientation](kraken-pair-orientation.md) — uploaded Python bot versions walk cross-pair bids only (orientation bug); keep the TS port's aIsQuote-aware math when porting new versions.

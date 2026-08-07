@@ -211,12 +211,31 @@ export interface ObCycleEntry {
   avgPriceB: number;
   /** Amount of A acquired in leg 1 — used for execution sizing */
   volumeA: number;
+  /** Total execution slippage across 3 legs (%) */
+  slippagePct: number;
+  /** v15 conservative classification */
+  status: ObCycleEntryStatus;
 }
+
+export type ObCycleEntryStatus = (typeof ObCycleEntryStatus)[keyof typeof ObCycleEntryStatus];
+
+// eslint-disable-next-line @typescript-eslint/no-redeclare
+export const ObCycleEntryStatus = {
+  READY: "READY",
+  HIGH_SLIPPAGE: "HIGH_SLIPPAGE",
+  LOW_PROFIT: "LOW_PROFIT",
+} as const;
 
 export interface ObScanResult {
   cycles: ObCycleEntry[];
   tradeSizeUsd: number;
   feesPct: number;
+  /** Min net profit ($) for READY status */
+  minProfitUsd: number;
+  /** Max tolerated total slippage (%) for READY status */
+  maxSlippagePct: number;
+  /** Number of READY cycles */
+  readyCount: number;
   /** Pairs whose order book fetch succeeded */
   pairsScanned: number;
   /** Pairs the scan attempted to fetch */

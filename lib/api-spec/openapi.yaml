@@ -264,12 +264,14 @@ paths:
     get:
       operationId: getObScan
       tags: [arb]
-      summary: Scan 30 triangular cycles using L2 order book depth (v14 port)
+      summary: Scan 30 triangular cycles using L2 order book depth (v15 port)
       description: >
-        Port of Python v14 "Order Book Hunter". Fetches Kraken Depth API for all
-        required pairs in parallel, then walks the book for each of the 30 A→B
-        permutations of 6 assets to compute realistic fill prices at the given
-        trade size. Returns cycles sorted by estimated net profit descending.
+        Port of Python v15 "Order Book Hunter (Conservative)". Fetches Kraken Depth
+        API for all required pairs in parallel, then walks the book for each of the
+        30 A→B permutations of 6 assets to compute realistic fill prices at the
+        given trade size. All simulatable cycles (top 15) are returned ranked by
+        estimated net profit, each with total execution slippage and a
+        READY / HIGH_SLIPPAGE / LOW_PROFIT status classification.
       parameters:
         - name: tradeSizeUsd
           in: query
@@ -278,6 +280,14 @@ paths:
         - name: feesPct
           in: query
           description: Estimated total fees % (default 0.5 — 3 legs × 0.16% maker)
+          schema: {type: number, default: 0.5}
+        - name: minProfitUsd
+          in: query
+          description: Minimum net profit ($) required for READY status (default 0.01)
+          schema: {type: number, default: 0.01}
+        - name: maxSlippagePct
+          in: query
+          description: Maximum tolerated total slippage (%) for READY status (default 0.5)
           schema: {type: number, default: 0.5}
       responses:
         "200":
@@ -629,7 +639,7 @@ components:
 
     ObCycleEntry:
       type: object
-      required: [route, assetA, assetB, estimatedProfitUsd, profitPct, avgPriceA, avgCrossRate, avgPriceB, volumeA]
+      required: [route, assetA, assetB, estimatedProfitUsd, profitPct, avgPriceA, avgCrossRate, avgPriceB, volumeA, slippagePct, status]
       properties:
         route: {type: string, description: "e.g. USD→SOL→ETH→USD"}
         assetA: {type: string}
@@ -640,10 +650,15 @@ components:
         avgCrossRate: {type: number, description: "average B-per-A cross rate"}
         avgPriceB: {type: number, description: "average USD fill price for leg 3"}
         volumeA: {type: number, description: "amount of A acquired in leg 1"}
+        slippagePct: {type: number, description: "total execution slippage across 3 legs (%)"}
+        status:
+          type: string
+          enum: [READY, HIGH_SLIPPAGE, LOW_PROFIT]
+          description: "v15 conservative classification"
 
     ObScanResult:
       type: object
-      required: [cycles, tradeSizeUsd, feesPct, pairsScanned, pairsRequested, scannedAt]
+      required: [cycles, tradeSizeUsd, feesPct, minProfitUsd, maxSlippagePct, readyCount, pairsScanned, pairsRequested, scannedAt]
       properties:
         cycles:
           type: array
@@ -651,6 +666,9 @@ components:
             $ref: "#/components/schemas/ObCycleEntry"
         tradeSizeUsd: {type: number}
         feesPct: {type: number}
+        minProfitUsd: {type: number, description: "min net profit ($) for READY status"}
+        maxSlippagePct: {type: number, description: "max tolerated total slippage (%) for READY status"}
+        readyCount: {type: number, description: "number of READY cycles"}
         pairsScanned: {type: number, description: "pairs whose order book fetch succeeded"}
         pairsRequested: {type: number, description: "pairs the scan attempted to fetch"}
         scannedAt: {type: string}

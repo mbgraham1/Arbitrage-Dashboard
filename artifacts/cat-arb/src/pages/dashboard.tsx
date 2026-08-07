@@ -582,10 +582,16 @@ function MultiCoinRankerCard({ settings }: { settings: { totalFees: number; slip
 
 // ── Triangular Arb Card ────────────────────────────────────────────────────────
 
-// ── v14 Order Book Hunter Card ─────────────────────────────────────────────────
+// ── v15 Order Book Hunter Card (Conservative) ──────────────────────────────────
+const OB_STATUS_META: Record<string, { label: string; className: string }> = {
+  READY:         { label: "✅ READY",         className: "text-success border-success" },
+  HIGH_SLIPPAGE: { label: "⚠ HIGH SLIPPAGE", className: "text-amber-500 border-amber-500" },
+  LOW_PROFIT:    { label: "✕ LOW PROFIT",    className: "text-muted-foreground border-border" },
+};
+
 function OrderBookHunterCard() {
-  const { data, isLoading } = useGetObScan(10, 0.5, {
-    query: { queryKey: getObScanQueryKey(10, 0.5), refetchInterval: 5_000, staleTime: 4_000 },
+  const { data, isLoading } = useGetObScan(10, 0.5, 0.01, 0.5, {
+    query: { queryKey: getObScanQueryKey(10, 0.5, 0.01, 0.5), refetchInterval: 5_000, staleTime: 4_000 },
   });
 
   const cycles: ObCycleEntry[] = data?.cycles ?? [];
@@ -596,12 +602,17 @@ function OrderBookHunterCard() {
         <CardTitle className="text-sm flex items-center gap-2">
           <BookOpen className="h-4 w-4" /> Order Book Hunter
           <span className="text-[10px] font-mono text-muted-foreground font-normal">
-            v14 · $10 · 6 assets · 30 cycles
+            v15 · Conservative · $10 · 30 cycles
           </span>
+          {data && data.readyCount > 0 && (
+            <span className="text-[9px] font-mono font-bold px-1 border border-success text-success animate-pulse">
+              {data.readyCount} READY
+            </span>
+          )}
         </CardTitle>
         <div className="flex items-center gap-2 text-[10px] font-mono text-muted-foreground">
           {isLoading && <RefreshCw className="h-3 w-3 animate-spin" />}
-          {data && `${data.pairsScanned}/${data.pairsRequested} pairs · ${data.cycles.length} profitable`}
+          {data && `${data.pairsScanned}/${data.pairsRequested} pairs · ${data.cycles.length} cycles ranked`}
         </div>
       </CardHeader>
       <CardContent className="px-0 pb-0">
@@ -611,48 +622,51 @@ function OrderBookHunterCard() {
               ? "Fetching order books…"
               : data && data.pairsScanned === 0
                 ? "⚠ Market data unavailable — could not reach Kraken order books"
-                : "No profitable cycles detected (all cycles negative after 0.5% fees)"}
+                : "No simulatable cycles (insufficient order book depth at this trade size)"}
           </div>
         ) : (
           <div className="overflow-x-auto">
             <table className="w-full text-xs font-mono border-collapse">
               <thead>
                 <tr className="border-b-2 border-border bg-muted/50">
-                  {["Route", "Est. Profit", "Profit %", "Avg Buy (USD)", "Cross Rate", "Avg Sell (USD)", "Vol A"].map(h => (
+                  {["#", "Route", "Net Profit", "Profit %", "Slippage", "Status", "Vol A"].map(h => (
                     <th key={h} className="text-left px-3 py-2 text-[10px] uppercase font-bold text-muted-foreground whitespace-nowrap">{h}</th>
                   ))}
                 </tr>
               </thead>
               <tbody>
-                {cycles.slice(0, 10).map((c, i) => (
-                  <tr key={`${c.route}-${i}`} className={cn(
-                    "border-b border-border/50",
-                    i % 2 === 0 ? "" : "bg-muted/20",
-                  )}>
-                    <td className="px-3 py-1.5 font-bold text-foreground whitespace-nowrap">{c.route}</td>
-                    <td className={cn("px-3 py-1.5 font-bold", c.estimatedProfitUsd > 0 ? "text-success" : "text-destructive")}>
-                      ${c.estimatedProfitUsd.toFixed(4)}
-                    </td>
-                    <td className={cn("px-3 py-1.5", c.profitPct > 0 ? "text-success" : "text-destructive")}>
-                      {c.profitPct.toFixed(3)}%
-                    </td>
-                    <td className="px-3 py-1.5 text-muted-foreground">
-                      {c.avgPriceA >= 1000 ? c.avgPriceA.toFixed(2) : c.avgPriceA.toFixed(4)}
-                    </td>
-                    <td className="px-3 py-1.5 text-muted-foreground">{c.avgCrossRate.toFixed(6)}</td>
-                    <td className="px-3 py-1.5 text-muted-foreground">
-                      {c.avgPriceB >= 1000 ? c.avgPriceB.toFixed(2) : c.avgPriceB.toFixed(4)}
-                    </td>
-                    <td className="px-3 py-1.5 text-muted-foreground">
-                      {c.volumeA < 0.01 ? c.volumeA.toFixed(6) : c.volumeA.toFixed(4)}
-                    </td>
-                  </tr>
-                ))}
+                {cycles.map((c, i) => {
+                  const meta = OB_STATUS_META[c.status] ?? OB_STATUS_META["LOW_PROFIT"]!;
+                  return (
+                    <tr key={`${c.route}-${i}`} className={cn(
+                      "border-b border-border/50",
+                      c.status === "READY" ? "bg-success/10" : i % 2 === 0 ? "" : "bg-muted/20",
+                    )}>
+                      <td className="px-3 py-1.5 text-muted-foreground">{i + 1}</td>
+                      <td className="px-3 py-1.5 font-bold text-foreground whitespace-nowrap">{c.route}</td>
+                      <td className={cn("px-3 py-1.5 font-bold", c.estimatedProfitUsd > 0 ? "text-success" : "text-destructive")}>
+                        ${c.estimatedProfitUsd.toFixed(4)}
+                      </td>
+                      <td className={cn("px-3 py-1.5", c.profitPct > 0 ? "text-success" : "text-destructive")}>
+                        {c.profitPct.toFixed(3)}%
+                      </td>
+                      <td className={cn("px-3 py-1.5", c.slippagePct > (data?.maxSlippagePct ?? 0.5) ? "text-amber-500" : "text-muted-foreground")}>
+                        {c.slippagePct.toFixed(2)}%
+                      </td>
+                      <td className="px-3 py-1.5">
+                        <span className={cn("text-[9px] font-bold px-1 border whitespace-nowrap", meta.className)}>{meta.label}</span>
+                      </td>
+                      <td className="px-3 py-1.5 text-muted-foreground">
+                        {c.volumeA < 0.01 ? c.volumeA.toFixed(6) : c.volumeA.toFixed(4)}
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
             {data && (
               <div className="px-3 py-2 text-[10px] font-mono text-muted-foreground border-t border-border/50">
-                Trade size: ${data.tradeSizeUsd} · Fees: {data.feesPct}% · Scanned: {format(new Date(data.scannedAt), "HH:mm:ss")}
+                Trade size: ${data.tradeSizeUsd} · Fees: {data.feesPct}% · Min profit: ${data.minProfitUsd} · Max slippage: {data.maxSlippagePct}% · Scanned: {format(new Date(data.scannedAt), "HH:mm:ss")}
               </div>
             )}
           </div>
