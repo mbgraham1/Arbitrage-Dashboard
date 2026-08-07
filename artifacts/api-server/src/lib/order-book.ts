@@ -44,11 +44,19 @@ const OB_CROSS_MAP: Array<[ObAsset, ObAsset, string]> = [
   ["ADA",  "MATIC", "MATICADA"],
 ];
 
-/** Two-way lookup: "A-B" → pair, "B-A" → same pair (reverse side). */
-export const CROSS_LOOKUP = new Map<string, string>();
+/**
+ * Two-way lookup with orientation.
+ * In every OB_CROSS_MAP entry [a, b, pair], the Kraken symbol's BASE asset is
+ * `b` and its QUOTE asset is `a` (e.g. ["BTC","ETH","ETHXBT"] — ETH base, XBT quote).
+ *
+ * Going A→B when A is the quote → we BUY the base (walk ASKS).
+ * Going A→B when A is the base  → we SELL the base (walk BIDS).
+ */
+export interface CrossRoute { pair: string; aIsQuote: boolean; }
+export const CROSS_LOOKUP = new Map<string, CrossRoute>();
 for (const [a, b, pair] of OB_CROSS_MAP) {
-  CROSS_LOOKUP.set(`${a}-${b}`, pair);
-  CROSS_LOOKUP.set(`${b}-${a}`, pair);
+  CROSS_LOOKUP.set(`${a}-${b}`, { pair, aIsQuote: true });   // hold quote, buy base
+  CROSS_LOOKUP.set(`${b}-${a}`, { pair, aIsQuote: false });  // hold base, sell base
 }
 
 // ── Order book fetch with short cache ─────────────────────────────────────────
@@ -112,7 +120,10 @@ export interface ObScanResult {
   cycles: ObCycleEntry[];
   tradeSizeUsd: number;
   feesPct: number;
+  /** Number of pairs whose order book fetch succeeded */
   pairsScanned: number;
+  /** Number of pairs the scan attempted to fetch */
+  pairsRequested: number;
   scannedAt: string;
 }
 
@@ -134,12 +145,11 @@ function simulateCycle(
 ): { profitUsd: number; avg1: number; avg2: number; avg3: number; volA: number } | null {
   const usdPairA = OB_USD_PAIRS[assetA];
   const usdPairB = OB_USD_PAIRS[assetB];
-  const crossKey  = `${assetA}-${assetB}`;
-  const crossPair = CROSS_LOOKUP.get(crossKey);
-  if (!crossPair) return null;
+  const cross    = CROSS_LOOKUP.get(`${assetA}-${assetB}`);
+  if (!cross) return null;
 
   const obAUsd  = orderbooks.get(usdPairA);
-  const obCross = orderbooks.get(crossPair);
+  const obCross = orderbooks.get(cross.pair);
   const obBUsd  = orderbooks.get(usdPairB);
   if (!obAUsd || !obCross || !obBUsd) return null;
 
@@ -159,23 +169,40 @@ function simulateCycle(
     totalSpent += cost;
     remainingUsd -= cost;
   }
-  if (aAmt === 0) return null;
+  // Require a FULL fill — a partial fill is not an executable cycle.
+  if (aAmt === 0 || remainingUsd > 0) return null;
   const avg1 = totalSpent / aAmt; // USD per A
 
-  // ── Leg 2: Sell A for B (walk bids of A/B cross pair) ────────────────────
-  // Bid price = B per A; vol = A available at that price.
+  // ── Leg 2: Convert A → B on the cross pair, respecting orientation ───────
   let remainingA = aAmt;
   let bAmt = 0;
-  for (const [price, vol] of obCross.bids) {
-    if (remainingA <= vol) {
-      bAmt      += remainingA * price;
-      remainingA = 0;
-      break;
+  if (cross.aIsQuote) {
+    // A is the QUOTE asset, B is the BASE: we buy base with A → walk ASKS.
+    // Ask price = A per B; vol is in B.
+    for (const [price, vol] of obCross.asks) {
+      const cost = price * vol; // cost in A
+      if (remainingA <= cost) {
+        bAmt      += remainingA / price;
+        remainingA = 0;
+        break;
+      }
+      bAmt      += vol;
+      remainingA -= cost;
     }
-    bAmt      += vol * price;
-    remainingA -= vol;
+  } else {
+    // A is the BASE asset, B is the QUOTE: we sell base → walk BIDS.
+    // Bid price = B per A; vol is in A.
+    for (const [price, vol] of obCross.bids) {
+      if (remainingA <= vol) {
+        bAmt      += remainingA * price;
+        remainingA = 0;
+        break;
+      }
+      bAmt      += vol * price;
+      remainingA -= vol;
+    }
   }
-  if (bAmt === 0) return null;
+  if (bAmt === 0 || remainingA > 0) return null;
   const avg2 = bAmt / aAmt; // B per A (cross rate)
 
   // ── Leg 3: Sell B for USD (walk bids of B/USD) ───────────────────────────
@@ -190,7 +217,7 @@ function simulateCycle(
     usdFinal  += vol * price;
     remainingB -= vol;
   }
-  if (usdFinal === 0) return null;
+  if (usdFinal === 0 || remainingB > 0) return null;
   const avg3 = usdFinal / bAmt; // USD per B
 
   // Gross profit, then apply flat fee deduction (Python: profit * (1 - feesPct/100))
@@ -250,5 +277,12 @@ export async function scanOrderBookCycles(
 
   cycles.sort((a, b) => b.estimatedProfitUsd - a.estimatedProfitUsd);
 
-  return { cycles, tradeSizeUsd, feesPct, pairsScanned, scannedAt: new Date().toISOString() };
+  return {
+    cycles,
+    tradeSizeUsd,
+    feesPct,
+    pairsScanned,
+    pairsRequested: allPairs.length,
+    scannedAt: new Date().toISOString(),
+  };
 }

@@ -8,7 +8,7 @@ import {
 } from "lucide-react";
 import { format } from "date-fns";
 import { cn } from "@/lib/utils";
-import { useGetTradeSummary, useListTrades, useScanAllPairs, useGetObScan, TradeRecord, PairScanEntry, ObCycleEntry } from "@workspace/api-client-react";
+import { useGetTradeSummary, useListTrades, useScanAllPairs, useGetObScan, getObScanQueryKey, TradeRecord, PairScanEntry, ObCycleEntry } from "@workspace/api-client-react";
 
 // ── Small helpers ──────────────────────────────────────────────────────────────
 
@@ -68,17 +68,6 @@ function PriceTile({
   );
 }
 
-  const {
-    isRunning, setIsRunning, liveMode,
-    latestPriceData, cachedBalances, activityLog, sessionProfitUsd,
-    settings, credentials, addLog,
-    forceTrade, isForcingTrade,
-    forceTriangular, isForcingTriangular,
-    emergencyStop, setEmergencyStop,
-    startTime, failedTrades, sessionTradeCount, apiLatencyMs,
-    triOpportunities,
-  } = useBotContext();
-
 // ── Main Dashboard ─────────────────────────────────────────────────────────────
 
 export default function Dashboard() {
@@ -101,7 +90,7 @@ export default function Dashboard() {
       setUptimeStr(`${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`);
     };
     tick();
-    const id = setInterval(() => { scanQuery.refetch(); }, 5_000);
+    const id = setInterval(tick, 1_000);
     return () => clearInterval(id);
   }, [startTime]);
 
@@ -596,7 +585,7 @@ function MultiCoinRankerCard({ settings }: { settings: { totalFees: number; slip
 // ── v14 Order Book Hunter Card ─────────────────────────────────────────────────
 function OrderBookHunterCard() {
   const { data, isLoading } = useGetObScan(10, 0.5, {
-    query: { refetchInterval: 5_000, staleTime: 4_000 },
+    query: { queryKey: getObScanQueryKey(10, 0.5), refetchInterval: 5_000, staleTime: 4_000 },
   });
 
   const cycles: ObCycleEntry[] = data?.cycles ?? [];
@@ -612,7 +601,7 @@ function OrderBookHunterCard() {
         </CardTitle>
         <div className="flex items-center gap-2 text-[10px] font-mono text-muted-foreground">
           {isLoading && <RefreshCw className="h-3 w-3 animate-spin" />}
-          {data && `${data.pairsScanned} pairs · ${data.cycles.length} profitable`}
+          {data && `${data.pairsScanned}/${data.pairsRequested} pairs · ${data.cycles.length} profitable`}
         </div>
       </CardHeader>
       <CardContent className="px-0 pb-0">
@@ -620,7 +609,9 @@ function OrderBookHunterCard() {
           <div className="p-6 text-center text-sm font-mono text-muted-foreground">
             {isLoading
               ? "Fetching order books…"
-              : "No profitable cycles detected (all cycles negative after 0.5% fees)"}
+              : data && data.pairsScanned === 0
+                ? "⚠ Market data unavailable — could not reach Kraken order books"
+                : "No profitable cycles detected (all cycles negative after 0.5% fees)"}
           </div>
         ) : (
           <div className="overflow-x-auto">

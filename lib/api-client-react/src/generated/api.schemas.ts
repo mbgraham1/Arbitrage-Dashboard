@@ -217,7 +217,10 @@ export interface ObScanResult {
   cycles: ObCycleEntry[];
   tradeSizeUsd: number;
   feesPct: number;
+  /** Pairs whose order book fetch succeeded */
   pairsScanned: number;
+  /** Pairs the scan attempted to fetch */
+  pairsRequested: number;
   scannedAt: string;
 }
 

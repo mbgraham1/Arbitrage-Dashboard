@@ -643,7 +643,7 @@ components:
 
     ObScanResult:
       type: object
-      required: [cycles, tradeSizeUsd, feesPct, pairsScanned, scannedAt]
+      required: [cycles, tradeSizeUsd, feesPct, pairsScanned, pairsRequested, scannedAt]
       properties:
         cycles:
           type: array
@@ -651,7 +651,8 @@ components:
             $ref: "#/components/schemas/ObCycleEntry"
         tradeSizeUsd: {type: number}
         feesPct: {type: number}
-        pairsScanned: {type: number}
+        pairsScanned: {type: number, description: "pairs whose order book fetch succeeded"}
+        pairsRequested: {type: number, description: "pairs the scan attempted to fetch"}
         scannedAt: {type: string}
 
     TriExecuteRequest:
