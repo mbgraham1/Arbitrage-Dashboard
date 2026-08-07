@@ -28,6 +28,8 @@ export interface ExchangeCredentials {
   krakenSecret: string;
   coinbaseKey: string;
   coinbaseSecret: string;
+  /** Optional list of pair symbols to scan (e.g. ["BTC/USD","SOL/USD"]). Omit to scan all pairs. */
+  enabledPairs?: string[];
 }
 
 export interface WsStatus {

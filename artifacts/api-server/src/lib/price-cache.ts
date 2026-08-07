@@ -492,14 +492,22 @@ export async function getPairPrices(pair: Pair): Promise<PairPrices> {
 }
 
 /**
- * Scans all 10 pairs and returns the one with the highest gross spread
- * (Kraken ↔ Coinbase, best direction). Falls back to REST for stale pairs.
+ * Scans all 10 pairs (or a filtered subset) and returns the one with the
+ * highest gross spread (Kraken ↔ Coinbase, best direction). Falls back to
+ * REST for stale pairs.
  *
+ * @param enabledPairs - optional allow-list of pair symbols; scans all when omitted
  * Returns null only if no pair has valid prices on both Kraken and Coinbase.
  */
-export async function getBestPairPrices(): Promise<PairPrices | null> {
+export async function getBestPairPrices(enabledPairs?: string[]): Promise<PairPrices | null> {
+  // Apply optional pair filter; unknown symbols are silently ignored
+  const pairsToScan: Pair[] = enabledPairs && enabledPairs.length > 0
+    ? PAIRS.filter(p => enabledPairs.includes(p))
+    : [...PAIRS];
+  if (pairsToScan.length === 0) return null;
+
   // Fire REST fallbacks for all stale pairs in parallel
-  const allPrices = await Promise.all(PAIRS.map(p => getPairPrices(p)));
+  const allPrices = await Promise.all(pairsToScan.map(p => getPairPrices(p)));
 
   let bestPrices: PairPrices | null = null;
   let bestSpread = -Infinity;

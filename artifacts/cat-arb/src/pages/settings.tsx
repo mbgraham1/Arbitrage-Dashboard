@@ -4,8 +4,8 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
-import { useBotContext } from "@/store/bot-context";
-import { Settings2, KeySquare, SlidersHorizontal, ShieldAlert, CheckCircle2, XCircle, Lock } from "lucide-react";
+import { useBotContext, ALL_PAIRS } from "@/store/bot-context";
+import { Settings2, KeySquare, SlidersHorizontal, ShieldAlert, CheckCircle2, XCircle, Lock, Layers } from "lucide-react";
 import { useTestKraken, useTestCoinbase } from "@workspace/api-client-react";
 
 export default function Settings() {
@@ -389,6 +389,56 @@ export default function Settings() {
 
             <Button className="w-full mt-2" onClick={handleSaveSettings}>
               SAVE KELLY PARAMETERS
+            </Button>
+          </CardContent>
+        </Card>
+
+        {/* Pair Selection */}
+        <Card className="md:col-span-2">
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2">
+              <Layers className="h-5 w-5" /> Watched Pairs
+            </CardTitle>
+            <CardDescription>
+              Toggle which pairs the scanner checks on every poll. Disabled pairs are skipped entirely — useful for excluding thin or illiquid markets.
+              At least one pair must remain enabled. Changes take effect after saving.
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
+              {ALL_PAIRS.map((pair) => {
+                const enabled = (localSettings.enabledPairs ?? [...ALL_PAIRS]).includes(pair);
+                const coin = pair.split("/")[0];
+                const isLast = (localSettings.enabledPairs ?? [...ALL_PAIRS]).length === 1 && enabled;
+                return (
+                  <div
+                    key={pair}
+                    className={`flex items-center justify-between gap-2 border-2 px-3 py-2 ${
+                      enabled ? "border-primary/60 bg-primary/5" : "border-border bg-muted/30"
+                    }`}
+                  >
+                    <div className="flex flex-col">
+                      <span className="font-bold font-mono text-sm">{coin}</span>
+                      <span className="text-[10px] font-mono text-muted-foreground">{pair}</span>
+                    </div>
+                    <Switch
+                      checked={enabled}
+                      disabled={isLast}
+                      title={isLast ? "At least one pair must be enabled" : undefined}
+                      onCheckedChange={(checked) => {
+                        const current: string[] = localSettings.enabledPairs ?? [...ALL_PAIRS];
+                        const next = checked
+                          ? [...current, pair]
+                          : current.filter((p) => p !== pair);
+                        setLocalSettings({ ...localSettings, enabledPairs: next });
+                      }}
+                    />
+                  </div>
+                );
+              })}
+            </div>
+            <Button className="w-full mt-6" onClick={handleSaveSettings} data-testid="button-save-pairs">
+              SAVE PAIR SELECTION
             </Button>
           </CardContent>
         </Card>

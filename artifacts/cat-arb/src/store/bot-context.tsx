@@ -25,6 +25,13 @@ export interface LogEntry {
   message: string;
 }
 
+export const ALL_PAIRS = [
+  "BTC/USD", "ETH/USD", "SOL/USD", "AVAX/USD", "DOT/USD",
+  "POL/USD", "LINK/USD", "UNI/USD", "ATOM/USD", "ADA/USD",
+] as const;
+
+export type ScanPair = typeof ALL_PAIRS[number];
+
 export interface BotSettings {
   minNetEdge: number;
   minProfitUsd: number;   // v11: minimum estimated net profit in USD
@@ -37,6 +44,8 @@ export interface BotSettings {
   winRate: number;       // estimated win rate (default 0.55)
   kellyFraction: number; // fractional Kelly cap (default 0.25 = quarter-Kelly)
   maxPositionSol: number; // hard cap in SOL (default 1.0)
+  // Pair selection — which of the 10 pairs the scanner watches
+  enabledPairs: string[];
 }
 
 export interface BotContextType {
@@ -103,10 +112,11 @@ const DEFAULT_SETTINGS: BotSettings = {
   winRate: 0.55,        // Kelly: estimated historical win rate
   kellyFraction: 0.25,  // Kelly: quarter-Kelly for conservative sizing
   maxPositionSol: 1.0,  // Kelly: hard cap per trade (SOL)
+  enabledPairs: [...ALL_PAIRS], // all 10 pairs enabled by default
 };
 
 // Bump this when defaults change meaningfully — forces a one-time reset for existing users
-const SETTINGS_VERSION = 6;
+const SETTINGS_VERSION = 7;
 
 // ── Kelly Criterion position sizer ────────────────────────────────────────────
 // Direct port of Python KellySizer.calculate()
@@ -550,7 +560,9 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
 
       try {
         const fetchStart = Date.now();
-        const data = await fetchPricesMutation.mutateAsync({ data: c });
+        const data = await fetchPricesMutation.mutateAsync({
+          data: { ...c, enabledPairs: s.enabledPairs },
+        });
         if (cancelled) return;
         setApiLatencyMs(Date.now() - fetchStart);
 

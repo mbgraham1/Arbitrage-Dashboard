@@ -24,7 +24,8 @@ export const FetchPricesBody = zod.object({
   "krakenKey": zod.string(),
   "krakenSecret": zod.string(),
   "coinbaseKey": zod.string(),
-  "coinbaseSecret": zod.string()
+  "coinbaseSecret": zod.string(),
+  "enabledPairs": zod.array(zod.string()).optional()
 })
 
 export const FetchPricesResponse = zod.object({

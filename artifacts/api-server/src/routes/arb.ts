@@ -713,7 +713,8 @@ router.post("/prices", async (req, res): Promise<void> => {
   }
 
   try {
-    const prices = await getBestPairPrices();
+    const enabledPairs = parsed.data.enabledPairs;
+    const prices = await getBestPairPrices(enabledPairs);
 
     if (!prices) {
       res.status(500).json({ error: "Could not fetch prices from Kraken or Coinbase for any pair" });
