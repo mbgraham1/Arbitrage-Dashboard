@@ -4,11 +4,11 @@ import { Button } from "@/components/ui/button";
 import { useBotContext } from "@/store/bot-context";
 import {
   Activity, Play, Square, DollarSign, TrendingUp, Zap, ShieldAlert,
-  FileText, ArrowRight, Radio, Wifi, WifiOff, Siren, RefreshCw,
+  FileText, ArrowRight, Radio, Wifi, WifiOff, Siren, RefreshCw, BookOpen,
 } from "lucide-react";
 import { format } from "date-fns";
 import { cn } from "@/lib/utils";
-import { useGetTradeSummary, useListTrades, useScanAllPairs, TradeRecord, PairScanEntry } from "@workspace/api-client-react";
+import { useGetTradeSummary, useListTrades, useScanAllPairs, useGetObScan, TradeRecord, PairScanEntry, ObCycleEntry } from "@workspace/api-client-react";
 
 // ── Small helpers ──────────────────────────────────────────────────────────────
 
@@ -477,6 +477,7 @@ export default function Dashboard() {
 
       {/* Triangular Arb Opportunities */}
       <TriangularCard opportunities={triOpportunities} isRunning={isRunning} />
+      <OrderBookHunterCard />
 
       {/* Trade History Table */}
       <TradeHistoryTable />
@@ -580,6 +581,84 @@ function MultiCoinRankerCard({ settings }: { settings: { totalFees: number; slip
 }
 
 // ── Triangular Arb Card ────────────────────────────────────────────────────────
+
+// ── v14 Order Book Hunter Card ─────────────────────────────────────────────────
+function OrderBookHunterCard() {
+  const { data, isLoading } = useGetObScan(10, 0.5, {
+    query: { refetchInterval: 5_000, staleTime: 4_000 },
+  });
+
+  const cycles: ObCycleEntry[] = data?.cycles ?? [];
+
+  return (
+    <Card>
+      <CardHeader className="py-3 flex flex-row items-center justify-between space-y-0">
+        <CardTitle className="text-sm flex items-center gap-2">
+          <BookOpen className="h-4 w-4" /> Order Book Hunter
+          <span className="text-[10px] font-mono text-muted-foreground font-normal">
+            v14 · $10 · 6 assets · 30 cycles
+          </span>
+        </CardTitle>
+        <div className="flex items-center gap-2 text-[10px] font-mono text-muted-foreground">
+          {isLoading && <RefreshCw className="h-3 w-3 animate-spin" />}
+          {data && `${data.pairsScanned} pairs · ${data.cycles.length} profitable`}
+        </div>
+      </CardHeader>
+      <CardContent className="px-0 pb-0">
+        {cycles.length === 0 ? (
+          <div className="p-6 text-center text-sm font-mono text-muted-foreground">
+            {isLoading
+              ? "Fetching order books…"
+              : "No profitable cycles detected (all cycles negative after 0.5% fees)"}
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs font-mono border-collapse">
+              <thead>
+                <tr className="border-b-2 border-border bg-muted/50">
+                  {["Route", "Est. Profit", "Profit %", "Avg Buy (USD)", "Cross Rate", "Avg Sell (USD)", "Vol A"].map(h => (
+                    <th key={h} className="text-left px-3 py-2 text-[10px] uppercase font-bold text-muted-foreground whitespace-nowrap">{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {cycles.slice(0, 10).map((c, i) => (
+                  <tr key={`${c.route}-${i}`} className={cn(
+                    "border-b border-border/50",
+                    i % 2 === 0 ? "" : "bg-muted/20",
+                  )}>
+                    <td className="px-3 py-1.5 font-bold text-foreground whitespace-nowrap">{c.route}</td>
+                    <td className={cn("px-3 py-1.5 font-bold", c.estimatedProfitUsd > 0 ? "text-success" : "text-destructive")}>
+                      ${c.estimatedProfitUsd.toFixed(4)}
+                    </td>
+                    <td className={cn("px-3 py-1.5", c.profitPct > 0 ? "text-success" : "text-destructive")}>
+                      {c.profitPct.toFixed(3)}%
+                    </td>
+                    <td className="px-3 py-1.5 text-muted-foreground">
+                      {c.avgPriceA >= 1000 ? c.avgPriceA.toFixed(2) : c.avgPriceA.toFixed(4)}
+                    </td>
+                    <td className="px-3 py-1.5 text-muted-foreground">{c.avgCrossRate.toFixed(6)}</td>
+                    <td className="px-3 py-1.5 text-muted-foreground">
+                      {c.avgPriceB >= 1000 ? c.avgPriceB.toFixed(2) : c.avgPriceB.toFixed(4)}
+                    </td>
+                    <td className="px-3 py-1.5 text-muted-foreground">
+                      {c.volumeA < 0.01 ? c.volumeA.toFixed(6) : c.volumeA.toFixed(4)}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            {data && (
+              <div className="px-3 py-2 text-[10px] font-mono text-muted-foreground border-t border-border/50">
+                Trade size: ${data.tradeSizeUsd} · Fees: {data.feesPct}% · Scanned: {format(new Date(data.scannedAt), "HH:mm:ss")}
+              </div>
+            )}
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
 
 function TriangularCard({
   opportunities,

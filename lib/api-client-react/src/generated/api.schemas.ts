@@ -193,6 +193,34 @@ export interface TriExecuteResult {
 /**
  * Raw prices used in this scan
  */
+// ── v14 Order Book Hunter ─────────────────────────────────────────────────────
+
+/** Single triangular cycle result from the L2 order book simulation (v14). */
+export interface ObCycleEntry {
+  route: string;
+  assetA: string;
+  assetB: string;
+  estimatedProfitUsd: number;
+  /** Profit as % of tradeSizeUsd */
+  profitPct: number;
+  /** Average fill price for leg 1: USD per A */
+  avgPriceA: number;
+  /** Average fill rate for leg 2: B per A (cross rate) */
+  avgCrossRate: number;
+  /** Average fill price for leg 3: USD per B */
+  avgPriceB: number;
+  /** Amount of A acquired in leg 1 — used for execution sizing */
+  volumeA: number;
+}
+
+export interface ObScanResult {
+  cycles: ObCycleEntry[];
+  tradeSizeUsd: number;
+  feesPct: number;
+  pairsScanned: number;
+  scannedAt: string;
+}
+
 export type TriangularScanResultPrices = { [key: string]: unknown };
 
 export interface TriangularScanResult {

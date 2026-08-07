@@ -260,6 +260,39 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
 
+  /arb/ob-scan:
+    get:
+      operationId: getObScan
+      tags: [arb]
+      summary: Scan 30 triangular cycles using L2 order book depth (v14 port)
+      description: >
+        Port of Python v14 "Order Book Hunter". Fetches Kraken Depth API for all
+        required pairs in parallel, then walks the book for each of the 30 A→B
+        permutations of 6 assets to compute realistic fill prices at the given
+        trade size. Returns cycles sorted by estimated net profit descending.
+      parameters:
+        - name: tradeSizeUsd
+          in: query
+          description: Simulated trade size in USD (default 10)
+          schema: {type: number, default: 10}
+        - name: feesPct
+          in: query
+          description: Estimated total fees % (default 0.5 — 3 legs × 0.16% maker)
+          schema: {type: number, default: 0.5}
+      responses:
+        "200":
+          description: Ranked cycle list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ObScanResult"
+        "500":
+          description: Scan error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
   /arb/execute-triangular:
     post:
       operationId: executeTriangular
@@ -593,6 +626,33 @@ components:
           type: string
         scannedAt:
           type: string
+
+    ObCycleEntry:
+      type: object
+      required: [route, assetA, assetB, estimatedProfitUsd, profitPct, avgPriceA, avgCrossRate, avgPriceB, volumeA]
+      properties:
+        route: {type: string, description: "e.g. USD→SOL→ETH→USD"}
+        assetA: {type: string}
+        assetB: {type: string}
+        estimatedProfitUsd: {type: number}
+        profitPct: {type: number, description: "profit as % of tradeSizeUsd"}
+        avgPriceA: {type: number, description: "average USD fill price for leg 1"}
+        avgCrossRate: {type: number, description: "average B-per-A cross rate"}
+        avgPriceB: {type: number, description: "average USD fill price for leg 3"}
+        volumeA: {type: number, description: "amount of A acquired in leg 1"}
+
+    ObScanResult:
+      type: object
+      required: [cycles, tradeSizeUsd, feesPct, pairsScanned, scannedAt]
+      properties:
+        cycles:
+          type: array
+          items:
+            $ref: "#/components/schemas/ObCycleEntry"
+        tradeSizeUsd: {type: number}
+        feesPct: {type: number}
+        pairsScanned: {type: number}
+        scannedAt: {type: string}
 
     TriExecuteRequest:
       type: object

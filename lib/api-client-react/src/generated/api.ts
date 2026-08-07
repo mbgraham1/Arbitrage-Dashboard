@@ -28,6 +28,7 @@ import type {
   HealthStatus,
   KrakenCredentials,
   ListTradesParams,
+  ObScanResult,
   PairScanEntry,
   PreloadedCredentials,
   PriceData,
@@ -738,6 +739,66 @@ export function useScanTriangularArb<TData = Awaited<ReturnType<typeof scanTrian
 
 
 
+
+// ── /arb/ob-scan ─────────────────────────────────────────────────────────────
+// Port of Python v14 "Order Book Hunter" — walks L2 depth for 30 cycles.
+
+export const getObScanUrl = (tradeSizeUsd?: number, feesPct?: number) => {
+  const p = new URLSearchParams();
+  if (tradeSizeUsd != null) p.set("tradeSizeUsd", String(tradeSizeUsd));
+  if (feesPct      != null) p.set("feesPct",      String(feesPct));
+  const qs = p.toString();
+  return `/api/arb/ob-scan${qs ? `?${qs}` : ""}`;
+};
+
+/**
+ * Fetches the v14 order book hunter scan — all 30 triangular cycles across
+ * 6 assets, simulated using actual L2 depth from Kraken.
+ * @summary Scan 30 triangular cycles using L2 order book depth (v14)
+ */
+export const getObScan = async (
+  tradeSizeUsd?: number,
+  feesPct?: number,
+  options?: RequestInit,
+): Promise<ObScanResult> =>
+  customFetch<ObScanResult>(getObScanUrl(tradeSizeUsd, feesPct), { ...options, method: "GET" });
+
+export const getObScanQueryKey = (tradeSizeUsd?: number, feesPct?: number) =>
+  [`/api/arb/ob-scan`, tradeSizeUsd, feesPct] as const;
+
+export const getObScanQueryOptions = <
+  TData = Awaited<ReturnType<typeof getObScan>>,
+  TError = ErrorType<ErrorResponse>,
+>(
+  tradeSizeUsd?: number,
+  feesPct?: number,
+  options?: { query?: UseQueryOptions<Awaited<ReturnType<typeof getObScan>>, TError, TData>; request?: SecondParameter<typeof customFetch> },
+): UseQueryOptions<Awaited<ReturnType<typeof getObScan>>, TError, TData> & { queryKey: QueryKey } => {
+  const { query: queryOptions, request: requestOptions } = options ?? {};
+  const queryKey = queryOptions?.queryKey ?? getObScanQueryKey(tradeSizeUsd, feesPct);
+  const queryFn: QueryFunction<Awaited<ReturnType<typeof getObScan>>> = ({ signal }) =>
+    getObScan(tradeSizeUsd, feesPct, { signal, ...requestOptions });
+  return { queryKey, queryFn, ...queryOptions } as UseQueryOptions<Awaited<ReturnType<typeof getObScan>>, TError, TData> & { queryKey: QueryKey };
+};
+
+export type GetObScanQueryResult = NonNullable<Awaited<ReturnType<typeof getObScan>>>;
+export type GetObScanQueryError = ErrorType<ErrorResponse>;
+
+/**
+ * @summary Scan 30 triangular cycles using L2 order book depth (v14 port)
+ */
+export const useGetObScan = <
+  TData = Awaited<ReturnType<typeof getObScan>>,
+  TError = ErrorType<ErrorResponse>,
+>(
+  tradeSizeUsd?: number,
+  feesPct?: number,
+  options?: { query?: UseQueryOptions<Awaited<ReturnType<typeof getObScan>>, TError, TData>; request?: SecondParameter<typeof customFetch> },
+): UseQueryResult<TData, TError> & { queryKey: QueryKey } => {
+  const queryOptions = getObScanQueryOptions(tradeSizeUsd, feesPct, options);
+  const query = useQuery(queryOptions) as UseQueryResult<TData, TError> & { queryKey: QueryKey };
+  return withQueryKey(query, queryOptions.queryKey);
+};
 
 // ── /arb/execute-triangular ───────────────────────────────────────────────────
 

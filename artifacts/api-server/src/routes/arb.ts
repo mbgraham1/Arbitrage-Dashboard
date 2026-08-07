@@ -30,6 +30,7 @@ import {
   type Pair,
 } from "../lib/exchange";
 import { getBestPairPrices, getTriPrices, getBtcTriPrices, scanAllPairs } from "../lib/price-cache";
+import { scanOrderBookCycles, OB_USD_PAIRS, CROSS_LOOKUP } from "../lib/order-book";
 
 // ── Triangular arb helpers ─────────────────────────────────────────────────────
 
@@ -142,6 +143,22 @@ router.get("/arb/scan", async (_req, res): Promise<void> => {
     const entries = await scanAllPairs();
     res.json(entries);
   } catch (err) {
+    res.status(500).json({ error: (err as Error).message });
+  }
+});
+
+// ── GET /arb/ob-scan ──────────────────────────────────────────────────────────
+// Port of Python v14 "Order Book Hunter".
+// Fetches L2 depth from Kraken and walks the book for all 30 triangular cycles.
+// Query params: tradeSizeUsd (default 10), feesPct (default 0.5)
+router.get("/arb/ob-scan", async (req, res): Promise<void> => {
+  const tradeSizeUsd = Math.max(1, parseFloat(String(req.query["tradeSizeUsd"] ?? "10"))  || 10);
+  const feesPct      = Math.max(0, parseFloat(String(req.query["feesPct"]      ?? "0.5")) || 0.5);
+  try {
+    const result = await scanOrderBookCycles(tradeSizeUsd, feesPct);
+    res.json(result);
+  } catch (err) {
+    req.log.error({ err }, "OB scan error");
     res.status(500).json({ error: (err as Error).message });
   }
 });
