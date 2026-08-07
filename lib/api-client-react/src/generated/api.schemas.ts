@@ -219,6 +219,44 @@ export const ObCycleEntryStatus = {
   LOW_PROFIT: 'LOW_PROFIT',
 } as const;
 
+// ── Graph Opportunity Engine ──────────────────────────────────────────────────
+
+export type GraphExchangeLabel = "kraken" | "coinbase" | "bridge";
+
+export interface GraphRouteHop {
+  from: string;
+  to: string;
+  exchange: GraphExchangeLabel;
+  pair: string;
+  side: "buy" | "sell" | "bridge";
+  amountIn: number;
+  amountOut: number;
+  feePct: number;
+  limitPrice: number;
+}
+
+export interface GraphRoute {
+  hops: GraphRouteHop[];
+  description: string;
+  startUsd: number;
+  grossProfitUsd: number;
+  feeUsd: number;
+  netProfitUsd: number;
+  profitPct: number;
+  slippagePct: number;
+  status: "VIABLE" | "REJECTED";
+}
+
+export interface GraphScanResult {
+  routes: GraphRoute[];
+  tradeSizeUsd: number;
+  krakenFeesPct: number;
+  coinbaseFeesPct: number;
+  assetsScanned: number;
+  routesEvaluated: number;
+  scannedAt: string;
+}
+
 export interface ObCycleEntry {
   /** e.g. USD→SOL→ETH→USD */
   route: string;
@@ -450,6 +488,13 @@ export interface TradeSummary {
 export type ListTradesParams = {
 limit?: number;
 offset?: number;
+};
+
+export type GetGraphScanParams = {
+  tradeSizeUsd?: number;
+  krakenFeesPct?: number;
+  coinbaseFeesPct?: number;
+  maxHops?: number;
 };
 
 export type GetObScanParams = {

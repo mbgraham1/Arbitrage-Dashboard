@@ -8,7 +8,7 @@ import {
 } from "lucide-react";
 import { format } from "date-fns";
 import { cn } from "@/lib/utils";
-import { useGetTradeSummary, useListTrades, useScanAllPairs, useGetObScan, getGetObScanQueryKey, useObExecute, useGetAllPairSnapshots, getGetAllPairSnapshotsQueryKey, TradeRecord, PairScanEntry, ObCycleEntry, AllPairSnapshot } from "@workspace/api-client-react";
+import { useGetTradeSummary, useListTrades, useScanAllPairs, useGetObScan, getGetObScanQueryKey, useObExecute, useGetAllPairSnapshots, getGetAllPairSnapshotsQueryKey, useGetGraphScan, getGetGraphScanQueryKey, TradeRecord, PairScanEntry, ObCycleEntry, AllPairSnapshot, GraphRoute, GraphRouteHop } from "@workspace/api-client-react";
 
 // ── Small helpers ──────────────────────────────────────────────────────────────
 
@@ -479,6 +479,7 @@ export default function Dashboard() {
       {/* Triangular Arb Opportunities */}
       <TriangularCard opportunities={triOpportunities} isRunning={isRunning} isExecutingTri={isExecutingTriangular} priceSource={triPriceSource} />
       <OrderBookHunterCard />
+      <GraphEngineCard />
 
       {/* Trade History Table */}
       <TradeHistoryTable />
@@ -1062,6 +1063,160 @@ function TriangularCard({
                 })}
               </tbody>
             </table>
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+// ── Graph Opportunity Engine Card ──────────────────────────────────────────────
+
+const EXCHANGE_BADGE: Record<string, string> = {
+  kraken:   "bg-primary/20 text-primary border-primary/40",
+  coinbase: "bg-blue-500/20 text-blue-400 border-blue-500/40",
+  bridge:   "bg-muted/50 text-muted-foreground border-border",
+};
+
+function HopBadge({ hop }: { hop: GraphRouteHop }) {
+  const tag = hop.exchange === "bridge" ? "⇌" : hop.exchange === "kraken" ? "K" : "CB";
+  return (
+    <span className={cn("text-[8px] font-bold px-1 border rounded-sm", EXCHANGE_BADGE[hop.exchange] ?? EXCHANGE_BADGE.bridge)}>
+      {tag}
+    </span>
+  );
+}
+
+function GraphEngineCard() {
+  const { settings } = useBotContext();
+  const [sizeInput, setSizeInput] = useState(String(settings.obTradeSize));
+  const [debouncedSize, setDebouncedSize] = useState(String(settings.obTradeSize));
+  useEffect(() => {
+    const t = setTimeout(() => setDebouncedSize(sizeInput), 500);
+    return () => clearTimeout(t);
+  }, [sizeInput]);
+  const tradeSize = Math.max(1, parseFloat(debouncedSize) || settings.obTradeSize);
+
+  const params = {
+    tradeSizeUsd:    tradeSize,
+    krakenFeesPct:   settings.obFeesPct,
+    coinbaseFeesPct: 0.40,
+    maxHops:         4,
+  };
+  const { data, isLoading } = useGetGraphScan(params, {
+    query: { queryKey: getGetGraphScanQueryKey(params), refetchInterval: 8_000, staleTime: 7_000 },
+  });
+
+  const routes: GraphRoute[] = data?.routes ?? [];
+  const topRoute = routes[0];
+  const viable = routes.filter(r => r.status === "VIABLE");
+  const breakEvenPct = topRoute
+    ? ((topRoute.feeUsd / tradeSize) * 100).toFixed(3)
+    : "—";
+
+  return (
+    <Card className="mt-6">
+      <CardHeader className="py-3 flex flex-row items-center justify-between space-y-0">
+        <CardTitle className="text-sm flex items-center gap-2">
+          <Zap className="h-4 w-4 text-primary" />
+          Opportunity Engine
+          <span className="text-[10px] font-mono text-muted-foreground font-normal">
+            Kraken + Coinbase · graph search
+          </span>
+          <span className="flex items-center gap-1 text-[10px] font-mono font-normal text-muted-foreground">
+            $<input
+              type="number" min={1} step={10}
+              value={sizeInput}
+              onChange={e => setSizeInput(e.target.value)}
+              className="w-16 bg-transparent border border-border px-1 py-0.5 text-foreground focus:outline-none focus:border-primary"
+              aria-label="Trade size USD"
+            /> trade size
+          </span>
+        </CardTitle>
+        <div className="flex items-center gap-2 text-[10px] font-mono text-muted-foreground">
+          {isLoading && <RefreshCw className="h-3 w-3 animate-spin" />}
+          {data && (
+            <span>{data.assetsScanned} assets · {data.routesEvaluated} routes evaluated · {viable.length} viable</span>
+          )}
+        </div>
+      </CardHeader>
+
+      {/* Fee diagnostic */}
+      {data && topRoute && (
+        <div className="px-3 py-2 text-[10px] font-mono border-b border-border/50 bg-muted/30 grid grid-cols-2 sm:grid-cols-5 gap-x-4 gap-y-0.5">
+          <span className="col-span-2 sm:col-span-5 font-bold uppercase text-muted-foreground">Fee Diagnostic</span>
+          <span className="text-muted-foreground">Kraken/leg: <span className="text-foreground">{data.krakenFeesPct.toFixed(2)}%</span></span>
+          <span className="text-muted-foreground">Coinbase/leg: <span className="text-foreground">{data.coinbaseFeesPct.toFixed(2)}%</span></span>
+          <span className="text-muted-foreground">Break-even: <span className="text-foreground">{breakEvenPct}%</span></span>
+          <span className="text-muted-foreground">Best raw edge: <span className={topRoute.grossProfitUsd > 0 ? "text-success" : "text-destructive"}>${topRoute.grossProfitUsd.toFixed(4)}</span></span>
+          <span className={cn("font-bold", viable.length > 0 ? "text-success" : "text-destructive")}>
+            {viable.length > 0 ? `✅ ${viable.length} EXECUTABLE` : "✕ NO VIABLE ROUTE"}
+          </span>
+        </div>
+      )}
+
+      <CardContent className="p-0">
+        {routes.length === 0 ? (
+          <div className="p-8 text-center text-sm font-mono text-muted-foreground">
+            {isLoading ? "Building graph and searching routes…" : "No routes found — check exchange connectivity."}
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs font-mono border-collapse">
+              <thead>
+                <tr className="border-b-2 border-border bg-muted/50">
+                  {["#", "Route", "Hops", "Raw Edge", "Fees", "Net Profit", "Profit %", "Status"].map(h => (
+                    <th key={h} className="text-left px-3 py-2 text-[10px] uppercase font-bold text-muted-foreground whitespace-nowrap">{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {routes.map((r, i) => (
+                  <tr key={r.description} className={cn(
+                    "border-b border-border/50",
+                    r.status === "VIABLE" ? "bg-success/10" : i % 2 === 0 ? "" : "bg-muted/20",
+                  )}>
+                    <td className="px-3 py-1.5 text-muted-foreground">{i + 1}</td>
+                    <td className="px-3 py-1.5 font-bold text-foreground whitespace-nowrap max-w-[240px] truncate" title={r.description}>
+                      {r.description}
+                    </td>
+                    <td className="px-3 py-1.5">
+                      <span className="flex gap-0.5 items-center">
+                        {r.hops.filter(h => h.exchange !== "bridge").map((h, j) => (
+                          <HopBadge key={j} hop={h} />
+                        ))}
+                      </span>
+                    </td>
+                    <td className={cn("px-3 py-1.5", r.grossProfitUsd > 0 ? "text-success" : "text-destructive")}>
+                      ${r.grossProfitUsd.toFixed(4)}
+                    </td>
+                    <td className="px-3 py-1.5 text-muted-foreground">
+                      -${r.feeUsd.toFixed(4)}
+                    </td>
+                    <td className={cn("px-3 py-1.5 font-bold", r.netProfitUsd > 0 ? "text-success" : "text-destructive")}>
+                      ${r.netProfitUsd.toFixed(4)}
+                    </td>
+                    <td className={cn("px-3 py-1.5", r.profitPct > 0 ? "text-success" : "text-destructive")}>
+                      {r.profitPct.toFixed(3)}%
+                    </td>
+                    <td className="px-3 py-1.5">
+                      <span className={cn("text-[9px] font-bold px-1 border whitespace-nowrap",
+                        r.status === "VIABLE"
+                          ? "text-success border-success"
+                          : "text-muted-foreground border-border"
+                      )}>
+                        {r.status === "VIABLE" ? "✅ VIABLE" : "✕ REJECTED"}
+                      </span>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+        {data && (
+          <div className="px-3 py-1.5 text-[9px] font-mono text-muted-foreground border-t border-border/50">
+            Kraken {data.krakenFeesPct}%/leg (post-only maker) · Coinbase {data.coinbaseFeesPct}%/leg · Bridge edges: inventory model, no transfer fee · Scanned {format(new Date(data.scannedAt), "HH:mm:ss")}
           </div>
         )}
       </CardContent>

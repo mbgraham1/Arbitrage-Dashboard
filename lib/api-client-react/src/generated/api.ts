@@ -27,7 +27,9 @@ import type {
   ConnectionTestResult,
   ErrorResponse,
   ExchangeCredentials,
+  GetGraphScanParams,
   GetObScanParams,
+  GraphScanResult,
   HealthStatus,
   KrakenCredentials,
   ListTradesParams,
@@ -1233,6 +1235,44 @@ export const getTradeSummary = async ( options?: RequestInit): Promise<TradeSumm
 
 
 
+
+// ── Graph Opportunity Engine ──────────────────────────────────────────────────
+
+export const getGraphScanUrl = (params?: GetGraphScanParams) => {
+  const p = new URLSearchParams();
+  if (params?.tradeSizeUsd    != null) p.set("tradeSizeUsd",    String(params.tradeSizeUsd));
+  if (params?.krakenFeesPct   != null) p.set("krakenFeesPct",   String(params.krakenFeesPct));
+  if (params?.coinbaseFeesPct != null) p.set("coinbaseFeesPct", String(params.coinbaseFeesPct));
+  if (params?.maxHops         != null) p.set("maxHops",         String(params.maxHops));
+  const qs = p.toString();
+  return `/api/arb/graph-scan${qs ? `?${qs}` : ""}`;
+};
+
+export const getGraphScan = async (params?: GetGraphScanParams, options?: RequestInit): Promise<GraphScanResult> =>
+  customFetch<GraphScanResult>(getGraphScanUrl(params), { ...options, method: "GET" });
+
+export const getGetGraphScanQueryKey = (params?: GetGraphScanParams) =>
+  ["/api/arb/graph-scan", params?.tradeSizeUsd, params?.krakenFeesPct, params?.coinbaseFeesPct, params?.maxHops] as const;
+
+export const getGetGraphScanQueryOptions = <TData = Awaited<ReturnType<typeof getGraphScan>>, TError = ErrorType<unknown>>(
+  params?: GetGraphScanParams,
+  options?: { query?: UseQueryOptions<Awaited<ReturnType<typeof getGraphScan>>, TError, TData>; request?: SecondParameter<typeof customFetch> },
+) => {
+  const { query: queryOptions, request: requestOptions } = options ?? {};
+  const queryKey = queryOptions?.queryKey ?? getGetGraphScanQueryKey(params);
+  const queryFn: QueryFunction<Awaited<ReturnType<typeof getGraphScan>>> = ({ signal }) =>
+    getGraphScan(params, { signal, ...requestOptions });
+  return { queryKey, queryFn, ...queryOptions } as UseQueryOptions<Awaited<ReturnType<typeof getGraphScan>>, TError, TData> & { queryKey: QueryKey };
+};
+
+export function useGetGraphScan<TData = Awaited<ReturnType<typeof getGraphScan>>, TError = ErrorType<unknown>>(
+  params?: GetGraphScanParams,
+  options?: { query?: UseQueryOptions<Awaited<ReturnType<typeof getGraphScan>>, TError, TData>; request?: SecondParameter<typeof customFetch> },
+): UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+  const queryOptions = getGetGraphScanQueryOptions(params, options);
+  const query = useQuery(queryOptions) as UseQueryResult<TData, TError> & { queryKey: QueryKey };
+  return withQueryKey(query, queryOptions.queryKey);
+}
 
 export const getGetTradeSummaryQueryKey = () => {
     return [

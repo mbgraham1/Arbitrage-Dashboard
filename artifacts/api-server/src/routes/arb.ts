@@ -34,6 +34,7 @@ import {
 } from "../lib/exchange";
 import { getBestPairPrices, getTriPrices, getBtcTriPrices, scanAllPairs, getPairPrices, getAllPairSnapshots } from "../lib/price-cache";
 import { scanOrderBookCycles, preflightObCycle, OB_ASSETS, OB_USD_PAIRS, CROSS_LOOKUP, type ObAsset } from "../lib/order-book";
+import { scanGraphOpportunities } from "../lib/graph-engine";
 import { createPairHistory, updatePairHistory, type PairHistory } from "../lib/kalman";
 
 // ── Cointegration pairs-trading state (in-process memory) ─────────────────────
@@ -180,6 +181,27 @@ router.get("/arb/scan", async (_req, res): Promise<void> => {
     const entries = await scanAllPairs();
     res.json(entries);
   } catch (err) {
+    res.status(500).json({ error: (err as Error).message });
+  }
+});
+
+// ── GET /arb/graph-scan ───────────────────────────────────────────────────────
+// Multi-exchange graph opportunity engine: builds a directed graph over Kraken
+// (34 assets + all verified cross pairs) and Coinbase (10 shared assets), then
+// DFS-searches all USD→…→USD cycles up to 4 hops and ranks by net profit.
+// Cross-exchange routes use an inventory bridge (no transfer lag assumed).
+// Query params: tradeSizeUsd (default 10), krakenFeesPct (default 0.16),
+//               coinbaseFeesPct (default 0.40), maxHops (default 4)
+router.get("/arb/graph-scan", async (req, res): Promise<void> => {
+  const tradeSizeUsd    = Math.max(1,  parseFloat(String(req.query["tradeSizeUsd"]    ?? "10"))   || 10);
+  const krakenFeesPct   = Math.max(0,  parseFloat(String(req.query["krakenFeesPct"]   ?? "0.16")) || 0.16);
+  const coinbaseFeesPct = Math.max(0,  parseFloat(String(req.query["coinbaseFeesPct"] ?? "0.40")) || 0.40);
+  const maxHops         = Math.min(5, Math.max(2, parseInt(String(req.query["maxHops"] ?? "4"), 10) || 4));
+  try {
+    const result = await scanGraphOpportunities(tradeSizeUsd, krakenFeesPct, coinbaseFeesPct, maxHops);
+    res.json(result);
+  } catch (err) {
+    req.log.error({ err }, "graph-scan error");
     res.status(500).json({ error: (err as Error).message });
   }
 });

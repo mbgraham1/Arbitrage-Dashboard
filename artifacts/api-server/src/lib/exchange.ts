@@ -310,6 +310,20 @@ export async function getCoinbasePrice(pair: Pair = "SOL/USD"): Promise<number> 
   return parseFloat(price);
 }
 
+/** Public endpoint — returns best bid AND ask for building graph edges. */
+export async function getCoinbaseBidAsk(pair: Pair = "SOL/USD"): Promise<{ bid: number; ask: number; mid: number }> {
+  const product = COINBASE_PRODUCTS[pair];
+  const resp = await fetch(`https://api.exchange.coinbase.com/products/${product}/ticker`, {
+    signal: AbortSignal.timeout(10_000),
+  });
+  if (!resp.ok) throw new Error(`Coinbase ticker HTTP ${resp.status}`);
+  const json = await resp.json() as { bid?: string; ask?: string; price?: string };
+  const bid = parseFloat(json.bid ?? json.price ?? "0");
+  const ask = parseFloat(json.ask ?? json.price ?? "0");
+  if (!bid || !ask) throw new Error(`Coinbase: missing bid/ask for ${product}`);
+  return { bid, ask, mid: (bid + ask) / 2 };
+}
+
 export async function getCoinbaseBalances(creds: CoinbaseCreds): Promise<BalanceEntry[]> {
   const data = await coinbaseRequest<{ accounts: Array<{ currency: string; available_balance: { value: string } }> }>(
     creds,
