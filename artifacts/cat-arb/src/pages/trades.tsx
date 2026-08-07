@@ -1,20 +1,24 @@
 import React, { useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { useListTrades, useGetTradeSummary, useGetTriangularHistory, useGetTriangularHistorySummary } from "@workspace/api-client-react";
 import { format } from "date-fns";
-import { ArrowRight, BarChart2, DollarSign, Activity, Triangle } from "lucide-react";
+import { ArrowRight, BarChart2, Activity, Triangle, ChevronLeft, ChevronRight } from "lucide-react";
 import { cn } from "@/lib/utils";
+
+const TRI_PAGE_SIZE = 100;
 
 type Tab = "executions" | "triangular";
 
 export default function Trades() {
   const [tab, setTab] = useState<Tab>("executions");
+  const [triPage, setTriPage] = useState(0);
 
   const tradesQuery = useListTrades();
   const summaryQuery = useGetTradeSummary();
   const triHistoryQuery = useGetTriangularHistory(
-    { limit: 100 },
+    { limit: TRI_PAGE_SIZE, offset: triPage * TRI_PAGE_SIZE },
     { refetchInterval: 30_000, enabled: tab === "triangular" },
   );
   const triSummaryQuery = useGetTriangularHistorySummary(
@@ -27,6 +31,10 @@ export default function Trades() {
   const triItems = triHistoryQuery.data?.items ?? [];
   const triTotal = triHistoryQuery.data?.total ?? 0;
   const triSummary = triSummaryQuery.data;
+
+  const triTotalPages = Math.max(1, Math.ceil(triTotal / TRI_PAGE_SIZE));
+  const triRangeStart = triTotal === 0 ? 0 : triPage * TRI_PAGE_SIZE + 1;
+  const triRangeEnd = Math.min((triPage + 1) * TRI_PAGE_SIZE, triTotal);
 
   return (
     <div className="flex flex-col gap-6">
@@ -83,7 +91,7 @@ export default function Trades() {
           Executions
         </button>
         <button
-          onClick={() => setTab("triangular")}
+          onClick={() => { setTab("triangular"); setTriPage(0); }}
           className={cn(
             "px-4 py-2 text-xs font-bold uppercase tracking-wide border-b-2 -mb-px transition-colors flex items-center gap-2",
             tab === "triangular"
@@ -220,7 +228,7 @@ export default function Trades() {
               <Triangle className="h-4 w-4" /> Triangular Scan History
               {triTotal > 0 && (
                 <span className="ml-auto text-xs text-muted-foreground font-normal font-mono">
-                  {triTotal} total opportunities recorded
+                  Showing {triRangeStart}–{triRangeEnd} of {triTotal}
                 </span>
               )}
             </CardTitle>
@@ -279,6 +287,35 @@ export default function Trades() {
               </table>
             )}
           </CardContent>
+          {triTotal > TRI_PAGE_SIZE && (
+            <div className="flex items-center justify-between px-4 py-3 border-t border-border">
+              <span className="text-xs font-mono text-muted-foreground">
+                Page {triPage + 1} of {triTotalPages}
+              </span>
+              <div className="flex items-center gap-2">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-7 px-2 text-xs font-mono"
+                  disabled={triPage === 0 || triHistoryQuery.isFetching}
+                  onClick={() => setTriPage((p) => Math.max(0, p - 1))}
+                >
+                  <ChevronLeft className="h-3.5 w-3.5 mr-1" />
+                  Prev
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-7 px-2 text-xs font-mono"
+                  disabled={triPage >= triTotalPages - 1 || triHistoryQuery.isFetching}
+                  onClick={() => setTriPage((p) => Math.min(triTotalPages - 1, p + 1))}
+                >
+                  Next
+                  <ChevronRight className="h-3.5 w-3.5 ml-1" />
+                </Button>
+              </div>
+            </div>
+          )}
         </Card>
       )}
     </div>
