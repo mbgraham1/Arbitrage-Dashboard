@@ -715,11 +715,10 @@ function OrderBookHunterCard() {
 
   const cycles: ObCycleEntry[] = data?.cycles ?? [];
   const topCycle = cycles[0];
-  // v18 gate: server pre-flight requires profit > 0.02 × (size/10). The button
-  // stays clickable whenever a route exists — the pre-flight is the real guard
-  // (a disabled button with no explanation just looks broken).
-  const threshold = 0.02 * (tradeSize / 10);
-  const topBelowThreshold = !!topCycle && topCycle.estimatedProfitUsd <= threshold;
+  // Execution gate: any positive profit after fees passes the server
+  // pre-flight (no size-scaled minimum). The button stays clickable whenever
+  // a route exists — the pre-flight is the real guard.
+  const topBelowThreshold = !!topCycle && topCycle.estimatedProfitUsd <= 0;
   const canExecute = !!topCycle && !executeMutation.isPending;
 
   const executeTopRoute = async () => {
@@ -740,7 +739,7 @@ function OrderBookHunterCard() {
           assetB: topCycle.assetB,
           tradeSizeUsd: tradeSize,
           feesPct: 0.5,
-          minProfitUsd: 0.02,
+          minProfitUsd: 0, // execute on any profit after fees
           isDryRun: !liveMode,
         },
       });
@@ -808,7 +807,7 @@ function OrderBookHunterCard() {
         )}
         {!execResult && topBelowThreshold && topCycle && (
           <div className="px-3 py-1.5 text-[10px] font-mono text-muted-foreground border-b border-border/50">
-            ⚠ Top route {topCycle.route} profit ${topCycle.estimatedProfitUsd.toFixed(4)} is below the ${threshold.toFixed(2)} execution threshold — pre-flight will reject unless the edge improves.
+            ⚠ Top route {topCycle.route} shows no profit after fees (${topCycle.estimatedProfitUsd.toFixed(4)}) — pre-flight will reject unless the edge improves.
           </div>
         )}
         {cycles.length === 0 ? (

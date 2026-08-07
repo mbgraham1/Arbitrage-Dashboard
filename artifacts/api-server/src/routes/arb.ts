@@ -238,9 +238,13 @@ router.post("/arb/ob-execute", async (req, res): Promise<void> => {
       res.json({ success: false, isDryRun, executed: false, route, preflightProfitUsd: null, error: "Could not fetch fresh order books (or depth can't absorb the size)." });
       return;
     }
-    const threshold = minProfitUsd * (tradeSizeUsd / 10);
+    // Execution gate: fresh profit AFTER FEES must be positive (plus the
+    // caller's optional minProfitUsd floor, NOT scaled by trade size — the
+    // scanner's ×size/10 scaling rule made the executor reject profitable
+    // routes the scanner ranked green).
+    const threshold = minProfitUsd;
     if (pf.profitUsd <= threshold) {
-      res.json({ success: false, isDryRun, executed: false, route, preflightProfitUsd: pf.profitUsd, error: `Pre-flight failed — edge disappeared (fresh profit $${pf.profitUsd.toFixed(4)} ≤ threshold $${threshold.toFixed(4)}).` });
+      res.json({ success: false, isDryRun, executed: false, route, preflightProfitUsd: pf.profitUsd, error: `Pre-flight failed — fresh profit after fees $${pf.profitUsd.toFixed(4)} ≤ minimum $${threshold.toFixed(4)}.` });
       return;
     }
 
