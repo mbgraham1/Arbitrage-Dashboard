@@ -305,8 +305,10 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
               onSuccess: (r) => {
                 isAutoExecutingTriRef.current = false;
                 setIsAutoExecutingTri(false);
-                if (r.success) addLog("success", `[${tag}] Done — est. $${r.estimatedProfitUsd.toFixed(2)}`);
-                else addLog("error", `[${tag}] Failed: ${r.error}`);
+                if (r.success) {
+                  const synthWarn = r.synthetic ? " ⚠ synthetic ETH/SOL rate" : "";
+                  addLog("success", `[${tag}] Done — est. $${r.estimatedProfitUsd.toFixed(2)}${synthWarn}`);
+                } else addLog("error", `[${tag}] Failed: ${r.error}`);
               },
               onError: (e) => {
                 isAutoExecutingTriRef.current = false;
@@ -588,7 +590,8 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
         },
       });
       if (r.success) {
-        addLog("success", `[TRI·FORCE] Done — est. $${r.estimatedProfitUsd.toFixed(2)}${r.isDryRun ? " (dry)" : ""}`);
+        const synthWarn = r.synthetic ? " ⚠ synthetic ETH/SOL rate" : "";
+        addLog("success", `[TRI·FORCE] Done — est. $${r.estimatedProfitUsd.toFixed(2)}${r.isDryRun ? " (dry)" : ""}${synthWarn}`);
       } else {
         addLog("error", `[TRI·FORCE] Failed: ${r.error}`);
       }

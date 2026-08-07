@@ -966,6 +966,18 @@ components:
           type: ["string", "null"]
         error:
           type: ["string", "null"]
+        priceSource:
+          type: string
+          enum: [direct, synthetic]
+          description: >
+            "direct" = live ETHSOL WS market was used for leg 2;
+            "synthetic" = ETH/USD ÷ SOL/USD cross rate was used.
+            Only present for ETH loops; absent for BTC loops.
+        synthetic:
+          type: boolean
+          description: >
+            True when the ETH/SOL leg used a synthetic cross rate instead of the
+            direct ETHSOL order-book market. Live execution is blocked when true.
 
     TriangularOpportunity:
       type: object

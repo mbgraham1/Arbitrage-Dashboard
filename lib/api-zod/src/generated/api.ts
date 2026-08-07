@@ -385,7 +385,11 @@ export const ExecuteTriangularResponse = zod.object({
   "leg1OrderId": zod.string().nullish(),
   "leg2OrderId": zod.string().nullish(),
   "leg3OrderId": zod.string().nullish(),
-  "error": zod.string().nullish()
+  "error": zod.string().nullish(),
+  /** "direct" = live ETHSOL WS market; "synthetic" = computed cross rate. Only present for ETH loops. */
+  "priceSource": zod.enum(["direct", "synthetic"]).optional(),
+  /** True when the ETH/SOL leg used a synthetic cross rate instead of the direct ETHSOL market. */
+  "synthetic": zod.boolean().optional()
 })
 
 

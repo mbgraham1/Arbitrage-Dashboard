@@ -594,6 +594,9 @@ router.post("/arb/execute-triangular", async (req, res): Promise<void> => {
 
   // 1b. ETH loops — get prices from WS tri cache or fresh REST fallback
   let ethPrices: { solBid: number; solAsk: number; ethBid: number; ethAsk: number; ethSolBid: number; ethSolAsk: number } | null = null;
+  // Tracks whether the ETH/SOL leg used a direct market or a synthetic cross rate.
+  // Carried to the response so the dashboard can warn the user.
+  let ethSolSource: "direct" | "synthetic" = "synthetic";
 
   if (isBtc) {
     btcPrices = getBtcTriPrices();
@@ -624,32 +627,84 @@ router.post("/arb/execute-triangular", async (req, res): Promise<void> => {
     const cached = getTriPrices();
     const krakenTri = cached.kraken;
     if (krakenTri) {
+      ethSolSource = krakenTri.ethSolSource;
       ethPrices = {
         solBid: krakenTri.solBid, solAsk: krakenTri.solAsk,
         ethBid: krakenTri.ethBid, ethAsk: krakenTri.ethAsk,
         ethSolBid: krakenTri.ethSolBid, ethSolAsk: krakenTri.ethSolAsk,
       };
     } else {
+      // WS cache miss — fetch fresh prices from Kraken REST.
+      // Request XETHZUSD + SOLUSD + ETHSOL together; ETHSOL may not exist
+      // under that exact key (Kraken sometimes uses "XETHZSOL"), so we
+      // search the result by content rather than by a hardcoded key.
+      // If the direct ETH/SOL market is absent entirely, we compute a
+      // synthetic cross rate from the two USD legs instead of erroring out.
       try {
         const r = await fetch("https://api.kraken.com/0/public/Ticker?pair=XETHZUSD,SOLUSD,ETHSOL", {
           signal: AbortSignal.timeout(5_000),
         });
         const data = await r.json() as { error?: string[]; result?: Record<string, { b: string[]; a: string[] }> };
-        if (data.error?.length || !data.result) throw new Error("Kraken REST error");
+        // A partial error (e.g. ETHSOL unknown) is fine — we fall back to synthetic.
+        // A total failure (no result at all) is a hard error.
+        if (!data.result) throw new Error(`Kraken REST error: ${(data.error ?? []).join(", ")}`);
         const res_ = data.result;
         const ethKey    = Object.keys(res_).find(k => k.includes("ETH") && k.includes("USD"));
         const solKey    = Object.keys(res_).find(k => k.startsWith("SOL") && k.endsWith("USD"));
+        if (!ethKey || !solKey) throw new Error("Missing ETH/USD or SOL/USD in Kraken response");
+        const ethBid = parseFloat(res_[ethKey].b[0]);
+        const ethAsk = parseFloat(res_[ethKey].a[0]);
+        const solBid = parseFloat(res_[solKey].b[0]);
+        const solAsk = parseFloat(res_[solKey].a[0]);
+        // Try to find the direct ETH/SOL pair under any key variant (ETHSOL, XETHZSOL, etc.)
         const ethSolKey = Object.keys(res_).find(k => k.includes("ETH") && k.includes("SOL"));
-        if (!ethKey || !solKey || !ethSolKey) throw new Error("Missing ETH pairs in Kraken response");
-        ethPrices = {
-          ethBid:    parseFloat(res_[ethKey].b[0]),    ethAsk:    parseFloat(res_[ethKey].a[0]),
-          solBid:    parseFloat(res_[solKey].b[0]),     solAsk:    parseFloat(res_[solKey].a[0]),
-          ethSolBid: parseFloat(res_[ethSolKey].b[0]), ethSolAsk: parseFloat(res_[ethSolKey].a[0]),
-        };
+        let ethSolBid: number;
+        let ethSolAsk: number;
+        if (ethSolKey) {
+          ethSolBid   = parseFloat(res_[ethSolKey].b[0]);
+          ethSolAsk   = parseFloat(res_[ethSolKey].a[0]);
+          ethSolSource = "direct";
+        } else {
+          // Direct market unavailable — synthesise from USD legs.
+          // synthetic bid = ethBid / solAsk  (worst case: sell ETH cheap, pay high SOL)
+          // synthetic ask = ethAsk / solBid  (worst case: buy ETH dear, receive low SOL)
+          ethSolBid   = solAsk > 0 ? ethBid / solAsk : 0;
+          ethSolAsk   = solBid > 0 ? ethAsk / solBid : 0;
+          ethSolSource = "synthetic";
+          req.log.warn({ ethKey, solKey }, "ETH/SOL direct market absent in REST response — using synthetic cross rate");
+        }
+        ethPrices = { ethBid, ethAsk, solBid, solAsk, ethSolBid, ethSolAsk };
       } catch (e) {
         res.status(500).json({ error: `ETH tri prices unavailable: ${(e as Error).message}` });
         return;
       }
+    }
+
+    // Guard: reject if the ETH/SOL rate (direct or synthetic) resolved to zero/NaN,
+    // which would produce nonsense volumes and a silent profit miscalculation.
+    if (!ethPrices || !(ethPrices.ethSolBid > 0) || !(ethPrices.ethSolAsk > 0)) {
+      res.status(500).json({
+        error: "ETH/SOL rate is zero or invalid — cannot compute triangular volumes safely. " +
+               "The direct market may be unavailable and the synthetic cross rate produced unusable prices.",
+      });
+      return;
+    }
+
+    // Guard: synthetic cross rates are NOT executable order-book prices.
+    // Leg 2 of every ETH loop places an order on the ETHSOL pair; if that market
+    // is absent, the leg will be rejected by Kraken, leaving leg 1 open and
+    // requiring an unwind. Block live execution proactively instead of gambling
+    // on leg 2 succeeding with a price that does not reflect a real bid/ask.
+    if (!isDryRun && ethSolSource === "synthetic") {
+      req.log.warn({ loop, ethSolSource }, "Live ETH triangular execution blocked — ETHSOL market unavailable");
+      res.status(500).json({
+        error: "ETH/SOL direct market is currently unavailable on Kraken. " +
+               "Live triangular execution requires a real ETHSOL order book — a synthetic cross rate cannot be submitted as a limit or market order. " +
+               "Use dry-run mode to estimate profit, or wait for the direct market to come online.",
+        priceSource: "synthetic",
+        synthetic: true,
+      });
+      return;
     }
   }
 
@@ -709,8 +764,13 @@ router.post("/arb/execute-triangular", async (req, res): Promise<void> => {
   const estimatedProfitUsd = (grossPct - TRI_TOTAL_FEES_PCT) / 100 * tradeUsd;
 
   if (isDryRun) {
-    req.log.info({ loop, tradeUsd, grossPct, estimatedProfitUsd, orderType }, "Triangular dry run");
-    res.json({ success: true, isDryRun: true, estimatedProfitUsd, leg1OrderId: null, leg2OrderId: null, leg3OrderId: null });
+    const triPriceSource = isBtc ? "direct" : ethSolSource;
+    req.log.info({ loop, tradeUsd, grossPct, estimatedProfitUsd, orderType, triPriceSource }, "Triangular dry run");
+    res.json({
+      success: true, isDryRun: true, estimatedProfitUsd,
+      priceSource: triPriceSource, synthetic: triPriceSource === "synthetic",
+      leg1OrderId: null, leg2OrderId: null, leg3OrderId: null,
+    });
     return;
   }
 
@@ -1026,8 +1086,13 @@ router.post("/arb/execute-triangular", async (req, res): Promise<void> => {
       }
     }
 
-    req.log.info({ loop, tradeUsd, estimatedProfitUsd, orderType, leg1Id, leg2Id, leg3Id }, "Triangular executed");
-    res.json({ success: true, isDryRun: false, estimatedProfitUsd, leg1OrderId: leg1Id, leg2OrderId: leg2Id, leg3OrderId: leg3Id });
+    const triPriceSource = isBtc ? "direct" : ethSolSource;
+    req.log.info({ loop, tradeUsd, estimatedProfitUsd, orderType, triPriceSource, leg1Id, leg2Id, leg3Id }, "Triangular executed");
+    res.json({
+      success: true, isDryRun: false, estimatedProfitUsd,
+      priceSource: triPriceSource, synthetic: triPriceSource === "synthetic",
+      leg1OrderId: leg1Id, leg2OrderId: leg2Id, leg3OrderId: leg3Id,
+    });
   } catch (err) {
     req.log.error({ err, loop, orderType, leg1Id, leg2Id }, "Triangular execution error — partial state logged");
     res.status(500).json({ error: (err as Error).message, leg1OrderId: leg1Id || null, leg2OrderId: leg2Id || null });

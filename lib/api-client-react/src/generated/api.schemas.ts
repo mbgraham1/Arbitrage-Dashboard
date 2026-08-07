@@ -436,6 +436,10 @@ export interface TriExecuteResult {
   leg3OrderId?: string | null;
   /** @nullable */
   error?: string | null;
+  /** "direct" = live ETHSOL WS market; "synthetic" = computed cross rate from USD legs. Only present for ETH loops. */
+  priceSource?: "direct" | "synthetic";
+  /** True when the ETH/SOL leg used a synthetic cross rate (ethUsd ÷ solUsd) instead of the direct ETHSOL market. */
+  synthetic?: boolean;
 }
 
 export interface TriangularOpportunity {
