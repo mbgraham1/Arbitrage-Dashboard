@@ -85,7 +85,74 @@ async function krakenPublicRequest<T>(path: string, params: Record<string, strin
   return json.result as T;
 }
 
+// ── Kraken private-API protection ─────────────────────────────────────────────
+// Kraken rate-limits PRIVATE endpoints per account (counter decays slowly).
+// Hitting the cap returns "EAPI:Rate limit exceeded" and locks the account out
+// for tens of seconds — which froze the engine mid-session. Defenses:
+//   1. A shared serial queue with a minimum gap between private calls.
+//   2. Exponential backoff when Kraken returns a rate-limit error; while the
+//      backoff window is open every private call waits for it to close.
+//   3. Read results (Balance, TradeVolume) are cached by the callers below.
+// Order placement (AddOrder/Cancel) shares the queue but is never retried —
+// a rate-limited AddOrder was rejected before acceptance, and callers own
+// their own unwind logic.
+const PRIVATE_MIN_GAP_MS = 600;
+const RATE_BACKOFF_MAX_MS = 60_000;
+
+// Per-API-key limiter state: Kraken rate-limits per account, and one key's
+// backoff must never delay another key's orders. The serial chain also keeps
+// this process's nonces monotonically increasing per key.
+interface KeyLimiterState { chain: Promise<unknown>; lastAt: number; rateLimitedUntil: number; backoffMs: number; }
+const keyLimiters = new Map<string, KeyLimiterState>();
+function limiterFor(key: string): KeyLimiterState {
+  let st = keyLimiters.get(key);
+  if (!st) { st = { chain: Promise.resolve(), lastAt: 0, rateLimitedUntil: 0, backoffMs: 2_000 }; keyLimiters.set(key, st); }
+  return st;
+}
+
+function isRateLimitError(e: unknown): boolean {
+  return e instanceof Error && /EAPI:Rate limit/i.test(e.message);
+}
+
+/**
+ * Pace + backoff-gate a private call. The per-key chain holds ONLY the paced
+ * HTTP call (min gap + ≤10s HTTP timeout) — backoff sleeps happen OUTSIDE the
+ * chain so a read's retry can never block a queued order/unwind behind a
+ * multi-second sleep. Reads retry on rate-limit; order mutations never do.
+ */
+async function withPrivateLimiter<T>(key: string, fn: () => Promise<T>, retryOnRateLimit: boolean): Promise<T> {
+  const st = limiterFor(key);
+  for (let attempt = 0; ; attempt++) {
+    // Wait out an open backoff window WITHOUT holding the chain.
+    const backoffWait = st.rateLimitedUntil - Date.now();
+    if (backoffWait > 0) await new Promise(r => setTimeout(r, backoffWait));
+    const p = st.chain.then(async () => {
+      const gapWait = st.lastAt + PRIVATE_MIN_GAP_MS - Date.now();
+      if (gapWait > 0) await new Promise(r => setTimeout(r, gapWait));
+      st.lastAt = Date.now();
+      return fn();
+    });
+    st.chain = p.catch(() => undefined); // keep the chain alive on failures
+    try {
+      const out = await p;
+      st.backoffMs = 2_000; // healthy call — reset backoff
+      return out;
+    } catch (e) {
+      if (!isRateLimitError(e)) throw e;
+      st.rateLimitedUntil = Date.now() + st.backoffMs;
+      st.backoffMs = Math.min(RATE_BACKOFF_MAX_MS, st.backoffMs * 2);
+      if (!retryOnRateLimit || attempt >= 2) throw e;
+    }
+  }
+}
+
 async function krakenPrivateRequest<T>(path: string, data: Record<string, string>, creds: KrakenCreds): Promise<T> {
+  // Reads are safe to retry after a rate-limit backoff; order mutations are not.
+  const isRead = !/AddOrder|CancelOrder/.test(path);
+  return withPrivateLimiter(creds.krakenKey, () => krakenPrivateRequestRaw<T>(path, data, creds), isRead);
+}
+
+async function krakenPrivateRequestRaw<T>(path: string, data: Record<string, string>, creds: KrakenCreds): Promise<T> {
   const nonce = Date.now().toString() + Math.random().toString().slice(2, 7);
   const payload: Record<string, string> = { nonce, ...data };
   const postData = new URLSearchParams(payload).toString();
@@ -119,14 +186,14 @@ export async function getKrakenPrice(pair: Pair = "SOL/USD"): Promise<number> {
  * priced at the live Ticker mid. Assets we can't price are reported so the
  * caller can surface the gap instead of silently under-counting.
  */
-export async function krakenAccountValueUsd(creds: KrakenCreds): Promise<{
+export async function krakenAccountValueUsd(creds: KrakenCreds, fresh = false): Promise<{
   totalUsd: number;
   usdBalance: number;
   holdingsUsd: number;
   holdings: { currency: string; amount: number; usdValue: number | null }[];
   unpriced: string[];
 }> {
-  const balances = await getKrakenBalances(creds);
+  const balances = await getKrakenBalances(creds, fresh);
   // Kraken legacy asset codes → ticker asset (XXBT→XBT, XETH→ETH, ZUSD→USD…)
   const normalize = (c: string) => {
     const stripped = c.length >= 4 && (c.startsWith("X") || c.startsWith("Z")) ? c.slice(1) : c;
@@ -244,11 +311,22 @@ export async function coinbaseAccountValueUsd(creds: CoinbaseCreds): Promise<{
   return { totalUsd: usdBalance + holdingsUsd, usdBalance, holdingsUsd, unpriced };
 }
 
-export async function getKrakenBalances(creds: KrakenCreds): Promise<BalanceEntry[]> {
+// Balance cache (30s): dashboard polls hit this every few seconds — each was a
+// private call counting against Kraken's rate limit. Post-trade snapshots pass
+// fresh=true to bypass (balances just changed).
+const balanceCache = new Map<string, { at: number; val: BalanceEntry[] }>();
+const BALANCE_CACHE_MS = 30_000;
+
+export async function getKrakenBalances(creds: KrakenCreds, fresh = false): Promise<BalanceEntry[]> {
+  const cacheKey = creds.krakenKey;
+  const hit = balanceCache.get(cacheKey);
+  if (!fresh && hit && Date.now() - hit.at < BALANCE_CACHE_MS) return hit.val;
   const result = await krakenPrivateRequest<Record<string, string>>("/0/private/Balance", {}, creds);
-  return Object.entries(result)
+  const val = Object.entries(result)
     .filter(([, v]) => parseFloat(v) > 0)
     .map(([currency, amount]) => ({ currency, amount: parseFloat(amount) }));
+  balanceCache.set(cacheKey, { at: Date.now(), val });
+  return val;
 }
 
 export async function krakenMarketOrder(
@@ -373,7 +451,16 @@ export async function krakenTakerFeePct(creds: KrakenCreds, rawPairs: string[]):
  * (/0/private/TradeVolume; `fees` = taker schedule, `fees_maker` = maker).
  * MAX across pairs; null if the query fails or returns nothing.
  */
+// Fee-tier cache (10 min): the tier moves with 30-day volume — it does not
+// change second to second, and TradeVolume calls were a large share of the
+// private-API budget (scan gate + route gate + dashboard poll).
+const feeTierCache = new Map<string, { at: number; val: { takerFeePct: number; makerFeePct: number | null } | null }>();
+const FEE_TIER_CACHE_MS = 10 * 60_000;
+
 export async function krakenFeeTiers(creds: KrakenCreds, rawPairs: string[]): Promise<{ takerFeePct: number; makerFeePct: number | null } | null> {
+  const cacheKey = `${creds.krakenKey}|${[...rawPairs].sort().join(",")}`;
+  const hit = feeTierCache.get(cacheKey);
+  if (hit && Date.now() - hit.at < FEE_TIER_CACHE_MS && hit.val != null) return hit.val;
   try {
     const result = await krakenPrivateRequest<{
       fees?: Record<string, { fee?: string }>;

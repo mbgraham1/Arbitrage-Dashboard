@@ -371,10 +371,15 @@ async function runKrakenTriangle(input: TriangleExecInput, reqLog: ReqLog): Prom
 
     // Poll QueryOrders until closed. Limit (post-only) orders may rest in the
     // book a while; we poll for up to 90 s before cancelling and aborting.
-    const LIMIT_POLL_ITERS = 180; // 180 × 500ms = 90 s
+    // 1.5s interval — QueryOrders counts against Kraken's private rate limit
+    // (500ms polling helped exhaust it and lock the account out mid-session).
+    // WALL-CLOCK deadline (not iteration count): limiter queuing/backoff can
+    // stretch each iteration, and a resting order must not outlive its window.
+    const LIMIT_POLL_DEADLINE_MS = 90_000;
     const waitFill = async (txid: string, label: string) => {
-      for (let i = 0; i < LIMIT_POLL_ITERS; i++) {
-        await new Promise(r => setTimeout(r, 500));
+      const deadline = Date.now() + LIMIT_POLL_DEADLINE_MS;
+      while (Date.now() < deadline) {
+        await new Promise(r => setTimeout(r, 1_500));
         const info = await safeInfo(txid);
         if (info.status === "closed" || info.status === "canceled" || info.status === "expired") return info;
       }
@@ -604,7 +609,8 @@ function accountIdFromKey(krakenKey: string, coinbaseKey?: string): string {
 
 async function snapshotAccountValue(creds: { krakenKey: string; krakenSecret: string; coinbaseKey?: string; coinbaseSecret?: string }, trigger: "poll" | "post_trade", log: { error: (o: object, m: string) => void }): Promise<{ totalUsd: number; usdBalance: number; holdingsUsd: number; unpriced: string[] } | null> {
   try {
-    const k = await krakenAccountValueUsd(creds);
+    // Post-trade snapshots bypass the 30s balance cache — balances just changed.
+    const k = await krakenAccountValueUsd(creds, trigger === "post_trade");
     let v = { totalUsd: k.totalUsd, usdBalance: k.usdBalance, holdingsUsd: k.holdingsUsd, unpriced: [...k.unpriced] };
     if (creds.coinbaseKey && creds.coinbaseSecret) {
       const c = await coinbaseAccountValueUsd({ coinbaseKey: creds.coinbaseKey, coinbaseSecret: creds.coinbaseSecret });
@@ -912,9 +918,10 @@ router.post("/arb/graph-execute", async (req, res): Promise<void> => {
     const plannedVolume = buyHop.amountOut; // base units the route expects to acquire
 
     // Poll Kraken market order until closed (markets fill fast; 15 s cap).
+    // 1s interval — QueryOrders counts against Kraken's private rate limit.
     const waitKrakenFill = async (txid: string) => {
-      for (let i = 0; i < 30; i++) {
-        await new Promise(r => setTimeout(r, 500));
+      for (let i = 0; i < 15; i++) {
+        await new Promise(r => setTimeout(r, 1_000));
         try {
           const info = await krakenOrderInfo(kCreds, txid);
           if (info.status === "closed" || info.status === "canceled" || info.status === "expired") return info;
