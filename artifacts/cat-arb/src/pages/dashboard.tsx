@@ -795,7 +795,8 @@ function OrderBookHunterCard() {
   // assumption makes a 1.2% 3-leg hurdle that hides every real edge.
   const actualFee = useActualKrakenFees().taker;
   const effectiveFeePct = actualFee ?? settings.obFeesPct;
-  const obParams = { tradeSizeUsd: tradeSize, feesPct: effectiveFeePct, minProfitUsd: 0.02, maxSlippagePct: 0.5, volatilityFilter: true };
+  const [volatilityFilter, setVolatilityFilter] = useState(true);
+  const obParams = { tradeSizeUsd: tradeSize, feesPct: effectiveFeePct, minProfitUsd: 0.02, maxSlippagePct: 0.5, volatilityFilter };
   const { data, isLoading } = useGetObScan(obParams, {
     query: { queryKey: getGetObScanQueryKey(obParams), refetchInterval: 5_000, staleTime: 4_000 },
   });
@@ -875,6 +876,18 @@ function OrderBookHunterCard() {
               aria-label="Minimum profit in USD to execute"
             /> profit
           </span>
+          <button
+            onClick={() => setVolatilityFilter(v => !v)}
+            className={cn(
+              "flex items-center gap-1 text-[10px] font-mono font-normal px-1.5 py-0.5 border transition-colors",
+              volatilityFilter
+                ? "border-amber-500/60 text-amber-500 hover:border-amber-400"
+                : "border-border text-muted-foreground hover:border-primary hover:text-foreground",
+            )}
+            title={volatilityFilter ? "Volatility filter ON — only scanning assets that moved >1.5%/24h. Click to scan all assets." : "Volatility filter OFF — scanning all assets. Click to restrict to high-volatility assets."}
+          >
+            {volatilityFilter ? "⚡ vol filter on" : "vol filter off"}
+          </button>
           {data && data.readyCount > 0 && (
             <span className="text-[9px] font-mono font-bold px-1 border border-success text-success animate-pulse">
               {data.readyCount} READY
