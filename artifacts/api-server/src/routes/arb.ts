@@ -29,8 +29,33 @@ import {
   PAIRS,
   type Pair,
 } from "../lib/exchange";
-import { getBestPairPrices, getTriPrices, getBtcTriPrices, scanAllPairs } from "../lib/price-cache";
+import { getBestPairPrices, getTriPrices, getBtcTriPrices, scanAllPairs, getPairPrices } from "../lib/price-cache";
 import { scanOrderBookCycles, OB_USD_PAIRS, CROSS_LOOKUP } from "../lib/order-book";
+import { createPairHistory, updatePairHistory, type PairHistory } from "../lib/kalman";
+
+// ── Cointegration pairs-trading state (in-process memory) ─────────────────────
+// Pairs: SOL/ETH, BTC/ETH, AVAX/DOT
+// Prices are fetched from the multi-pair cache; no extra exchange calls needed.
+
+interface CointPairConfig {
+  label: string;   // display name e.g. "SOL/ETH"
+  asset1: string;  // canonical pair key in pairCache, e.g. "SOL/USD"
+  asset2: string;  // e.g. "ETH/USD"
+  sym1: string;    // short symbol e.g. "SOL"
+  sym2: string;    // e.g. "ETH"
+}
+
+const COINT_PAIRS: CointPairConfig[] = [
+  { label: "SOL/ETH",  asset1: "SOL/USD",  asset2: "ETH/USD",  sym1: "SOL",  sym2: "ETH"  },
+  { label: "BTC/ETH",  asset1: "BTC/USD",  asset2: "ETH/USD",  sym1: "BTC",  sym2: "ETH"  },
+  { label: "AVAX/DOT", asset1: "AVAX/USD", asset2: "DOT/USD",  sym1: "AVAX", sym2: "DOT"  },
+];
+
+// Keyed by pair label — persists between requests in the same server process
+const cointHistories = new Map<string, PairHistory>();
+
+// Minimum |z-score| to surface a signal
+const COINT_Z_THRESHOLD = 2.0;
 
 // ── Triangular arb helpers ─────────────────────────────────────────────────────
 
@@ -764,6 +789,73 @@ router.get("/trades/summary", async (req, res): Promise<void> => {
       createdAt: t.createdAt.toISOString(),
     })),
   });
+});
+
+// ── GET /arb/cointegration ─────────────────────────────────────────────────────
+router.get("/arb/cointegration", async (_req, res): Promise<void> => {
+  try {
+    const now = new Date().toISOString();
+
+    // Fetch prices for all relevant assets from the multi-pair cache in parallel
+    const assetKeys = ["SOL/USD", "ETH/USD", "BTC/USD", "AVAX/USD", "DOT/USD"] as Pair[];
+    const priceResults = await Promise.all(assetKeys.map(p => getPairPrices(p)));
+    const priceMap = new Map<string, { mid: number | null }>();
+    for (const pr of priceResults) {
+      const mid = pr.kraken ?? pr.coinbase ?? pr.binance ?? pr.kucoin ?? null;
+      priceMap.set(pr.pair, { mid });
+    }
+
+    const signals: Array<{
+      pair: string; asset1: string; asset2: string;
+      price1: number; price2: number;
+      hedgeRatio: number; spread: number; zScore: number;
+      direction: "long_asset1" | "short_asset1";
+      edgePct: number; observations: number; timestamp: string;
+    }> = [];
+
+    for (const cfg of COINT_PAIRS) {
+      const p1 = priceMap.get(cfg.asset1)?.mid;
+      const p2 = priceMap.get(cfg.asset2)?.mid;
+      if (!p1 || !p2 || p1 <= 0 || p2 <= 0) continue;
+
+      // Get or create in-memory Kalman history for this pair
+      if (!cointHistories.has(cfg.label)) {
+        cointHistories.set(cfg.label, createPairHistory(p1, p2));
+      }
+      const history = cointHistories.get(cfg.label)!;
+
+      const zScore = updatePairHistory(history, p1, p2);
+      if (isNaN(zScore)) continue;  // not enough observations yet
+
+      const absZ = Math.abs(zScore);
+      if (absZ < COINT_Z_THRESHOLD) continue;
+
+      // Edge estimate: use z-score magnitude scaled conservatively
+      const edgePct = Math.min((absZ - COINT_Z_THRESHOLD) * 0.05 + 0.05, 0.50);
+
+      // Direction: if spread is above mean (z > 0), asset1 is expensive → short it
+      const direction: "long_asset1" | "short_asset1" = zScore < 0 ? "long_asset1" : "short_asset1";
+
+      signals.push({
+        pair: cfg.label,
+        asset1: cfg.sym1,
+        asset2: cfg.sym2,
+        price1: p1,
+        price2: p2,
+        hedgeRatio: history.kalman.beta,
+        spread: history.spreads[history.spreads.length - 1] ?? 0,
+        zScore,
+        direction,
+        edgePct,
+        observations: history.spreads.length,
+        timestamp: now,
+      });
+    }
+
+    res.json({ signals, scannedAt: now });
+  } catch (err) {
+    res.status(500).json({ error: (err as Error).message });
+  }
 });
 
 export default router;

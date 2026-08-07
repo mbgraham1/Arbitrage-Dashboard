@@ -230,6 +230,7 @@ export interface TriangularScanResult {
   scannedAt: string;
 }
 
+export type CointegrationSignalDirection = 'long_asset1' | 'short_asset1';
 export interface TradeSummary {
   totalTrades: number;
   liveTrades: number;
@@ -263,3 +264,34 @@ export interface PairScanEntry {
   scannedAt: string;
 }
 
+
+export interface CointegrationSignal {
+  /** Cointegrated pair, e.g. SOL/ETH */
+  pair: string;
+  /** First asset symbol, e.g. SOL */
+  asset1: string;
+  /** Second asset symbol, e.g. ETH */
+  asset2: string;
+  /** USD price of asset1 */
+  price1: number;
+  /** USD price of asset2 */
+  price2: number;
+  /** Current Kalman-estimated hedge ratio (β) */
+  hedgeRatio: number;
+  /** Current spread residual (price1 − β·price2) */
+  spread: number;
+  /** Z-score of the spread vs recent history */
+  zScore: number;
+  /** Trade direction */
+  direction: CointegrationSignalDirection;
+  /** Estimated edge in % based on z-score magnitude */
+  edgePct: number;
+  /** Number of observations in spread history */
+  observations: number;
+  timestamp: string;
+}
+
+export interface CointegrationScanResult {
+  signals: CointegrationSignal[];
+  scannedAt: string;
+}

@@ -68,6 +68,17 @@ function PriceTile({
   );
 }
 
+  const {
+    isRunning, setIsRunning, liveMode,
+    latestPriceData, cachedBalances, activityLog, sessionProfitUsd,
+    settings, credentials, addLog,
+    forceTrade, isForcingTrade,
+    forceTriangular, isForcingTriangular,
+    emergencyStop, setEmergencyStop,
+    startTime, failedTrades, sessionTradeCount, apiLatencyMs,
+    triOpportunities,
+  } = useBotContext();
+
 // ── Main Dashboard ─────────────────────────────────────────────────────────────
 
 export default function Dashboard() {
@@ -90,7 +101,7 @@ export default function Dashboard() {
       setUptimeStr(`${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`);
     };
     tick();
-    const id = setInterval(tick, 1000);
+    const id = setInterval(() => { scanQuery.refetch(); }, 5_000);
     return () => clearInterval(id);
   }, [startTime]);
 

@@ -22,6 +22,7 @@ import type {
 import type {
   BalanceData,
   CoinbaseCredentials,
+  CointegrationScanResult,
   ConnectionTestResult,
   ErrorResponse,
   ExchangeCredentials,
@@ -52,7 +53,6 @@ type AwaitedInput<T> = PromiseLike<T> | T;
 type SecondParameter<T extends (...args: never) => unknown> = Parameters<T>[1];
 
 
-
 const withQueryKey = <T extends object, K>(query: T, queryKey: K): T & { queryKey: K } => {
   const result = { queryKey } as T & { queryKey: K };
   for (const key of Object.keys(query)) {
@@ -69,8 +69,6 @@ const withQueryKey = <T extends object, K>(query: T, queryKey: K): T & { queryKe
 };
 
 export const getHealthCheckUrl = () => {
-
-
 
 
   return `/api/healthz`
@@ -92,9 +90,6 @@ export const healthCheck = async ( options?: RequestInit): Promise<HealthStatus>
 );}
 
 
-
-
-
 export const getHealthCheckQueryKey = () => {
     return [
     `/api/healthz`
@@ -110,11 +105,7 @@ const {query: queryOptions, request: requestOptions} = options ?? {};
   const queryKey =  queryOptions?.queryKey ?? getHealthCheckQueryKey();
 
 
-
     const queryFn: QueryFunction<Awaited<ReturnType<typeof healthCheck>>> = ({ signal }) => healthCheck({ signal, ...requestOptions });
-
-
-
 
 
    return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof healthCheck>>, TError, TData> & { queryKey: QueryKey }
@@ -141,14 +132,7 @@ export function useHealthCheck<TData = Awaited<ReturnType<typeof healthCheck>>, 
 }
 
 
-
-
-
-
-
 export const getFetchPricesUrl = () => {
-
-
 
 
   return `/api/prices`
@@ -169,9 +153,6 @@ export const fetchPrices = async (exchangeCredentials: ExchangeCredentials, opti
 );}
 
 
-
-
-
 export const getFetchPricesMutationOptions = <TError = ErrorType<ErrorResponse>,
     TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof fetchPrices>>, TError,{data: BodyType<ExchangeCredentials>}, TContext>, request?: SecondParameter<typeof customFetch>}
 ): UseMutationOptions<Awaited<ReturnType<typeof fetchPrices>>, TError,{data: BodyType<ExchangeCredentials>}, TContext> => {
@@ -184,17 +165,11 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
       : {mutation: { mutationKey, }, request: undefined};
 
 
-
-
       const mutationFn: MutationFunction<Awaited<ReturnType<typeof fetchPrices>>, {data: BodyType<ExchangeCredentials>}> = (props) => {
           const {data} = props ?? {};
 
           return  fetchPrices(data,requestOptions)
         }
-
-
-
-
 
 
   return  { mutationFn, ...mutationOptions }}
@@ -220,8 +195,6 @@ export const useFetchPrices = <TError = ErrorType<ErrorResponse>,
 export const getFetchBalancesUrl = () => {
 
 
-
-
   return `/api/balances`
 }
 
@@ -240,9 +213,6 @@ export const fetchBalances = async (exchangeCredentials: ExchangeCredentials, op
 );}
 
 
-
-
-
 export const getFetchBalancesMutationOptions = <TError = ErrorType<ErrorResponse>,
     TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof fetchBalances>>, TError,{data: BodyType<ExchangeCredentials>}, TContext>, request?: SecondParameter<typeof customFetch>}
 ): UseMutationOptions<Awaited<ReturnType<typeof fetchBalances>>, TError,{data: BodyType<ExchangeCredentials>}, TContext> => {
@@ -255,17 +225,11 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
       : {mutation: { mutationKey, }, request: undefined};
 
 
-
-
       const mutationFn: MutationFunction<Awaited<ReturnType<typeof fetchBalances>>, {data: BodyType<ExchangeCredentials>}> = (props) => {
           const {data} = props ?? {};
 
           return  fetchBalances(data,requestOptions)
         }
-
-
-
-
 
 
   return  { mutationFn, ...mutationOptions }}
@@ -291,8 +255,6 @@ export const useFetchBalances = <TError = ErrorType<ErrorResponse>,
 export const getGetPreloadedCredentialsUrl = () => {
 
 
-
-
   return `/api/credentials/preloaded`
 }
 
@@ -311,9 +273,6 @@ export const getPreloadedCredentials = async ( options?: RequestInit): Promise<P
 );}
 
 
-
-
-
 export const getGetPreloadedCredentialsQueryKey = () => {
     return [
     `/api/credentials/preloaded`
@@ -329,11 +288,7 @@ const {query: queryOptions, request: requestOptions} = options ?? {};
   const queryKey =  queryOptions?.queryKey ?? getGetPreloadedCredentialsQueryKey();
 
 
-
     const queryFn: QueryFunction<Awaited<ReturnType<typeof getPreloadedCredentials>>> = ({ signal }) => getPreloadedCredentials({ signal, ...requestOptions });
-
-
-
 
 
    return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof getPreloadedCredentials>>, TError, TData> & { queryKey: QueryKey }
@@ -360,14 +315,7 @@ export function useGetPreloadedCredentials<TData = Awaited<ReturnType<typeof get
 }
 
 
-
-
-
-
-
 export const getTestKrakenUrl = () => {
-
-
 
 
   return `/api/test-kraken`
@@ -388,9 +336,6 @@ export const testKraken = async (krakenCredentials: KrakenCredentials, options?:
 );}
 
 
-
-
-
 export const getTestKrakenMutationOptions = <TError = ErrorType<ErrorResponse>,
     TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof testKraken>>, TError,{data: BodyType<KrakenCredentials>}, TContext>, request?: SecondParameter<typeof customFetch>}
 ): UseMutationOptions<Awaited<ReturnType<typeof testKraken>>, TError,{data: BodyType<KrakenCredentials>}, TContext> => {
@@ -403,17 +348,11 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
       : {mutation: { mutationKey, }, request: undefined};
 
 
-
-
       const mutationFn: MutationFunction<Awaited<ReturnType<typeof testKraken>>, {data: BodyType<KrakenCredentials>}> = (props) => {
           const {data} = props ?? {};
 
           return  testKraken(data,requestOptions)
         }
-
-
-
-
 
 
   return  { mutationFn, ...mutationOptions }}
@@ -439,8 +378,6 @@ export const useTestKraken = <TError = ErrorType<ErrorResponse>,
 export const getTestCoinbaseUrl = () => {
 
 
-
-
   return `/api/test-coinbase`
 }
 
@@ -459,9 +396,6 @@ export const testCoinbase = async (coinbaseCredentials: CoinbaseCredentials, opt
 );}
 
 
-
-
-
 export const getTestCoinbaseMutationOptions = <TError = ErrorType<ErrorResponse>,
     TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof testCoinbase>>, TError,{data: BodyType<CoinbaseCredentials>}, TContext>, request?: SecondParameter<typeof customFetch>}
 ): UseMutationOptions<Awaited<ReturnType<typeof testCoinbase>>, TError,{data: BodyType<CoinbaseCredentials>}, TContext> => {
@@ -474,17 +408,11 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
       : {mutation: { mutationKey, }, request: undefined};
 
 
-
-
       const mutationFn: MutationFunction<Awaited<ReturnType<typeof testCoinbase>>, {data: BodyType<CoinbaseCredentials>}> = (props) => {
           const {data} = props ?? {};
 
           return  testCoinbase(data,requestOptions)
         }
-
-
-
-
 
 
   return  { mutationFn, ...mutationOptions }}
@@ -510,8 +438,6 @@ export const useTestCoinbase = <TError = ErrorType<ErrorResponse>,
 export const getExecuteTradeUrl = () => {
 
 
-
-
   return `/api/execute-trade`
 }
 
@@ -530,9 +456,6 @@ export const executeTrade = async (tradeRequest: TradeRequest, options?: Request
 );}
 
 
-
-
-
 export const getExecuteTradeMutationOptions = <TError = ErrorType<ErrorResponse>,
     TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof executeTrade>>, TError,{data: BodyType<TradeRequest>}, TContext>, request?: SecondParameter<typeof customFetch>}
 ): UseMutationOptions<Awaited<ReturnType<typeof executeTrade>>, TError,{data: BodyType<TradeRequest>}, TContext> => {
@@ -545,17 +468,11 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
       : {mutation: { mutationKey, }, request: undefined};
 
 
-
-
       const mutationFn: MutationFunction<Awaited<ReturnType<typeof executeTrade>>, {data: BodyType<TradeRequest>}> = (props) => {
           const {data} = props ?? {};
 
           return  executeTrade(data,requestOptions)
         }
-
-
-
-
 
 
   return  { mutationFn, ...mutationOptions }}
@@ -608,9 +525,6 @@ export const listTrades = async (params?: ListTradesParams, options?: RequestIni
 );}
 
 
-
-
-
 export const getListTradesQueryKey = (params?: ListTradesParams,) => {
     return [
     `/api/trades`, ...(params ? [params] : [])
@@ -626,11 +540,7 @@ const {query: queryOptions, request: requestOptions} = options ?? {};
   const queryKey =  queryOptions?.queryKey ?? getListTradesQueryKey(params);
 
 
-
     const queryFn: QueryFunction<Awaited<ReturnType<typeof listTrades>>> = ({ signal }) => listTrades(params, { signal, ...requestOptions });
-
-
-
 
 
    return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof listTrades>>, TError, TData> & { queryKey: QueryKey }
@@ -657,14 +567,7 @@ export function useListTrades<TData = Awaited<ReturnType<typeof listTrades>>, TE
 }
 
 
-
-
-
-
-
 export const getScanTriangularArbUrl = () => {
-
-
 
 
   return `/api/arb/triangular`
@@ -686,9 +589,6 @@ export const scanTriangularArb = async ( options?: RequestInit): Promise<Triangu
 );}
 
 
-
-
-
 export const getScanTriangularArbQueryKey = () => {
     return [
     `/api/arb/triangular`
@@ -704,11 +604,7 @@ const {query: queryOptions, request: requestOptions} = options ?? {};
   const queryKey =  queryOptions?.queryKey ?? getScanTriangularArbQueryKey();
 
 
-
     const queryFn: QueryFunction<Awaited<ReturnType<typeof scanTriangularArb>>> = ({ signal }) => scanTriangularArb({ signal, ...requestOptions });
-
-
-
 
 
    return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof scanTriangularArb>>, TError, TData> & { queryKey: QueryKey }
@@ -734,10 +630,9 @@ export function useScanTriangularArb<TData = Awaited<ReturnType<typeof scanTrian
   return withQueryKey(query, queryOptions.queryKey);
 }
 
-
-
-
-
+export const getScanCointegrationArbUrl = () => {
+  return `/api/arb/cointegration`
+}
 
 
 // ── /arb/ob-scan ─────────────────────────────────────────────────────────────
@@ -904,8 +799,6 @@ export function useScanAllPairs<
 export const getGetTradeSummaryUrl = () => {
 
 
-
-
   return `/api/trades/summary`
 }
 
@@ -924,9 +817,6 @@ export const getTradeSummary = async ( options?: RequestInit): Promise<TradeSumm
 );}
 
 
-
-
-
 export const getGetTradeSummaryQueryKey = () => {
     return [
     `/api/trades/summary`
@@ -942,11 +832,7 @@ const {query: queryOptions, request: requestOptions} = options ?? {};
   const queryKey =  queryOptions?.queryKey ?? getGetTradeSummaryQueryKey();
 
 
-
     const queryFn: QueryFunction<Awaited<ReturnType<typeof getTradeSummary>>> = ({ signal }) => getTradeSummary({ signal, ...requestOptions });
-
-
-
 
 
    return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof getTradeSummary>>, TError, TData> & { queryKey: QueryKey }
@@ -973,8 +859,43 @@ export function useGetTradeSummary<TData = Awaited<ReturnType<typeof getTradeSum
 }
 
 
+export type ScanCointegrationArbQueryResult = NonNullable<Awaited<ReturnType<typeof scanCointegrationArb>>>
 
+/**
+ * @summary Scan for cointegration mean-reversion opportunities
+ */
+export function useScanCointegrationArb<TData = Awaited<ReturnType<typeof scanCointegrationArb>>, TError = ErrorType<ErrorResponse>>(
+  options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof scanCointegrationArb>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+  const queryOptions = getScanCointegrationArbQueryOptions(options)
+  const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
+  return withQueryKey(query, queryOptions.queryKey);
+}
 
+/**
+ * Returns cointegration pairs-trading signals via Kalman filter z-score.
+ * @summary Scan for cointegration mean-reversion opportunities
+ */
+export const scanCointegrationArb = async ( options?: RequestInit): Promise<CointegrationScanResult> => {
+  return customFetch<CointegrationScanResult>(getScanCointegrationArbUrl(), {
+    ...options,
+    method: 'GET',
+  });
+}
 
+export const getScanCointegrationArbQueryKey = () => {
+  return [
+    `/api/arb/cointegration`
+  ] as const;
+}
 
+export const getScanCointegrationArbQueryOptions = <TData = Awaited<ReturnType<typeof scanCointegrationArb>>, TError = ErrorType<ErrorResponse>>(
+  options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof scanCointegrationArb>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+) => {
+  const {query: queryOptions, request: requestOptions} = options ?? {};
+  const queryKey = queryOptions?.queryKey ?? getScanCointegrationArbQueryKey();
+  const queryFn: QueryFunction<Awaited<ReturnType<typeof scanCointegrationArb>>> = ({ signal }) => scanCointegrationArb({ signal, ...requestOptions });
+  return { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof scanCointegrationArb>>, TError, TData> & { queryKey: QueryKey }
+}
 
+export type ScanCointegrationArbQueryError = ErrorType<ErrorResponse>

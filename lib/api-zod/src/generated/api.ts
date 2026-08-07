@@ -237,7 +237,27 @@ export const ScanTriangularArbResponse = zod.object({
   "scannedAt": zod.string()
 })
 
-
+/**
+ * Returns cointegration pairs-trading signals via Kalman filter z-score.
+ * @summary Scan for cointegration mean-reversion opportunities
+ */
+export const ScanCointegrationArbResponse = zod.object({
+  "signals": zod.array(zod.object({
+    "pair": zod.string().describe('Cointegrated pair, e.g. SOL/ETH'),
+    "asset1": zod.string().describe('First asset symbol, e.g. SOL'),
+    "asset2": zod.string().describe('Second asset symbol, e.g. ETH'),
+    "price1": zod.number().describe('USD price of asset1'),
+    "price2": zod.number().describe('USD price of asset2'),
+    "hedgeRatio": zod.number().describe('Current Kalman-estimated hedge ratio (β)'),
+    "spread": zod.number().describe('Current spread residual (price1 − β·price2)'),
+    "zScore": zod.number().describe('Z-score of the spread vs recent history'),
+    "direction": zod.enum(['long_asset1', 'short_asset1']).describe('Trade direction: long asset1 / short asset2, or vice versa'),
+    "edgePct": zod.number().describe('Estimated edge in % based on z-score magnitude'),
+    "observations": zod.number().describe('Number of observations in spread history'),
+    "timestamp": zod.string()
+  })),
+  "scannedAt": zod.string()
+})
 /**
  * @summary Get P&L summary and statistics
  */
@@ -263,5 +283,4 @@ export const GetTradeSummaryResponse = zod.object({
   "sellOrderId": zod.string().nullish()
 }))
 })
-
 

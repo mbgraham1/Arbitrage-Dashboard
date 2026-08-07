@@ -9,17 +9,19 @@ import {
   useExecuteTriangular,
   useGetPreloadedCredentials,
   useScanTriangularArb,
+  useScanCointegrationArb,
   getScanTriangularArbQueryKey,
+  getScanCointegrationArbQueryKey,
   getListTradesQueryKey,
   getGetTradeSummaryQueryKey,
 } from "@workspace/api-client-react";
-import type { ExchangeCredentials, PriceData, BalanceData, TriangularOpportunity } from "@workspace/api-client-react";
+import type { ExchangeCredentials, PriceData, BalanceData, TriangularOpportunity, CointegrationSignal } from "@workspace/api-client-react";
 import { useQueryClient } from "@tanstack/react-query";
 
 export interface LogEntry {
   id: string;
   timestamp: string;
-  type: "info" | "warning" | "success" | "error" | "trade";
+  type: "info" | "warning" | "success" | "error" | "trade" | "coint";
   message: string;
 }
 
@@ -67,6 +69,8 @@ export interface BotContextType {
   isForcingTriangular: boolean;
   /** Latest triangular arb opportunities from the server-side scan */
   triOpportunities: TriangularOpportunity[];
+  /** Latest cointegration mean-reversion signals from the Kalman filter scan */
+  cointSignals: CointegrationSignal[];
 }
 
 const BotContext = createContext<BotContextType | undefined>(undefined);
@@ -161,6 +165,7 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
   const [isForcingTrade, setIsForcingTrade] = useState(false);
   const [isForcingTriangular, setIsForcingTriangular] = useState(false);
   const [triOpportunities, setTriOpportunities] = useState<TriangularOpportunity[]>([]);
+  const [cointSignals, setCointSignals] = useState<CointegrationSignal[]>([]);
 
   // ── Refs that give poll() always-current values without re-triggering effects ──
   const credentialsRef = useRef(credentials);
@@ -256,6 +261,36 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [triScan.data]);
+
+  // ── Cointegration scan — Kalman filter pairs trading signals ─────────────────
+  // Polls /arb/cointegration on the same cadence; logs COINT signals.
+  const cointScan = useScanCointegrationArb({
+    query: {
+      queryKey: getScanCointegrationArbQueryKey(),
+      enabled: isRunning,
+      refetchInterval: Math.max(2, settingsRef.current.pollInterval) * 1000,
+      staleTime: 0,
+    },
+  });
+
+  useEffect(() => {
+    if (!cointScan.data) return;
+    const sigs = cointScan.data.signals;
+    setCointSignals(sigs);
+    for (const sig of sigs) {
+      const dirLabel = sig.direction === "long_asset1"
+        ? `Long ${sig.asset1} / Short ${sig.asset2}`
+        : `Short ${sig.asset1} / Long ${sig.asset2}`;
+      addLog(
+        "coint",
+        `[COINT] ${sig.pair} | z=${sig.zScore.toFixed(2)} | β=${sig.hedgeRatio.toFixed(4)} | ` +
+        `${dirLabel} | Edge ~${sig.edgePct.toFixed(2)}% | ` +
+        `${sig.asset1}=$${sig.price1.toFixed(4)} ${sig.asset2}=$${sig.price2.toFixed(4)} | ` +
+        `obs=${sig.observations}`
+      );
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cointScan.data]);
 
   // ── Preloaded credentials (run once) ─────────────────────────────────────────
   const preloadAppliedRef = useRef(false);
@@ -599,6 +634,7 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
     forceTriangular,
     isForcingTriangular,
     triOpportunities,
+    cointSignals,
   };
 
   return <BotContext.Provider value={value}>{children}</BotContext.Provider>;
