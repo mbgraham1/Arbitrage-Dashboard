@@ -1,7 +1,7 @@
 import { Router, type IRouter } from "express";
 import { desc, sql, sum, count, max, avg } from "drizzle-orm";
 import { db, tradesTable, triScanTable, executionQualityTable, accountSnapshotsTable } from "@workspace/db";
-import { desc as dbDesc, eq as dbEq, and as dbAnd, gte as dbGte, count as dbCount, inArray as dbInArray } from "drizzle-orm";
+import { desc as dbDesc, eq as dbEq, and as dbAnd, gte as dbGte, count as dbCount } from "drizzle-orm";
 import { createHash } from "node:crypto";
 import nodeFs from "node:fs";
 import nodePath from "node:path";
@@ -1767,13 +1767,15 @@ const routeProbeAt = new Map<string, number>();
 async function routeFillStats(style: string, accountId: string): Promise<Map<string, { liveAttempts: number; fillRate: number }>> {
   const out = new Map<string, { liveAttempts: number; fillRate: number }>();
   try {
-    // Account-scoped: one account's fill history must never rank another
-    // account's routes. "legacy" rows (recorded before accountId existed)
-    // stay visible to preserve continuity of pre-scoping history.
+    // STRICTLY account-scoped: one account's fill history must never rank
+    // another account's routes. Pre-scoping "legacy" rows have an UNKNOWN
+    // owner, so they are excluded too — an unattributable history must not
+    // influence any trader's ranking or gates (neutral prior applies until
+    // the account builds its own history).
     const rows = await db.select({ route: executionQualityTable.route, filled: executionQualityTable.filled })
       .from(executionQualityTable)
       .where(dbAnd(dbEq(executionQualityTable.style, style), dbEq(executionQualityTable.isDryRun, false),
-        dbInArray(executionQualityTable.accountId, [accountId, "legacy"])))
+        dbEq(executionQualityTable.accountId, accountId)))
       .orderBy(dbDesc(executionQualityTable.id)).limit(2000);
     const grouped = new Map<string, boolean[]>();
     for (const r of rows) {
@@ -1800,7 +1802,7 @@ async function routeQualityPenalty(route: string, style: string, tradeSizeUsd: n
   try {
     const rows = await db.select().from(executionQualityTable)
       .where(dbAnd(dbEq(executionQualityTable.route, route), dbEq(executionQualityTable.style, style), dbEq(executionQualityTable.isDryRun, false),
-        dbInArray(executionQualityTable.accountId, [accountId, "legacy"])))
+        dbEq(executionQualityTable.accountId, accountId)))
       .orderBy(dbDesc(executionQualityTable.id)).limit(20);
     if (rows.length === 0) return { shortfallUsd: 0, attempts: 0, blockReason: null, bigEdgeBypass: false, probe: false };
     const fills = rows.filter(r => r.filled);
@@ -1875,7 +1877,7 @@ async function routeLegRisk(route: string, style: string, accountId: string): Pr
   try {
     const rows = await db.select().from(executionQualityTable)
       .where(dbAnd(dbEq(executionQualityTable.route, route), dbEq(executionQualityTable.style, style), dbEq(executionQualityTable.isDryRun, false),
-        dbInArray(executionQualityTable.accountId, [accountId, "legacy"])))
+        dbEq(executionQualityTable.accountId, accountId)))
       .orderBy(dbDesc(executionQualityTable.id)).limit(20);
     const legRows = rows.filter(r => r.legsFilled != null);
     if (legRows.length === 0) return null;
@@ -1932,6 +1934,17 @@ function accountIdFromKey(krakenKey: string, coinbaseKey?: string): string {
   return createHash("sha256").update(`${krakenKey}|${coinbaseKey ?? ""}`).digest("hex").slice(0, 16);
 }
 
+/** CANONICAL credential-presence rule for the per-account scope: the Coinbase
+ * key participates ONLY when its secret is also usable. A lone key (no
+ * secret) can't trade or be valued, so it must not fork the scope — the gate,
+ * blacklist, risk stats, scan ranking, snapshots, and every recordQuality
+ * write MUST all derive the accountId through this one helper, or a trader
+ * could be gated under one scope while their fills are recorded under
+ * another (their own history would become invisible to their own gate). */
+function accountScope(krakenKey: string, coinbaseKey?: string, coinbaseSecret?: string): string {
+  return accountIdFromKey(krakenKey, coinbaseKey && coinbaseSecret ? coinbaseKey : undefined);
+}
+
 async function snapshotAccountValue(creds: { krakenKey: string; krakenSecret: string; coinbaseKey?: string; coinbaseSecret?: string }, trigger: "poll" | "post_trade", log: { error: (o: object, m: string) => void }): Promise<{ totalUsd: number; usdBalance: number; holdingsUsd: number; unpriced: string[] } | null> {
   try {
     // Post-trade snapshots bypass the 30s balance cache — balances just changed.
@@ -1946,7 +1959,7 @@ async function snapshotAccountValue(creds: { krakenKey: string; krakenSecret: st
         unpriced: [...k.unpriced, ...c.unpriced.map(a => `CB:${a}`)],
       };
     }
-    const accountId = accountIdFromKey(creds.krakenKey, creds.coinbaseKey);
+    const accountId = accountScope(creds.krakenKey, creds.coinbaseKey, creds.coinbaseSecret);
     // Dedupe poll spam: skip the insert when value is unchanged vs the last
     // snapshot (post-trade snapshots always record — they're the audit trail).
     if (trigger === "poll") {
@@ -2045,7 +2058,7 @@ router.post("/arb/account-pnl", async (req, res): Promise<void> => {
   try {
     const now = await snapshotAccountValue(creds, "poll", req.log);
     if (!now) { res.status(502).json({ error: "Could not value the account (balance or ticker fetch failed)." }); return; }
-    const accountId = accountIdFromKey(creds.krakenKey, creds.coinbaseKey);
+    const accountId = accountScope(creds.krakenKey, creds.coinbaseKey, creds.coinbaseSecret);
     const scope = dbEq(accountSnapshotsTable.accountId, accountId);
     const startOfTodayUtc = new Date(); startOfTodayUtc.setUTCHours(0, 0, 0, 0);
     // Indexed baseline lookups — never load full history.
@@ -2356,7 +2369,7 @@ router.post("/arb/graph-execute", async (req, res): Promise<void> => {
         return;
       }
       const takerNet = bd.netProfitUsd - bufferUsd;
-      const riskM = await routeLegRisk(route.description, "maker", accountIdFromKey(krakenKey, coinbaseKey));
+      const riskM = await routeLegRisk(route.description, "maker", accountScope(krakenKey, coinbaseKey, coinbaseSecret));
       const evM = riskAdjustedEv(riskM, route.netProfitUsd, tradeSizeUsd);
       const makerEvUsd = evM ? evM.evUsd : route.netProfitUsd * 0.55 - 0.45 * DEFAULT_UNWIND_LOSS_FRAC * tradeSizeUsd;
       adaptiveResolved = true;
@@ -2411,10 +2424,10 @@ router.post("/arb/graph-execute", async (req, res): Promise<void> => {
       // any order is placed, so a stale scanner edge can't authorize a trade.
       // Cross/inventory shapes have no equivalent final re-quote — for them
       // history gates stay fully in force.
-      const hist = await routeQualityPenalty(route.description, executionStyle, tradeSizeUsd, accountIdFromKey(krakenKey, coinbaseKey), isKrakenTriangle ? effNetProfitUsd : 0, isKrakenTriangle);
+      const hist = await routeQualityPenalty(route.description, executionStyle, tradeSizeUsd, accountScope(krakenKey, coinbaseKey, coinbaseSecret), isKrakenTriangle ? effNetProfitUsd : 0, isKrakenTriangle);
       // Big-edge bypass overrides the blacklist too: an edge > 2× this
       // route's historical average is a NEW opportunity, not the old pattern.
-      const banMs = routeBlacklistRemainingMs(accountIdFromKey(krakenKey, coinbaseKey), executionStyle, route.description);
+      const banMs = routeBlacklistRemainingMs(accountScope(krakenKey, coinbaseKey, coinbaseSecret), executionStyle, route.description);
       if (banMs > 0 && !hist.bigEdgeBypass) {
         res.json({ success: false, isDryRun, executed: false, route: route.description, preflightProfitUsd: route.netProfitUsd, error: `Feedback-loop gate: route blacklisted for ${Math.ceil(banMs / 60_000)} more min after ${ROUTE_BLACKLIST_AFTER} consecutive failed live cycles — moving to the next best route.` });
         return;
@@ -2422,7 +2435,7 @@ router.post("/arb/graph-execute", async (req, res): Promise<void> => {
       // Profitable-route override: with fresh net profit > $0.01 and fewer
       // than 5 CONSECUTIVE failures, execute regardless of lifetime fill rate
       // — the streak (not the total) is what indicates a dead route now.
-      const failStreak = routeFailStreakCount(accountIdFromKey(krakenKey, coinbaseKey), executionStyle, route.description);
+      const failStreak = routeFailStreakCount(accountScope(krakenKey, coinbaseKey, coinbaseSecret), executionStyle, route.description);
       // Kraken triangles only — the override rides on that path's fresh
       // order-book re-quote; cross shapes have no equivalent final check.
       const profitableOverride = isKrakenTriangle && effNetProfitUsd > 0.01 && failStreak < ROUTE_BLACKLIST_AFTER;
@@ -2443,7 +2456,7 @@ router.post("/arb/graph-execute", async (req, res): Promise<void> => {
       // NOT bypassed by the profitable-route override (real losses observed);
       // only the big-edge bypass (market moved — history isn't the pattern)
       // and probes skip them.
-      const risk = await routeLegRisk(route.description, executionStyle, accountIdFromKey(krakenKey, coinbaseKey));
+      const risk = await routeLegRisk(route.description, executionStyle, accountScope(krakenKey, coinbaseKey, coinbaseSecret));
       // Persistent-negative-realized block (trader-directed): a route whose
       // MEASURED realized P&L averages below zero keeps losing money no matter
       // what the scanner claims — applies even under the big-edge bypass and
@@ -2530,7 +2543,7 @@ router.post("/arb/graph-execute", async (req, res): Promise<void> => {
       const realizedTri = isLiveTri && b["success"] === true && typeof b["preflightProfitUsd"] === "number" ? b["preflightProfitUsd"] as number : null;
       if (b["executed"] === true || (isLiveTri && !wasPreflightReject)) {
         await recordQuality({
-          accountId: accountIdFromKey(parsed.data.krakenKey, parsed.data.coinbaseKey && parsed.data.coinbaseSecret ? parsed.data.coinbaseKey : undefined),
+          accountId: accountScope(parsed.data.krakenKey, parsed.data.coinbaseKey, parsed.data.coinbaseSecret),
           route: route.description, style: executionStyle, isDryRun: !!b["isDryRun"],
           filled: b["success"] === true, tradeSizeUsd,
           expectedProfitUsd: effNetProfitUsd,
@@ -2578,7 +2591,7 @@ router.post("/arb/graph-execute", async (req, res): Promise<void> => {
         status: "simulated",
       });
       await recordQuality({
-        accountId: accountIdFromKey(parsed.data.krakenKey, parsed.data.coinbaseKey && parsed.data.coinbaseSecret ? parsed.data.coinbaseKey : undefined),
+        accountId: accountScope(parsed.data.krakenKey, parsed.data.coinbaseKey, parsed.data.coinbaseSecret),
         route: route.description, style: executionStyle, isDryRun: true, filled: true,
         tradeSizeUsd, expectedProfitUsd: route.netProfitUsd, realizedProfitUsd: null, slippagePct: route.slippagePct,
       }, req.log);
@@ -2956,7 +2969,7 @@ router.post("/arb/graph-execute", async (req, res): Promise<void> => {
       if (anyAccepted) {
         await recordFailure(filledVolume, msg);
         await recordQuality({
-          accountId: accountIdFromKey(parsed.data.krakenKey, parsed.data.coinbaseKey && parsed.data.coinbaseSecret ? parsed.data.coinbaseKey : undefined),
+          accountId: accountScope(parsed.data.krakenKey, parsed.data.coinbaseKey, parsed.data.coinbaseSecret),
           route: route.description, style: executionStyle, isDryRun: false, filled: false,
           tradeSizeUsd, expectedProfitUsd: route.netProfitUsd, realizedProfitUsd: null, slippagePct: route.slippagePct, note: msg.slice(0, 300),
         }, req.log);
@@ -2989,7 +3002,7 @@ router.post("/arb/graph-execute", async (req, res): Promise<void> => {
       ],
     });
     await recordQuality({
-      accountId: accountIdFromKey(parsed.data.krakenKey, parsed.data.coinbaseKey && parsed.data.coinbaseSecret ? parsed.data.coinbaseKey : undefined),
+      accountId: accountScope(parsed.data.krakenKey, parsed.data.coinbaseKey, parsed.data.coinbaseSecret),
       route: route.description, style: executionStyle, isDryRun: false, filled: true,
       tradeSizeUsd, expectedProfitUsd: route.netProfitUsd, realizedProfitUsd, slippagePct: route.slippagePct,
     }, req.log);

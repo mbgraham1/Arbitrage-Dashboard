@@ -7,4 +7,5 @@
 - [Maker floor safeguard](maker-floor-safeguard.md) — maker attempts gated at max($0.25, 2.5%·size); audit proved thin maker fills lose ~$0.19 each; preview must mirror live gates.
 - [Coinbase L2 books](coinbase-l2-books.md) — never truncate delta-fed depth books; keep full price→qty state, project top-N on read; subscribe level2 per product.
 - [Maker-hedge cross-mm rules](maker-hedge-cross-mm.md) — hedge only after confirmed fill, bounded IOC hedges, partial hedge ≠ realized P&L (record unhedged).
+- [Per-account scope rule](account-scope-rule.md) — one canonical helper derives the account history scope; Coinbase key counts only with its secret, or a trader's fills vanish from their own gate.
 - [WS streaming & latency](latency-streaming.md) — Kraken WS v2 symbols need XBT→BTC translation; quote age = per-leg from exchange update ts (never connection-wide); stale→wait-a-tick→skip; scaled buffer must reach the executor.

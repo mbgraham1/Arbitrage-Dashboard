@@ -16,6 +16,7 @@ import { CbMmCard } from "@/components/cb-mm-card";
 import { cn } from "@/lib/utils";
 import { useToast } from "@/hooks/use-toast";
 import { useLocalStorage } from "@/hooks/use-local-storage";
+import { deriveAccountId } from "@/lib/account-id";
 import { useQuery } from "@tanstack/react-query";
 import {
   routeInventoryReqs, inventoryBalanceFor, missingInventory, formatInventoryReqs,
@@ -1811,12 +1812,24 @@ function GraphEngineCard() {
   // maker vs taker per fire with fresh books.
   const scanStyle = style === "taker" ? "taker" as const : "maker" as const;
   const actualFee = scanStyle === "maker" ? (fees.maker ?? fees.taker) : fees.taker;
+  // Per-account scan scope: same sha256-prefix derivation as the server's
+  // accountIdFromKey, so ranking uses only THIS account's fill history —
+  // never another trader's. No key material ever leaves the browser.
+  const [accountId, setAccountId] = useState<string | undefined>(undefined);
+  useEffect(() => {
+    let live = true;
+    deriveAccountId(credentials.krakenKey, credentials.coinbaseKey || undefined, credentials.coinbaseSecret || undefined)
+      .then((id) => { if (live) setAccountId(id ?? undefined); })
+      .catch(() => { if (live) setAccountId(undefined); });
+    return () => { live = false; };
+  }, [credentials.krakenKey, credentials.coinbaseKey, credentials.coinbaseSecret]);
   const params = {
     tradeSizeUsd:    tradeSize,
     krakenFeesPct:   actualFee ?? settings.obFeesPct,
     coinbaseFeesPct: 0.40,
     maxHops:         4,
     executionStyle:  scanStyle,
+    ...(accountId ? { accountId } : {}),
   };
   // Cadence aligned with the OB Hunter (5s refetch / 4s stale) and the
   // server's 5s REST order-book cache TTL: when the WS stream is down and
