@@ -223,12 +223,12 @@ export default function Dashboard() {
                 disabled={isForcingTrade}
                 title={
                   bestForcePair
-                    ? `Will trade ${bestForcePair.pair} · gross spread +${bestForcePair.grossSpreadPct.toFixed(3)}%`
-                    : "Execute immediately on Kraken/Coinbase, ignoring edge threshold"
+                    ? `Rescans, then trades ${bestForcePair.pair} if net edge (after fees + slippage) clears your minimum · gross spread +${bestForcePair.grossSpreadPct.toFixed(3)}%`
+                    : "Rescans all pairs, fetches a fresh quote, then trades only if net edge clears your minimum"
                 }
               >
                 <Siren className="h-4 w-4 mr-2" />
-                {isForcingTrade ? "EXECUTING..." : "FORCE MARKET TRADE"}
+                {isForcingTrade ? "EXECUTING..." : "FORCE SCAN & TRADE"}
               </Button>
               <span className="text-[10px] font-mono text-muted-foreground leading-none">
                 {bestForcePair
@@ -528,7 +528,7 @@ export default function Dashboard() {
                 {latestPriceData && (
                   <div className="flex items-center gap-1 text-[10px] font-mono text-muted-foreground">
                     <TrendingUp className="h-3 w-3" />
-                    {latestPriceData.wsStatus.kraken ? "K:WS" : "K:REST"} / {latestPriceData.wsStatus.coinbase ? "C:WS" : "C:REST"}
+                    {latestPriceData.wsStatus.kraken ? "K:WS" : "K:REST·fallback"} / {latestPriceData.wsStatus.coinbase ? "C:REST·2s" : "C:STALE"}
                   </div>
                 )}
                 {isRunning && <span className="flex h-2 w-2 rounded-full bg-success animate-pulse" />}

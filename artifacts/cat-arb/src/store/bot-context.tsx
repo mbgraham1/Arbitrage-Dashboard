@@ -785,8 +785,8 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
         const prev = prevWsRef.current;
         if (!data.wsStatus.kraken  && prev.kraken)   addLog("warning", "Kraken price feed degraded (REST fallback).");
         if ( data.wsStatus.kraken  && !prev.kraken)  addLog("info",    "Kraken price feed restored (WS live).");
-        if (!data.wsStatus.coinbase && prev.coinbase) addLog("warning", "Coinbase price feed degraded (REST fallback).");
-        if ( data.wsStatus.coinbase && !prev.coinbase) addLog("info",   "Coinbase price feed restored (WS live).");
+        if (!data.wsStatus.coinbase && prev.coinbase) addLog("warning", "Coinbase price feed stale (2s REST poll not updating).");
+        if ( data.wsStatus.coinbase && !prev.coinbase) addLog("info",   "Coinbase price feed fresh (REST, polled every 2s).");
         prevWsRef.current = { kraken: data.wsStatus.kraken, coinbase: data.wsStatus.coinbase };
 
         const now = Date.now();

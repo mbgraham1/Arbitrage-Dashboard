@@ -253,8 +253,8 @@ async function fetchCoinbasePair(pair: Pair): Promise<void> {
     const mid = bid > 0 && ask > 0 ? (bid + ask) / 2 : last;
     if (mid > 0) {
       const entry = pairCache.get(pair)!;
-      // Mark as "ws" so wsStatus.coinbase remains true (polls every 2 s → effectively live)
-      entry.coinbase = { price: mid, bid: bid || mid, ask: ask || mid, updatedAt: Date.now(), source: "ws" };
+      // Honest labeling: Coinbase is REST polled every 2s (no WebSocket feed yet).
+      entry.coinbase = { price: mid, bid: bid || mid, ask: ask || mid, updatedAt: Date.now(), source: "rest" };
     }
   } catch { /* ignore */ }
 }
@@ -554,7 +554,8 @@ export async function getPairPrices(pair: Pair): Promise<PairPrices> {
     binance:     entry.binance?.price  ?? null,
     kucoin:      entry.kucoin?.price   ?? null,
     wsKraken:   !!(entry.kraken?.source   === "ws" && entry.kraken   && now - entry.kraken.updatedAt   < WS_STALE_MS),
-    wsCoinbase: !!(entry.coinbase?.source === "ws" && entry.coinbase && now - entry.coinbase.updatedAt < WS_STALE_MS),
+    // Coinbase has no WS feed — "live" here means the 2s REST poll is fresh.
+    wsCoinbase: !!(entry.coinbase && now - entry.coinbase.updatedAt < WS_STALE_MS),
   };
 }
 
