@@ -1030,7 +1030,8 @@ function InventoryCard() {
 // ── Triangular Arb Card ────────────────────────────────────────────────────────
 
 /** Profit must be ≥ this fraction of trade size to execute without a warning (0.1%). */
-const THIN_EDGE_PCT = 0.001;
+// Thin-edge warning threshold is trader-tunable via Config → settings.thinEdgeWarnPct
+// (percent of trade size; default 0.1%).
 
 // ── v15 Order Book Hunter Card (Conservative) ──────────────────────────────────
 const OB_STATUS_META: Record<string, { label: string; className: string }> = {
@@ -1150,7 +1151,7 @@ function OrderBookHunterCard() {
     }
     // In live mode, warn when profit is below the thin-edge safety margin (< 0.1% of trade size).
     // Dry runs bypass this gate so testing is frictionless.
-    if (liveMode && topCycle.estimatedProfitUsd < THIN_EDGE_PCT * tradeSize) {
+    if (liveMode && topCycle.estimatedProfitUsd < (settings.thinEdgeWarnPct / 100) * tradeSize) {
       setThinEdgePending(true);
       return;
     }
@@ -1740,7 +1741,7 @@ function GraphEngineCard() {
     }
     // In live mode, warn when profit is below the thin-edge safety margin (< 0.1% of trade size).
     // Dry runs and AUTO (which calls doExecuteGraphRoute directly) bypass this gate.
-    if (liveMode && topRoute.netProfitUsd < THIN_EDGE_PCT * tradeSize) {
+    if (liveMode && topRoute.netProfitUsd < (settings.thinEdgeWarnPct / 100) * tradeSize) {
       setThinEdgePending(true);
       return;
     }

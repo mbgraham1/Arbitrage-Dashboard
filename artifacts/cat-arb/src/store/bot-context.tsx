@@ -54,6 +54,9 @@ export interface BotSettings {
   // Order Book Hunter parameters
   obTradeSize: number;  // v8: trade size in USD for OB scans (default $10)
   obFeesPct: number;    // v8: estimated fee per leg in % for OB scans (default 0.40%)
+  // Thin-edge warning threshold — live executes with profit below this % of
+  // trade size trigger a confirm dialog (default 0.1%)
+  thinEdgeWarnPct: number;
   // Inventory Mode — cross-exchange inventory arb (v10)
   inventoryModeEnabled: boolean;
   inventoryAssets: string[];       // assets to watch (default ["BTC","ETH","SOL"])
@@ -141,6 +144,7 @@ const DEFAULT_SETTINGS: BotSettings = {
   enabledPairs: [...ALL_PAIRS], // all 10 pairs enabled by default
   obTradeSize: 10,      // v8: OB Hunter default $10 trade size
   obFeesPct: 0.16,      // v8: OB Hunter default 0.16% fee per leg (Kraken post-only maker rate)
+  thinEdgeWarnPct: 0.1, // warn on live executes when profit < 0.1% of trade size
   // Inventory Mode (v10)
   inventoryModeEnabled: false,
   inventoryAssets: ["BTC", "ETH", "SOL"],

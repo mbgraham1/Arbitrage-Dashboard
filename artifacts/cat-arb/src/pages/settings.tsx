@@ -261,6 +261,21 @@ export default function Settings() {
 
             <div className="space-y-3">
               <div className="flex flex-col gap-1">
+                <Label>Thin-Edge Warning Threshold (%)</Label>
+                <span className="text-xs text-muted-foreground font-mono">Live executes with profit below this % of trade size ask for confirmation (default 0.1%)</span>
+              </div>
+              <Input
+                type="number"
+                step="0.01"
+                min="0"
+                data-testid="input-thin-edge-warn-pct"
+                value={localSettings.thinEdgeWarnPct}
+                onChange={(e) => setLocalSettings({ ...localSettings, thinEdgeWarnPct: Math.max(0, parseFloat(e.target.value) || 0) })}
+              />
+            </div>
+
+            <div className="space-y-3">
+              <div className="flex flex-col gap-1">
                 <Label>Partial Fill Tolerance ({(localSettings.partialFillTolerancePct ?? 99.9).toFixed(0)}%)</Label>
                 <span className="text-xs text-muted-foreground font-mono">
                   A leg filled to at least this % counts as complete — the cycle continues sized to the actual fill and any leftover is swept back to USD at market. Server enforces a 50% floor; below 100% partial cycles can realize less than the scanned edge.
