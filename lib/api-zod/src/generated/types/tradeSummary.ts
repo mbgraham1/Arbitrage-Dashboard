@@ -14,5 +14,15 @@ export interface TradeSummary {
   totalProfitUsd: number;
   avgNetEdgePct: number;
   bestTradeProfitUsd: number;
+  /** Rows where every leg has confirmed exchange fill data + order IDs. */
+  verifiedTrades?: number;
+  /** Live attempts that did not complete (incl. unwinds). */
+  failedTrades?: number;
+  /** Dry runs, scanner estimates, and legacy rows without fill proof. */
+  simulatedTrades?: number;
+  /** SUM of realizedProfitUsd over VERIFIED rows only — real money, never estimates. */
+  realizedPnlUsd?: number;
+  /** @nullable */
+  bestVerifiedProfitUsd?: number | null;
   recentTrades: TradeRecord[];
 }

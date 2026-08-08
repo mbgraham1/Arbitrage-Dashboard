@@ -64,6 +64,7 @@ export * from './priceData';
 export * from './routeHistoryClearResult';
 export * from './scanAllPairsParams';
 export * from './tradeRecord';
+export * from './tradeRecordLegFillsItem';
 export * from './tradeRequest';
 export * from './tradeRequestOrderType';
 export * from './tradeResult';

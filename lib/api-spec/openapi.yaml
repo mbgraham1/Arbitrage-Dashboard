@@ -979,6 +979,34 @@ components:
           type: ["string", "null"]
         sellOrderId:
           type: ["string", "null"]
+        status:
+          type: ["string", "null"]
+          description: >
+            Ledger classification: verified (every leg has confirmed exchange
+            fill data + order IDs; realizedProfitUsd is real), failed (live
+            attempt that did not complete, incl. unwinds), simulated (dry
+            runs / scanner estimates), estimated (legacy live rows without
+            per-leg fill proof). Null on very old rows.
+        realizedProfitUsd:
+          type: ["number", "null"]
+          description: Realized P&L from ACTUAL confirmed fills, fee-inclusive. Only on verified rows.
+        legFills:
+          type: ["array", "null"]
+          description: Per-leg confirmed fill evidence (actual price, volume, fee, exchange order ID).
+          items:
+            type: object
+            properties:
+              leg: { type: integer }
+              label: { type: string }
+              pair: { type: string }
+              side: { type: string }
+              price: { type: ["number", "null"] }
+              volume: { type: number }
+              costUsd: { type: number }
+              fee: { type: number }
+              txid: { type: ["string", "null"] }
+              taker: { type: boolean }
+              unwind: { type: boolean }
 
     AllPairSnapshot:
       type: object
@@ -1667,6 +1695,20 @@ components:
           type: number
         bestTradeProfitUsd:
           type: number
+        verifiedTrades:
+          type: integer
+          description: Rows where every leg has confirmed exchange fill data + order IDs.
+        failedTrades:
+          type: integer
+          description: Live attempts that did not complete (incl. unwinds).
+        simulatedTrades:
+          type: integer
+          description: Dry runs, scanner estimates, and legacy rows without fill proof.
+        realizedPnlUsd:
+          type: number
+          description: SUM of realizedProfitUsd over VERIFIED rows only — real money, never estimates.
+        bestVerifiedProfitUsd:
+          type: ["number", "null"]
         recentTrades:
           type: array
           items:

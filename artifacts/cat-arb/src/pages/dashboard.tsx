@@ -197,15 +197,15 @@ export default function Dashboard() {
 
           <div className="bg-muted px-4 py-2 border-2 border-border flex flex-col items-end flex-1 md:flex-none">
             <span className="text-[10px] uppercase font-bold text-muted-foreground">
-              Total P&L (Persistent) · {summaryQuery.data?.totalTrades ?? 0} trades
+              Realized P&L (Verified) · {summaryQuery.data?.verifiedTrades ?? 0} verified fills
             </span>
             <span className={cn(
               "text-xl font-mono font-bold leading-none",
-              (summaryQuery.data?.totalProfitUsd ?? 0) > 0 ? "text-success" :
-              (summaryQuery.data?.totalProfitUsd ?? 0) < 0 ? "text-destructive" : ""
-            )}>
-              {(summaryQuery.data?.totalProfitUsd ?? 0) >= 0 ? "+" : "-"}$
-              {Math.abs(summaryQuery.data?.totalProfitUsd ?? 0).toFixed(2)}
+              (summaryQuery.data?.realizedPnlUsd ?? 0) > 0 ? "text-success" :
+              (summaryQuery.data?.realizedPnlUsd ?? 0) < 0 ? "text-destructive" : ""
+            )} data-testid="text-realized-pnl">
+              {(summaryQuery.data?.realizedPnlUsd ?? 0) >= 0 ? "+" : "-"}$
+              {Math.abs(summaryQuery.data?.realizedPnlUsd ?? 0).toFixed(2)}
             </span>
             {sessionProfitUsd !== 0 && (
               <span className="text-[10px] font-mono text-muted-foreground">
@@ -2248,20 +2248,30 @@ function TradeHistoryTable() {
           <table className="w-full text-xs font-mono border-collapse">
             <thead>
               <tr className="border-b-2 border-border bg-muted/50">
-                {["Time","Trade ID","Pair","Buy","Sell","Volume","Buy Price","Sell Price","Profit","Order IDs"].map((h) => (
+                {["Time","Trade ID","Status","Pair","Buy","Sell","Volume","Buy Price","Sell Price","Profit","Order IDs"].map((h) => (
                   <th key={h} className="text-left px-3 py-2 text-[10px] uppercase font-bold text-muted-foreground whitespace-nowrap">{h}</th>
                 ))}
               </tr>
             </thead>
             <tbody>
               {trades.map((t, i) => {
-                const profit = t.estimatedProfitUsd;
+                const verified = t.status === "verified";
+                const failed = t.status === "failed";
+                const profit = verified && t.realizedProfitUsd != null ? t.realizedProfitUsd : t.estimatedProfitUsd;
                 const buyPrice = t.buyExchange === "Kraken" ? t.krakenPrice : t.coinbasePrice;
                 const sellPrice = t.sellExchange === "Kraken" ? t.krakenPrice : t.coinbasePrice;
                 return (
                   <tr key={t.id} className={cn("border-b border-border/50", i % 2 === 0 ? "" : "bg-muted/20")}>
                     <td className="px-3 py-1.5 whitespace-nowrap text-muted-foreground">{format(new Date(t.createdAt), "MM/dd HH:mm:ss")}</td>
                     <td className="px-3 py-1.5 font-bold">#{t.id}</td>
+                    <td className="px-3 py-1.5">
+                      <span className={cn("text-[9px] font-bold px-1 border",
+                        verified ? "border-success text-success" :
+                        failed ? "border-destructive text-destructive" :
+                        "border-border text-muted-foreground")}>
+                        {verified ? "✓ VERIFIED" : failed ? "✗ FAILED" : t.isDryRun || t.status === "simulated" ? "SIM" : "EST"}
+                      </span>
+                    </td>
                     <td className="px-3 py-1.5">
                       <span className="text-[9px] font-mono font-bold px-1 border border-border text-muted-foreground">{t.pair ?? "SOL/USD"}</span>
                     </td>

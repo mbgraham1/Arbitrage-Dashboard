@@ -52,3 +52,11 @@ Any 'current edge beats history' bypass of fill-rate gates/blacklists must be li
 ## Maker fill quality
 - Joining the best bid puts a small order at the BACK of the queue — it ~never fills. Improve one tick inside the spread (post-only still holds) with a tick-premium guard: only improve when profit still clears the floor at the improved price. Quantize tick-snapped prices to the tick's decimals (float dust gets rejected by Kraken).
 - Reprice loop: cancel + re-place at the freshest aggressive price every ~2.5s with a FULL pre-flight each time; bounded by max-reprices + wall-clock deadline; exhaustion falls through to the next-best route client-side (error-prefix contract with the dashboard).
+
+## Verified trade ledger classification
+Ledger rows carry status: verified | failed | simulated | estimated. Rules that must hold:
+- **verified** requires per-leg confirmed fill evidence (txid + real volume for every leg), real USD in/out — never just bookkeeping flags or order IDs. Only verified rows sum into realized P&L.
+- Expected/scanner profit lives only in the estimate column; realized profit comes only from actual fills.
+- Any run where an order was ACCEPTED (txid returned) must leave a ledger row even if fills were zero/indeterminate/revoked — track accepted txids in a fn-scoped fail context declared OUTSIDE the try so the catch can write the FAILED row (catch can't see try-scoped vars).
+- LockRevoked/Indeterminate errors can carry confirmed partial fills — capture evidence in the leg wrapper's catch before rethrowing.
+- Legacy live rows without fill proof are "estimated", excluded from realized P&L; they cannot be retroactively verified without exchange order-history lookup.

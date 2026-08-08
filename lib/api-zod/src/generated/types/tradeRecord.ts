@@ -5,6 +5,7 @@
  * CAT Arbitrage Dashboard API
  * OpenAPI spec version: 0.1.0
  */
+import type { TradeRecordLegFillsItem } from './tradeRecordLegFillsItem';
 
 export interface TradeRecord {
   id: number;
@@ -26,4 +27,19 @@ export interface TradeRecord {
   buyOrderId?: string | null;
   /** @nullable */
   sellOrderId?: string | null;
+  /**
+     * Ledger classification: verified (every leg has confirmed exchange fill data + order IDs; realizedProfitUsd is real), failed (live attempt that did not complete, incl. unwinds), simulated (dry runs / scanner estimates), estimated (legacy live rows without per-leg fill proof). Null on very old rows.
+     * @nullable
+     */
+  status?: string | null;
+  /**
+     * Realized P&L from ACTUAL confirmed fills, fee-inclusive. Only on verified rows.
+     * @nullable
+     */
+  realizedProfitUsd?: number | null;
+  /**
+     * Per-leg confirmed fill evidence (actual price, volume, fee, exchange order ID).
+     * @nullable
+     */
+  legFills?: TradeRecordLegFillsItem[] | null;
 }

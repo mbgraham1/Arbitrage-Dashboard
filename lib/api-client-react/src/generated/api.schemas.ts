@@ -136,6 +136,22 @@ export interface TradeResult {
   error?: string | null;
 }
 
+export type TradeRecordLegFillsItem = {
+  leg?: number;
+  label?: string;
+  pair?: string;
+  side?: string;
+  /** @nullable */
+  price?: number | null;
+  volume?: number;
+  costUsd?: number;
+  fee?: number;
+  /** @nullable */
+  txid?: string | null;
+  taker?: boolean;
+  unwind?: boolean;
+};
+
 export interface TradeRecord {
   id: number;
   createdAt: string;
@@ -156,6 +172,21 @@ export interface TradeRecord {
   buyOrderId?: string | null;
   /** @nullable */
   sellOrderId?: string | null;
+  /**
+     * Ledger classification: verified (every leg has confirmed exchange fill data + order IDs; realizedProfitUsd is real), failed (live attempt that did not complete, incl. unwinds), simulated (dry runs / scanner estimates), estimated (legacy live rows without per-leg fill proof). Null on very old rows.
+     * @nullable
+     */
+  status?: string | null;
+  /**
+     * Realized P&L from ACTUAL confirmed fills, fee-inclusive. Only on verified rows.
+     * @nullable
+     */
+  realizedProfitUsd?: number | null;
+  /**
+     * Per-leg confirmed fill evidence (actual price, volume, fee, exchange order ID).
+     * @nullable
+     */
+  legFills?: TradeRecordLegFillsItem[] | null;
 }
 
 export interface AllPairSnapshot {
@@ -801,6 +832,16 @@ export interface TradeSummary {
   totalProfitUsd: number;
   avgNetEdgePct: number;
   bestTradeProfitUsd: number;
+  /** Rows where every leg has confirmed exchange fill data + order IDs. */
+  verifiedTrades?: number;
+  /** Live attempts that did not complete (incl. unwinds). */
+  failedTrades?: number;
+  /** Dry runs, scanner estimates, and legacy rows without fill proof. */
+  simulatedTrades?: number;
+  /** SUM of realizedProfitUsd over VERIFIED rows only — real money, never estimates. */
+  realizedPnlUsd?: number;
+  /** @nullable */
+  bestVerifiedProfitUsd?: number | null;
   recentTrades: TradeRecord[];
 }
 

@@ -735,6 +735,16 @@ async function runKrakenTriangle(input: TriangleExecInput, reqLog: ReqLog): Prom
     return { badRequest: `Unknown asset(s): ${assetA}/${assetB}` };
   }
 
+  // Failure-ledger context: kept OUTSIDE the try so the catch can persist a
+  // FAILED row with the confirmed fill evidence gathered before the error.
+  const failCtx: {
+    legFills: Array<{ leg: number; volume: number; costUsd: number; txid: string }>;
+    /** EVERY order Kraken accepted (txid returned), even zero-fill /
+     * indeterminate / revoked ones — a failed run must never vanish. */
+    acceptedOrders: Array<{ leg: number; label: string; pair: string; side: string; txid: string }>;
+    expectedProfitUsd: number;
+  } = { legFills: [], acceptedOrders: [], expectedProfitUsd: 0 };
+
   try {
     // 0. Use the account's ACTUAL taker fee tier when possible (advisor
     //    recommendation) instead of the caller's assumption. Falls back to the
@@ -786,6 +796,7 @@ async function runKrakenTriangle(input: TriangleExecInput, reqLog: ReqLog): Prom
         isDryRun: true,
         krakenPrice: "0",
         coinbasePrice: "0",
+        status: "simulated",
       });
       reqLog.info({ route, tradeSizeUsd, profit: pf.profitUsd }, "OB manual execute (dry run)");
       return { body: { success: true, isDryRun: true, executed: true, route, preflightProfitUsd: pf.profitUsd, leg1OrderId: null, leg2OrderId: null, leg3OrderId: null } };
@@ -871,7 +882,13 @@ async function runKrakenTriangle(input: TriangleExecInput, reqLog: ReqLog): Prom
      * caller's tolerance check + unwind takes over. Aggregates partial fills
      * across attempts. Throws only when NOTHING was placed/filled at all.
      */
-    const fillLeg = async (
+    // Confirmed per-leg fill evidence for the ledger: ACTUAL exchange numbers
+    // (volExec/cost/fee/txid), never scanner estimates.
+    type LegFillRecord = { leg: number; label: string; pair: string; side: string; price: number | null; volume: number; costUsd: number; fee: number; txid: string; taker?: boolean; unwind?: boolean };
+    const legFillRecords: LegFillRecord[] = [];
+    failCtx.legFills = legFillRecords; // shared reference — mutated in place
+    failCtx.expectedProfitUsd = pf.profitUsd;
+    const fillLegRaw = async (
       legIndex: number, label: string,
       spec: { pair: string; side: "buy" | "sell"; volume: number; limitPrice: number },
       beforeRetry: () => Promise<number | null>,
@@ -915,6 +932,7 @@ async function runKrakenTriangle(input: TriangleExecInput, reqLog: ReqLog): Prom
           throw new Error(`${label} failed (no order placed): ${(e as Error).message}`);
         }
         agg.txid = txid;
+        if (txid) failCtx.acceptedOrders.push({ leg: legIndex, label, pair: spec.pair, side: spec.side, txid });
         setExecStatus({ orderId: txid, phase: "waiting for fill" });
         const deadline = opts?.freshLimit ? legDeadline : Date.now() + restMs;
         let nextEdgeCheck = Date.now() + EDGE_CHECK_EVERY_MS;
@@ -992,6 +1010,20 @@ async function runKrakenTriangle(input: TriangleExecInput, reqLog: ReqLog): Prom
 
     /** Market-complete a leg's remainder (taker fallback). Polls to a TERMINAL
      * status; throws IndeterminateOrderError if Kraken can't confirm one. */
+    const fillLeg: typeof fillLegRaw = async (legIndex, label, spec, beforeRetry, opts) => {
+      try {
+        const agg = await fillLegRaw(legIndex, label, spec, beforeRetry, opts);
+        if (agg.volExec > 0) legFillRecords.push({ leg: legIndex, label, pair: spec.pair, side: spec.side, price: agg.volExec > 0 ? agg.cost / agg.volExec : null, volume: agg.volExec, costUsd: agg.cost, fee: agg.fee, txid: agg.txid });
+        return agg;
+      } catch (e) {
+        // A revoked run may still carry a CONFIRMED partial fill — keep the
+        // evidence for the FAILED ledger row before rethrowing.
+        if (e instanceof LockRevokedError && e.fill && e.fill.volExec > 0) {
+          legFillRecords.push({ leg: legIndex, label: `${label} (revoked)`, pair: spec.pair, side: spec.side, price: e.fill.volExec > 0 ? e.fill.cost / e.fill.volExec : null, volume: e.fill.volExec, costUsd: e.fill.cost, fee: e.fill.fee, txid: e.fill.txid });
+        }
+        throw e;
+      }
+    };
     const marketFill = async (legIndex: number, label: string, side: "buy" | "sell", volume: number, pair: string, priceCap?: number): Promise<AggFill> => {
       setExecStatus({
         active: true, route, leg: legIndex, legLabel: `${label}: ${priceCap != null ? "IOC" : "MARKET"} ${side} ${pair} (taker fallback)`,
@@ -1004,6 +1036,7 @@ async function runKrakenTriangle(input: TriangleExecInput, reqLog: ReqLog): Prom
         ? await krakenRawIocLimitOrder(creds, side, volume, priceCap, pair)
         : await krakenRawMarketOrder(creds, side, volume, pair);
       const txid = r.txid[0] ?? "";
+      if (txid) failCtx.acceptedOrders.push({ leg: legIndex, label: `${label} (taker)`, pair, side, txid });
       setExecStatus({ orderId: txid, phase: "confirming market fill" });
       const deadline = Date.now() + 15_000;
       let info = await safeInfo(txid);
@@ -1013,6 +1046,7 @@ async function runKrakenTriangle(input: TriangleExecInput, reqLog: ReqLog): Prom
       }
       if (!isFinal(info.status)) throw new IndeterminateOrderError(txid, `${label} market fallback`);
       log.info(`${label} taker fallback: market ${side} ${pair} filled ${info.volExec.toFixed(8)}/${volume.toFixed(8)} (${txid})`);
+      if (info.volExec > 0) legFillRecords.push({ leg: legIndex, label, pair, side, price: info.volExec > 0 ? info.cost / info.volExec : null, volume: info.volExec, costUsd: info.cost, fee: info.fee, txid, taker: true });
       return { volExec: info.volExec, cost: info.cost, fee: info.fee, txid };
     };
 
@@ -1253,24 +1287,62 @@ async function runKrakenTriangle(input: TriangleExecInput, reqLog: ReqLog): Prom
 
     // Realized P&L from actual fills, fee-inclusive (cost fields exclude fees;
     // usdSpent includes leg1 fee, usdReceived deducts leg3 fee).
+    // VERIFIED requires proof: all 3 legs completed, exchange order IDs for
+    // every leg, and real USD in/out from confirmed fills. Anything less is
+    // recorded as "estimated" — it NEVER counts toward realized P&L.
+    // VERIFIED requires actual per-leg fill evidence — every one of the 3
+    // legs must have a confirmed fill record with a real txid and volume —
+    // not just bookkeeping flags and order IDs.
+    const legEvidence = (leg: number) => legFillRecords.some(f => f.leg === leg && !f.unwind && f.volume > 0 && !!f.txid);
+    const fullyVerified = legsCompleted === 3 && !!leg1Id && !!leg2Id && !!leg3Id && usdSpent > 0 && usdReceived > 0
+      && legEvidence(1) && legEvidence(2) && legEvidence(3);
     const realizedProfit = usdSpent > 0 && usdReceived > 0 ? usdReceived - usdSpent : pf.profitUsd;
     await db.insert(tradesTable).values({
       pair: route,
       buyExchange: "kraken",
       sellExchange: "kraken",
       volume: aHeld.toFixed(8),
-      estimatedProfitUsd: realizedProfit.toFixed(6),
+      estimatedProfitUsd: pf.profitUsd.toFixed(6), // scanner/pre-flight expectation — never realized
       netEdgePct: usdSpent > 0 ? ((realizedProfit / usdSpent) * 100).toFixed(4) : ((pf.profitUsd / tradeSizeUsd) * 100).toFixed(4),
       isDryRun: false,
       krakenPrice: "0",
       coinbasePrice: "0",
       buyOrderId: leg1Id || null,
       sellOrderId: leg3Id || null,
+      status: fullyVerified ? "verified" : "estimated",
+      realizedProfitUsd: fullyVerified ? realizedProfit.toFixed(6) : null,
+      legFills: legFillRecords,
     });
     reqLog.info({ route, tradeSizeUsd, realizedProfit, usdSpent, usdReceived, totalFees, leg1Id, leg2Id, leg3Id }, "OB manual execute LIVE");
     return { body: { success: true, isDryRun: false, executed: true, route, preflightProfitUsd: realizedProfit, leg1OrderId: leg1Id, leg2OrderId: leg2Id, leg3OrderId: leg3Id, legsFilled: legsCompleted } };
   } catch (err) {
     reqLog.error({ err, route }, "OB manual execute error");
+    // FAILED ledger row — a live route that placed ANY order but did not
+    // complete is recorded as failed (with its confirmed fills + order IDs for
+    // reconciliation), never as a profitable trade.
+    if (!isDryRun && (failCtx.legFills.length > 0 || failCtx.acceptedOrders.length > 0)) {
+      try {
+        const l1Fills = failCtx.legFills.filter(f => f.leg === 1);
+        const l3Fills = failCtx.legFills.filter(f => f.leg === 3);
+        // Include accepted-but-unconfirmed orders (zero fill / indeterminate)
+        // as zero-volume evidence rows so no accepted order vanishes.
+        const filledTxids = new Set(failCtx.legFills.map(f => f.txid));
+        const acceptedOnly = failCtx.acceptedOrders
+          .filter(o => !filledTxids.has(o.txid))
+          .map(o => ({ leg: o.leg, label: `${o.label} (accepted, no confirmed fill)`, pair: o.pair, side: o.side, price: null, volume: 0, costUsd: 0, fee: 0, txid: o.txid }));
+        await db.insert(tradesTable).values({
+          pair: `${route} [FAILED: ${(err as Error).message.slice(0, 120)}]`,
+          buyExchange: "kraken", sellExchange: "kraken",
+          volume: l1Fills.reduce((s, f) => s + f.volume, 0).toFixed(8),
+          estimatedProfitUsd: failCtx.expectedProfitUsd.toFixed(6),
+          netEdgePct: "0",
+          isDryRun: false, krakenPrice: "0", coinbasePrice: "0",
+          buyOrderId: (l1Fills.map(f => f.txid).filter(Boolean).join(",") || failCtx.acceptedOrders.filter(o => o.leg === 1).map(o => o.txid).join(",")) || null,
+          sellOrderId: (l3Fills.map(f => f.txid).filter(Boolean).join(",") || failCtx.acceptedOrders.filter(o => o.leg === 3).map(o => o.txid).join(",")) || null,
+          status: "failed", realizedProfitUsd: null, legFills: [...failCtx.legFills, ...acceptedOnly],
+        });
+      } catch (e) { reqLog.error(`Failed to write FAILED ledger row: ${(e as Error).message}`); }
+    }
     // Indeterminate leg-1 order: Kraken never confirmed a terminal status, so
     // the leg may STILL fill — recording 0 would assert a failure we can't
     // prove. Keep the diagnostic null (unknown) rather than a false zero.
@@ -1900,6 +1972,7 @@ router.post("/arb/graph-execute", async (req, res): Promise<void> => {
         isDryRun: true,
         krakenPrice: "0",
         coinbasePrice: "0",
+        status: "simulated",
       });
       await recordQuality({
         accountId: accountIdFromKey(parsed.data.krakenKey, parsed.data.coinbaseKey && parsed.data.coinbaseSecret ? parsed.data.coinbaseKey : undefined),
@@ -1978,6 +2051,7 @@ router.post("/arb/graph-execute", async (req, res): Promise<void> => {
           coinbasePrice: "0",
           buyOrderId: buyOrderId || null,
           sellOrderId: sellOrderId || null,
+          status: "failed",
         });
       } catch (e) { log.error(`Failed to write failure ledger row: ${(e as Error).message}`); }
     };
@@ -2210,6 +2284,8 @@ router.post("/arb/graph-execute", async (req, res): Promise<void> => {
       return;
     }
 
+    const realizedProfitUsd = buySpendUsd > 0 && sellProceedsUsd > 0 ? sellProceedsUsd - buySpendUsd : null;
+    const crossVerified = !!buyOrderId && !!sellOrderId && realizedProfitUsd != null;
     await db.insert(tradesTable).values({
       pair: route.description,
       buyExchange: buyHop.exchange,
@@ -2222,8 +2298,13 @@ router.post("/arb/graph-execute", async (req, res): Promise<void> => {
       coinbasePrice: "0",
       buyOrderId: buyOrderId || null,
       sellOrderId: sellOrderId || null,
+      status: crossVerified ? "verified" : "estimated",
+      realizedProfitUsd: crossVerified ? realizedProfitUsd!.toFixed(6) : null,
+      legFills: [
+        { leg: 1, label: "buy", pair: buyHop.pair, side: "buy", volume: filledVolume, costUsd: buySpendUsd, txid: buyOrderId || null },
+        { leg: 2, label: "sell", pair: sellHop.pair, side: "sell", volume: filledVolume, costUsd: sellProceedsUsd, txid: sellOrderId || null },
+      ],
     });
-    const realizedProfitUsd = buySpendUsd > 0 && sellProceedsUsd > 0 ? sellProceedsUsd - buySpendUsd : null;
     await recordQuality({
       accountId: accountIdFromKey(parsed.data.krakenKey, parsed.data.coinbaseKey && parsed.data.coinbaseSecret ? parsed.data.coinbaseKey : undefined),
       route: route.description, style: executionStyle, isDryRun: false, filled: true,
@@ -2946,6 +3027,20 @@ router.post("/arb/execute-triangular", async (req, res): Promise<void> => {
 
     const triPriceSource = isBtc ? "direct" : ethSolSource;
     req.log.info({ loop, tradeUsd, estimatedProfitUsd, orderType, triPriceSource, leg1Id, leg2Id, leg3Id }, "Triangular executed");
+    // Legacy tri executor: no per-leg fill evidence is persisted here, so a
+    // completed run is recorded as ESTIMATED — it never counts toward the
+    // verified realized P&L.
+    try {
+      await db.insert(tradesTable).values({
+        pair: loop, buyExchange: "kraken", sellExchange: "kraken",
+        volume: leg1Vol.toFixed(8),
+        estimatedProfitUsd: estimatedProfitUsd.toFixed(6),
+        netEdgePct: (grossPct - TRI_TOTAL_FEES_PCT).toFixed(4),
+        isDryRun: false, krakenPrice: "0", coinbasePrice: "0",
+        buyOrderId: leg1Id || null, sellOrderId: leg3Id || null,
+        status: "estimated",
+      });
+    } catch (e) { req.log.error({ e }, "tri ledger row failed"); }
     await snapshotAccountValue(creds, "post_trade", req.log);
     res.json({
       success: true, isDryRun: false, estimatedProfitUsd,
@@ -2955,7 +3050,21 @@ router.post("/arb/execute-triangular", async (req, res): Promise<void> => {
   } catch (err) {
     req.log.error({ err, loop, orderType, leg1Id, leg2Id }, "Triangular execution error — partial state logged");
     // A leg may have been accepted before the failure — balances may have moved.
-    if (leg1Id || leg2Id || leg3Id) await snapshotAccountValue(creds, "post_trade", req.log);
+    if (leg1Id || leg2Id || leg3Id) {
+      try {
+        await db.insert(tradesTable).values({
+          pair: `${loop} [FAILED: ${(err as Error).message.slice(0, 120)}]`,
+          buyExchange: "kraken", sellExchange: "kraken",
+          volume: leg1Vol.toFixed(8),
+          estimatedProfitUsd: estimatedProfitUsd.toFixed(6),
+          netEdgePct: "0",
+          isDryRun: false, krakenPrice: "0", coinbasePrice: "0",
+          buyOrderId: leg1Id || null, sellOrderId: leg3Id || null,
+          status: "failed",
+        });
+      } catch (e) { req.log.error({ e }, "tri FAILED ledger row failed"); }
+      await snapshotAccountValue(creds, "post_trade", req.log);
+    }
     res.status(500).json({ error: (err as Error).message, leg1OrderId: leg1Id || null, leg2OrderId: leg2Id || null });
   }
 });
@@ -3207,6 +3316,7 @@ router.post("/execute-trade", async (req, res): Promise<void> => {
       isDryRun: true,
       krakenPrice: String(krakenPrice),
       coinbasePrice: String(coinbasePrice),
+      status: "simulated",
     });
     req.log.info({ tradeNumber, volume, estimatedProfitUsd, orderType: orderType ?? "market", pair }, "Dry run trade logged");
     res.json({ success: true, isDryRun: true, estimatedProfitUsd, tradeNumber, buyOrderId: null, sellOrderId: null, error: null });
@@ -3373,6 +3483,9 @@ router.post("/execute-trade", async (req, res): Promise<void> => {
       coinbasePrice: String(coinbasePrice),
       buyOrderId,
       sellOrderId,
+      // Legacy 2-exchange path: profit may fall back to the estimate when a
+      // fill price is missing — no per-leg fill proof, so never "verified".
+      status: "estimated",
     });
 
     const orderElapsedMs = Date.now() - orderTime;
@@ -3434,6 +3547,13 @@ router.get("/trades/summary", async (req, res): Promise<void> => {
       totalProfitUsd: sum(tradesTable.estimatedProfitUsd),
       avgNetEdgePct: avg(tradesTable.netEdgePct),
       bestTradeProfitUsd: max(tradesTable.estimatedProfitUsd),
+      verifiedTrades: sql<number>`COUNT(*) FILTER (WHERE ${tradesTable.status} = 'verified')`,
+      failedTrades: sql<number>`COUNT(*) FILTER (WHERE ${tradesTable.status} = 'failed')`,
+      simulatedTrades: sql<number>`COUNT(*) FILTER (WHERE ${tradesTable.status} = 'simulated' OR ${tradesTable.status} = 'estimated' OR ${tradesTable.status} IS NULL)`,
+      // Realized P&L: SUM over VERIFIED rows' realizedProfitUsd ONLY — never
+      // scanner estimates, never dry runs, never legacy rows without proof.
+      realizedPnlUsd: sql<string | null>`SUM(${tradesTable.realizedProfitUsd}) FILTER (WHERE ${tradesTable.status} = 'verified')`,
+      bestVerifiedProfitUsd: sql<string | null>`MAX(${tradesTable.realizedProfitUsd}) FILTER (WHERE ${tradesTable.status} = 'verified')`,
     })
     .from(tradesTable);
 
@@ -3450,6 +3570,11 @@ router.get("/trades/summary", async (req, res): Promise<void> => {
     totalProfitUsd: parseFloat(String(statsRow?.totalProfitUsd ?? 0)),
     avgNetEdgePct: parseFloat(String(statsRow?.avgNetEdgePct ?? 0)),
     bestTradeProfitUsd: parseFloat(String(statsRow?.bestTradeProfitUsd ?? 0)),
+    verifiedTrades: Number(statsRow?.verifiedTrades ?? 0),
+    failedTrades: Number(statsRow?.failedTrades ?? 0),
+    simulatedTrades: Number(statsRow?.simulatedTrades ?? 0),
+    realizedPnlUsd: statsRow?.realizedPnlUsd != null ? parseFloat(String(statsRow.realizedPnlUsd)) : 0,
+    bestVerifiedProfitUsd: statsRow?.bestVerifiedProfitUsd != null ? parseFloat(String(statsRow.bestVerifiedProfitUsd)) : null,
     recentTrades: recentTrades.map(t => ({
       ...t,
       pair: t.pair ?? "SOL/USD",
@@ -3714,6 +3839,7 @@ router.post("/arb/inventory-execute", async (req, res): Promise<void> => {
         isDryRun: true,
         krakenPrice: useKraken ? kba.ask.toFixed(4) : kba.bid.toFixed(4),
         coinbasePrice: useKraken ? cba.bid.toFixed(4) : cba.ask.toFixed(4),
+        status: "simulated",
       });
       req.log.info({ sym, pair, buyExchange, tradeSizeUsd, estimatedNetProfitUsd }, "Inventory execute (dry run)");
       res.json({
@@ -3874,6 +4000,7 @@ router.post("/arb/inventory-execute", async (req, res): Promise<void> => {
             volume: filledVolume.toFixed(8), estimatedProfitUsd: "0", netEdgePct: "0",
             isDryRun: false, krakenPrice: "0", coinbasePrice: "0",
             buyOrderId: buyOrderId || null, sellOrderId: sellOrderId || null,
+            status: "failed",
           });
         } catch { /* best effort */ }
       }
@@ -3889,15 +4016,22 @@ router.post("/arb/inventory-execute", async (req, res): Promise<void> => {
       return;
     }
 
-    const realizedProfitUsd = buySpendUsd > 0 && sellProceedsUsd > 0 ? sellProceedsUsd - buySpendUsd : estimatedNetProfitUsd;
+    const invVerified = buySpendUsd > 0 && sellProceedsUsd > 0 && !!buyOrderId && !!sellOrderId;
+    const realizedProfitUsd = invVerified ? sellProceedsUsd - buySpendUsd : null;
     await db.insert(tradesTable).values({
       pair: `INV:${sym} ${buyExchange}→${sellExchange}`,
       buyExchange: buyExchange.toLowerCase(), sellExchange: sellExchange.toLowerCase(),
       volume: filledVolume.toFixed(8),
-      estimatedProfitUsd: realizedProfitUsd.toFixed(6),
-      netEdgePct: (filledVolume > 0 && buySpendUsd > 0 ? (realizedProfitUsd / buySpendUsd) * 100 : netSpreadPct).toFixed(4),
+      estimatedProfitUsd: estimatedNetProfitUsd.toFixed(6), // expectation, never realized
+      netEdgePct: (filledVolume > 0 && buySpendUsd > 0 && realizedProfitUsd != null ? (realizedProfitUsd / buySpendUsd) * 100 : netSpreadPct).toFixed(4),
       isDryRun: false, krakenPrice: "0", coinbasePrice: "0",
       buyOrderId: buyOrderId || null, sellOrderId: sellOrderId || null,
+      status: invVerified ? "verified" : "estimated",
+      realizedProfitUsd: realizedProfitUsd != null ? realizedProfitUsd.toFixed(6) : null,
+      legFills: [
+        { leg: 1, label: "buy", pair, side: "buy", volume: filledVolume, costUsd: buySpendUsd, txid: buyOrderId || null },
+        { leg: 2, label: "sell", pair, side: "sell", volume: filledVolume, costUsd: sellProceedsUsd, txid: sellOrderId || null },
+      ],
     });
     await snapshotAccountValue({ krakenKey, krakenSecret, coinbaseKey, coinbaseSecret }, "post_trade", req.log);
     req.log.info({ sym, pair, tradeSizeUsd, filledVolume, buyOrderId, sellOrderId, realizedProfitUsd }, "Inventory execute LIVE — both legs confirmed");

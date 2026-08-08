@@ -32,6 +32,8 @@ type Tab = "executions" | "triangular";
 
 export default function Trades() {
   const [tab, setTab] = useState<Tab>("executions");
+  const [statusFilter, setStatusFilter] = useState<"all" | "verified" | "failed" | "simulated">("all");
+  const [expandedId, setExpandedId] = useState<number | null>(null);
   const [triPage, setTriPage] = useState(0);
   const [execPage, setExecPage] = useState(0);
   // Applied (clamped) trade size driving the query, plus the raw input text so
@@ -112,8 +114,13 @@ export default function Trades() {
           </Card>
           <Card className="bg-primary text-primary-foreground border-primary">
             <CardContent className="p-4 flex flex-col gap-1">
-              <span className="text-xs font-bold uppercase opacity-80">Total Profit</span>
-              <span className="text-2xl font-mono font-bold">${summary?.totalProfitUsd.toFixed(2) || "0.00"}</span>
+              <span className="text-xs font-bold uppercase opacity-80">Realized P&L (Verified)</span>
+              <span className="text-2xl font-mono font-bold" data-testid="text-realized-pnl-card">
+                ${(summary?.realizedPnlUsd ?? 0).toFixed(2)}
+              </span>
+              <span className="text-[10px] font-mono opacity-80">
+                {summary?.verifiedTrades ?? 0} verified · {summary?.failedTrades ?? 0} failed · {summary?.simulatedTrades ?? 0} sim/est
+              </span>
             </CardContent>
           </Card>
         </div>
@@ -158,6 +165,21 @@ export default function Trades() {
           <CardHeader className="py-3">
             <CardTitle className="text-sm flex items-center gap-2">
               <BarChart2 className="h-4 w-4" /> Execution History
+              <span className="flex gap-1 ml-2">
+                {([["all","ALL"],["verified","✓ VERIFIED"],["failed","✗ FAILED"],["simulated","🧪 SIM/EST"]] as const).map(([v, label]) => (
+                  <button
+                    key={v}
+                    onClick={() => setStatusFilter(v)}
+                    data-testid={`filter-${v}`}
+                    className={cn(
+                      "text-[10px] font-mono font-bold px-1.5 py-0.5 border transition-colors",
+                      statusFilter === v ? "border-primary text-primary bg-primary/10" : "border-border text-muted-foreground hover:text-foreground",
+                    )}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </span>
               {execTotal > 0 && (
                 <span className="ml-auto text-xs text-muted-foreground font-normal font-mono">
                   Showing {execRangeStart}–{execRangeEnd} of {execTotal}
@@ -184,17 +206,38 @@ export default function Trades() {
                   </tr>
                 </thead>
                 <tbody className="divide-y-2 divide-border">
-                  {trades.map((trade) => (
-                    <tr key={trade.id} className="hover:bg-muted/30 transition-colors">
+                  {trades.filter(t => {
+                    if (statusFilter === "all") return true;
+                    if (statusFilter === "verified") return t.status === "verified";
+                    if (statusFilter === "failed") return t.status === "failed";
+                    return t.status === "simulated" || t.status === "estimated" || t.status == null;
+                  }).map((trade) => {
+                    const verified = trade.status === "verified";
+                    const failed = trade.status === "failed";
+                    const fills = Array.isArray(trade.legFills) ? trade.legFills : [];
+                    const expanded = expandedId === trade.id;
+                    return (
+                    <React.Fragment key={trade.id}>
+                    <tr
+                      className="hover:bg-muted/30 transition-colors cursor-pointer"
+                      onClick={() => setExpandedId(expanded ? null : trade.id)}
+                      data-testid={`row-trade-${trade.id}`}
+                    >
                       <td className="px-4 py-3 text-muted-foreground">
                         {format(new Date(trade.createdAt), "MM/dd HH:mm:ss")}
                       </td>
                       <td className="px-4 py-3">
-                        {trade.isDryRun ? (
-                          <Badge variant="secondary" className="text-[10px]">DRY RUN</Badge>
-                        ) : (
-                          <Badge variant="default" className="text-[10px]">LIVE</Badge>
-                        )}
+                        <span className="flex items-center gap-1.5">
+                          {verified ? (
+                            <Badge className="text-[10px] bg-success text-success-foreground hover:bg-success">✓ VERIFIED</Badge>
+                          ) : failed ? (
+                            <Badge variant="destructive" className="text-[10px]">✗ FAILED</Badge>
+                          ) : trade.isDryRun || trade.status === "simulated" ? (
+                            <Badge variant="secondary" className="text-[10px]">🧪 SIMULATED</Badge>
+                          ) : (
+                            <Badge variant="outline" className="text-[10px]">EST (LEGACY)</Badge>
+                          )}
+                        </span>
                       </td>
                       <td className="px-4 py-3">
                         <span className="text-[10px] font-mono font-bold px-1.5 py-0.5 border border-border text-muted-foreground">{trade.pair ?? "SOL/USD"}</span>
@@ -216,12 +259,47 @@ export default function Trades() {
                         </span>
                       </td>
                       <td className="px-4 py-3 text-right font-bold">
-                        <span className={cn(trade.estimatedProfitUsd > 0 ? "text-success" : trade.estimatedProfitUsd < 0 ? "text-destructive" : "")}>
-                          ${trade.estimatedProfitUsd.toFixed(2)}
-                        </span>
+                        {verified && trade.realizedProfitUsd != null ? (
+                          <span className={cn(trade.realizedProfitUsd > 0 ? "text-success" : trade.realizedProfitUsd < 0 ? "text-destructive" : "")}>
+                            ${trade.realizedProfitUsd.toFixed(4)}
+                          </span>
+                        ) : (
+                          <span className="text-muted-foreground" title="Estimate only — not verified realized profit">
+                            ~${trade.estimatedProfitUsd.toFixed(2)}
+                          </span>
+                        )}
                       </td>
                     </tr>
-                  ))}
+                    {expanded && (
+                      <tr className="bg-muted/20">
+                        <td colSpan={7} className="px-6 py-3 text-xs">
+                          {fills.length > 0 ? (
+                            <div className="flex flex-col gap-1">
+                              <span className="font-bold uppercase text-[10px] text-muted-foreground">Confirmed exchange fills</span>
+                              {fills.map((f: any, fi: number) => (
+                                <div key={fi} className="flex flex-wrap gap-x-4 gap-y-0.5">
+                                  <span className="font-bold">leg {f.leg}{f.taker ? " (taker)" : ""}{f.unwind ? " (unwind)" : ""}</span>
+                                  <span>{f.side} {f.pair}</span>
+                                  <span>vol {Number(f.volume).toFixed(8)}</span>
+                                  {f.price != null && <span>@ {Number(f.price).toFixed(6)}</span>}
+                                  {f.fee != null && <span>fee ${Number(f.fee).toFixed(6)}</span>}
+                                  <span className="text-muted-foreground">order {f.txid || "—"}</span>
+                                </div>
+                              ))}
+                            </div>
+                          ) : (
+                            <div className="flex flex-col gap-0.5 text-muted-foreground">
+                              <span>No per-leg fill data recorded for this row{trade.status === "estimated" || trade.status == null ? " (legacy record — cannot be verified)" : ""}.</span>
+                              {(trade.buyOrderId || trade.sellOrderId) && (
+                                <span>Order IDs: {[trade.buyOrderId, trade.sellOrderId].filter(Boolean).join(" / ")}</span>
+                              )}
+                            </div>
+                          )}
+                        </td>
+                      </tr>
+                    )}
+                    </React.Fragment>
+                  );})}
                 </tbody>
               </table>
             )}

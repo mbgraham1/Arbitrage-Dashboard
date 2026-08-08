@@ -192,7 +192,22 @@ export const ListTradesResponseItem = zod.object({
   "krakenPrice": zod.number(),
   "coinbasePrice": zod.number(),
   "buyOrderId": zod.string().nullish(),
-  "sellOrderId": zod.string().nullish()
+  "sellOrderId": zod.string().nullish(),
+  "status": zod.string().nullish().describe('Ledger classification: verified (every leg has confirmed exchange fill data + order IDs; realizedProfitUsd is real), failed (live attempt that did not complete, incl. unwinds), simulated (dry runs \/ scanner estimates), estimated (legacy live rows without per-leg fill proof). Null on very old rows.\n'),
+  "realizedProfitUsd": zod.number().nullish().describe('Realized P&L from ACTUAL confirmed fills, fee-inclusive. Only on verified rows.'),
+  "legFills": zod.array(zod.object({
+  "leg": zod.number().optional(),
+  "label": zod.string().optional(),
+  "pair": zod.string().optional(),
+  "side": zod.string().optional(),
+  "price": zod.number().nullish(),
+  "volume": zod.number().optional(),
+  "costUsd": zod.number().optional(),
+  "fee": zod.number().optional(),
+  "txid": zod.string().nullish(),
+  "taker": zod.boolean().optional(),
+  "unwind": zod.boolean().optional()
+})).nullish().describe('Per-leg confirmed fill evidence (actual price, volume, fee, exchange order ID).')
 })
 export const ListTradesResponse = zod.array(ListTradesResponseItem)
 
@@ -734,6 +749,11 @@ export const GetTradeSummaryResponse = zod.object({
   "totalProfitUsd": zod.number(),
   "avgNetEdgePct": zod.number(),
   "bestTradeProfitUsd": zod.number(),
+  "verifiedTrades": zod.number().optional().describe('Rows where every leg has confirmed exchange fill data + order IDs.'),
+  "failedTrades": zod.number().optional().describe('Live attempts that did not complete (incl. unwinds).'),
+  "simulatedTrades": zod.number().optional().describe('Dry runs, scanner estimates, and legacy rows without fill proof.'),
+  "realizedPnlUsd": zod.number().optional().describe('SUM of realizedProfitUsd over VERIFIED rows only — real money, never estimates.'),
+  "bestVerifiedProfitUsd": zod.number().nullish(),
   "recentTrades": zod.array(zod.object({
   "id": zod.number(),
   "createdAt": zod.string(),
@@ -747,7 +767,22 @@ export const GetTradeSummaryResponse = zod.object({
   "krakenPrice": zod.number(),
   "coinbasePrice": zod.number(),
   "buyOrderId": zod.string().nullish(),
-  "sellOrderId": zod.string().nullish()
+  "sellOrderId": zod.string().nullish(),
+  "status": zod.string().nullish().describe('Ledger classification: verified (every leg has confirmed exchange fill data + order IDs; realizedProfitUsd is real), failed (live attempt that did not complete, incl. unwinds), simulated (dry runs \/ scanner estimates), estimated (legacy live rows without per-leg fill proof). Null on very old rows.\n'),
+  "realizedProfitUsd": zod.number().nullish().describe('Realized P&L from ACTUAL confirmed fills, fee-inclusive. Only on verified rows.'),
+  "legFills": zod.array(zod.object({
+  "leg": zod.number().optional(),
+  "label": zod.string().optional(),
+  "pair": zod.string().optional(),
+  "side": zod.string().optional(),
+  "price": zod.number().nullish(),
+  "volume": zod.number().optional(),
+  "costUsd": zod.number().optional(),
+  "fee": zod.number().optional(),
+  "txid": zod.string().nullish(),
+  "taker": zod.boolean().optional(),
+  "unwind": zod.boolean().optional()
+})).nullish().describe('Per-leg confirmed fill evidence (actual price, volume, fee, exchange order ID).')
 }))
 })
 
