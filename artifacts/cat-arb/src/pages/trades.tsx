@@ -9,11 +9,46 @@ import { cn } from "@/lib/utils";
 
 const TRI_PAGE_SIZE = 100;
 
+const TRI_SIZE_STORAGE_KEY = "tri-counterfactual-trade-size-usd";
+const TRI_SIZE_MIN = 100;
+const TRI_SIZE_MAX = 10_000;
+const TRI_SIZE_DEFAULT = 1000;
+
+function loadStoredTriSize(): number {
+  try {
+    const raw = localStorage.getItem(TRI_SIZE_STORAGE_KEY);
+    if (raw == null) return TRI_SIZE_DEFAULT;
+    const n = Number(raw);
+    if (!Number.isFinite(n)) return TRI_SIZE_DEFAULT;
+    return Math.min(TRI_SIZE_MAX, Math.max(TRI_SIZE_MIN, n));
+  } catch {
+    return TRI_SIZE_DEFAULT;
+  }
+}
+
 type Tab = "executions" | "triangular";
 
 export default function Trades() {
   const [tab, setTab] = useState<Tab>("executions");
   const [triPage, setTriPage] = useState(0);
+  // Applied (clamped) trade size driving the query, plus the raw input text so
+  // the user can type freely before the value is committed on blur/Enter.
+  const [triSizeUsd, setTriSizeUsd] = useState<number>(() => loadStoredTriSize());
+  const [triSizeInput, setTriSizeInput] = useState<string>(() => String(loadStoredTriSize()));
+
+  const commitTriSize = () => {
+    const n = Number(triSizeInput);
+    const next = Number.isFinite(n) && triSizeInput.trim() !== ""
+      ? Math.min(TRI_SIZE_MAX, Math.max(TRI_SIZE_MIN, n))
+      : triSizeUsd;
+    setTriSizeUsd(next);
+    setTriSizeInput(String(next));
+    try {
+      localStorage.setItem(TRI_SIZE_STORAGE_KEY, String(next));
+    } catch {
+      // localStorage unavailable (private mode) — value still applies for the session
+    }
+  };
 
   const tradesQuery = useListTrades();
   const summaryQuery = useGetTradeSummary();
@@ -22,7 +57,7 @@ export default function Trades() {
     { refetchInterval: 30_000, enabled: tab === "triangular" },
   );
   const triSummaryQuery = useGetTriangularHistorySummary(
-    { tradeSizeUsd: 1000 },
+    { tradeSizeUsd: triSizeUsd },
     { refetchInterval: 30_000, enabled: tab === "triangular" },
   );
 
@@ -214,7 +249,22 @@ export default function Trades() {
               <span className="text-2xl font-mono font-bold">
                 {triSummary ? `$${triSummary.counterfactualPnlUsd.toFixed(2)}` : "—"}
               </span>
-              <span className="text-[10px] opacity-70 font-mono">@ $1k/trade</span>
+              <label className="flex items-center gap-1.5 text-[10px] opacity-80 font-mono">
+                @ $
+                <input
+                  type="number"
+                  min={TRI_SIZE_MIN}
+                  max={TRI_SIZE_MAX}
+                  step={100}
+                  value={triSizeInput}
+                  onChange={(e) => setTriSizeInput(e.target.value)}
+                  onBlur={commitTriSize}
+                  onKeyDown={(e) => { if (e.key === "Enter") (e.target as HTMLInputElement).blur(); }}
+                  aria-label="Assumed trade size in USD"
+                  className="w-20 bg-primary-foreground/10 border border-primary-foreground/30 rounded px-1.5 py-0.5 text-[11px] font-mono font-bold text-primary-foreground focus:outline-none focus:border-primary-foreground/70"
+                />
+                /trade
+              </label>
             </CardContent>
           </Card>
         </div>
