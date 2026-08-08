@@ -10,6 +10,8 @@ import type { DiscoveryRow } from './discoveryRow';
 
 export interface DiscoveryResult {
   at?: string;
+  bestExecutable?: DiscoveryRow | null;
+  bestNearMiss?: DiscoveryRow | null;
   sizes?: number[];
   executionCapUsd?: number;
   feesNote?: string;

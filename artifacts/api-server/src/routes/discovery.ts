@@ -25,6 +25,7 @@ import { MmScanBody } from "@workspace/api-zod";
 import { VENUES, fetchAllVenueBooks, getVenueErrors, walkBuyUsd, walkSellQty, type VenueBook } from "../lib/venues";
 import { getStreamBook, getCoinbaseStreamBook } from "../lib/book-stream";
 import { OB_USD_PAIRS, type ObAsset } from "../lib/order-book";
+import { projectCbMakerHedge, projectMakerHedge, type MmDirection } from "../lib/cross-mm";
 import { detectFees, fetchBalances, krakenCodesFor, type Fees, type Balances } from "./cb-maker-hedge";
 
 const router: IRouter = Router();
@@ -35,7 +36,7 @@ const ASSETS = [
 ] as const satisfies readonly ObAsset[];
 type Asset = typeof ASSETS[number];
 
-const SIZES = [10, 50, 100] as const;
+const SIZES = [5, 10, 25, 50, 100, 250] as const; // sweep — optimal size is where net peaks (fees scale linearly, slippage doesn't)
 const EXEC_SIZE = 10;                 // live validation cap — larger sizes are projections only
 const SAFETY_BUFFER_USD_PER_10 = 0.02; // scaled linearly with size
 const MAX_STREAM_AGE_MS = 5_000;      // live-venue stream books must be recent
@@ -48,17 +49,47 @@ type VenueLeg = {
 };
 
 type SizeNet = { sizeUsd: number; grossEdgeUsd: number | null; feesUsd: number | null; slippageUsd: number | null; basisHaircutUsd: number | null; netUsd: number | null };
+type BlockedBy = "NONE" | "NO_EDGE" | "BLOCKED_BY_FEES" | "INSUFFICIENT_INVENTORY" | "NEEDS_KEYS" | "NEEDS_ACCOUNT";
 type DiscRow = {
   asset: Asset; buyVenue: string; sellVenue: string;
+  structure: "taker-taker" | "cb-maker-hedge" | "kraken-maker-hedge";
   quoteNote: string;
   buyTakerPct: number; sellTakerPct: number; feeSource: string;
   nets: SizeNet[];
   net10: number | null;
+  /** Size (from the sweep) where net peaks, and the net there. Live execution stays capped at $10. */
+  bestSizeUsd: number | null; bestNetUsd: number | null;
+  costsAtBest: { feesUsd: number; slippageUsd: number; basisHaircutUsd: number; bufferUsd: number } | null;
   category: "executable_now" | "requires_setup" | "not_profitable";
+  blockedBy: BlockedBy;
   requirement: string;
   coinbaseFeeIsBlocker: boolean;
   seenPositiveScans: number;
 };
+
+function bestOfSweep(nets: SizeNet[]): { size: number | null; net: number | null; costs: DiscRow["costsAtBest"] } {
+  let best: SizeNet | null = null;
+  for (const n of nets) if (n.netUsd != null && (best == null || n.netUsd > (best.netUsd ?? -1e9))) best = n;
+  if (!best || best.netUsd == null) return { size: null, net: null, costs: null };
+  return {
+    size: best.sizeUsd, net: best.netUsd,
+    costs: { feesUsd: best.feesUsd ?? 0, slippageUsd: best.slippageUsd ?? 0, basisHaircutUsd: best.basisHaircutUsd ?? 0, bufferUsd: SAFETY_BUFFER_USD_PER_10 * (best.sizeUsd / 10) },
+  };
+}
+
+function blockedByOf(net10: number | null, nets: SizeNet[], category: DiscRow["category"], liveOnly: boolean, hasFees: boolean): BlockedBy {
+  if (category === "executable_now") return "NONE";
+  const anyPositive = nets.some(n => (n.netUsd ?? -1) > 0);
+  if (!anyPositive) {
+    // negative everywhere — judge fees-vs-edge at the BEST (least negative) size.
+    let n: SizeNet | null = null;
+    for (const x of nets) if (x.netUsd != null && (n == null || x.netUsd > (n.netUsd ?? -1e9))) n = x;
+    if (n && n.grossEdgeUsd != null && n.feesUsd != null && n.grossEdgeUsd > 0 && n.feesUsd > n.grossEdgeUsd) return "BLOCKED_BY_FEES";
+    return "NO_EDGE";
+  }
+  if (liveOnly) return hasFees ? "INSUFFICIENT_INVENTORY" : "NEEDS_KEYS";
+  return "NEEDS_ACCOUNT";
+}
 
 // Persistence tracking: consecutive scans a route stayed net-positive at $10.
 const positiveStreak = new Map<string, number>();
@@ -168,28 +199,114 @@ router.post("/arb/discovery", async (req, res): Promise<void> => {
         coinbaseFeeIsBlocker = net10 + cbLegFee10 - EXEC_SIZE * 0.001 > 0; // would flip positive at a 0.10% tier
       }
 
+      const sweep = bestOfSweep(nets);
       rows.push({
         asset, buyVenue: buy.name, sellVenue: sell.name,
+        structure: "taker-taker",
         quoteNote: [buy, sell].some(l => l.quote === "USDT") ? "USDT-quoted leg(s) — basis haircut applied" : "USD",
         buyTakerPct: buy.takerPct, sellTakerPct: sell.takerPct,
         feeSource: buy.feeSource === "detected" && sell.feeSource === "detected" ? "detected" : buy.feeSource === "assumed" && sell.feeSource === "assumed" ? "assumed" : "mixed",
         nets, net10,
-        category, requirement, coinbaseFeeIsBlocker,
+        bestSizeUsd: sweep.size, bestNetUsd: sweep.net, costsAtBest: sweep.costs,
+        category, blockedBy: blockedByOf(net10, nets, category, liveOnly, !!fees), requirement, coinbaseFeeIsBlocker,
         seenPositiveScans: streak,
       });
     }
   }
 
+  // 2b. MAKER-HEDGE structures on the live venues — the lowest-fee routes we
+  // can actually execute (maker fee on one leg instead of two taker fees).
+  // Uses YOUR detected maker tiers when keys are connected; labeled entry-tier
+  // assumptions otherwise (then never executable_now).
+  const ASSUMED_CB_MAKER = 0.60, ASSUMED_K_MAKER = 0.16, ASSUMED_K_TAKER = 0.40, ASSUMED_CB_TAKER = 1.20;
+  for (const asset of ASSETS) {
+    for (const direction of ["buy", "sell"] as MmDirection[]) {
+      const structures = [
+        { st: "cb-maker-hedge" as const, makerVenue: "Coinbase (maker)", hedgeVenue: "Kraken (taker)", makerPct: fees ? fees.cbMakerPct : ASSUMED_CB_MAKER, hedgePct: fees ? fees.kTakerPct : ASSUMED_K_TAKER,
+          proj: (sz: number, mk: number, hg: number) => projectCbMakerHedge(asset, direction, sz, mk, hg) },
+        { st: "kraken-maker-hedge" as const, makerVenue: "Kraken (maker)", hedgeVenue: "Coinbase (taker)", makerPct: fees ? (fees.kMakerPct ?? ASSUMED_K_MAKER) : ASSUMED_K_MAKER, hedgePct: fees ? fees.cbTakerPct : ASSUMED_CB_TAKER,
+          proj: (sz: number, mk: number, hg: number) => projectMakerHedge(asset, direction, sz, mk, hg) },
+      ];
+      for (const { st, makerVenue, hedgeVenue, makerPct, hedgePct, proj } of structures) {
+        const nets: SizeNet[] = SIZES.map(sz => {
+          const p = proj(sz, makerPct, hedgePct);
+          const buffer = SAFETY_BUFFER_USD_PER_10 * (sz / 10);
+          if (!p) return { sizeUsd: sz, grossEdgeUsd: null, feesUsd: null, slippageUsd: null, basisHaircutUsd: null, netUsd: null };
+          return {
+            sizeUsd: sz,
+            grossEdgeUsd: p.projectedNetUsd + p.makerFeeUsd + p.hedgeFeeUsd + p.hedgeSlippageUsd,
+            feesUsd: p.makerFeeUsd + p.hedgeFeeUsd,
+            slippageUsd: p.hedgeSlippageUsd,
+            basisHaircutUsd: 0,
+            netUsd: p.projectedNetUsd - buffer,
+          };
+        });
+        const net10 = nets.find(n => n.sizeUsd === 10)?.netUsd ?? null;
+        if (net10 == null && nets.every(n => n.netUsd == null)) continue;
+        const key = `${asset}:${st}:${direction}`;
+        const streak = (net10 ?? -1) > 0 ? (positiveStreak.get(key) ?? 0) + 1 : 0;
+        if (streak > 0) positiveStreak.set(key, streak); else positiveStreak.delete(key);
+
+        // Inventory at the $10 live cap (maker side funds + hedge side inventory).
+        let category: DiscRow["category"]; let requirement: string;
+        if ((net10 ?? -1) <= 0) {
+          category = "not_profitable";
+          requirement = "none — fees + slippage exceed the edge";
+        } else if (fees && bal) {
+          const p10 = proj(EXEC_SIZE, makerPct, hedgePct);
+          const qty = p10?.makerQty ?? 0;
+          const kAsset = krakenCodesFor(asset).reduce((a2, code) => a2 + (bal!.kAssets.get(code) ?? 0), 0);
+          const cbAsset = bal.cbAssets.get(asset) ?? 0;
+          const cbIsMaker = st === "cb-maker-hedge";
+          const usdOk = direction === "buy" ? (cbIsMaker ? bal.cbUsd : bal.kUsd) >= EXEC_SIZE * 1.02 : (cbIsMaker ? bal.kUsd : bal.cbUsd) >= EXEC_SIZE * 1.02;
+          const assetOk = direction === "buy" ? (cbIsMaker ? kAsset : cbAsset) >= qty * 1.02 : (cbIsMaker ? cbAsset : kAsset) >= qty * 1.02;
+          if (usdOk && assetOk) { category = "executable_now"; requirement = `ready — maker on ${makerVenue}, hedge on ${hedgeVenue}; execution stays $10-capped, post-only + confirmed-fill hedge`; }
+          else { category = "requires_setup"; requirement = !usdOk ? `needs ~$${(EXEC_SIZE * 1.02).toFixed(2)} USD on the ${direction === "buy" ? (cbIsMaker ? "Coinbase" : "Kraken") : (cbIsMaker ? "Kraken" : "Coinbase")} side` : `needs ~${(qty * 1.02).toFixed(6)} ${asset} pre-positioned for the hedge`; }
+        } else {
+          category = "requires_setup";
+          requirement = "connect Kraken + Coinbase API keys — maker tiers must be YOUR detected tiers before this can be executable";
+        }
+        const sweep = bestOfSweep(nets);
+        rows.push({
+          asset, buyVenue: makerVenue, sellVenue: hedgeVenue,
+          structure: st,
+          quoteNote: `USD · ${direction} side · maker-post + confirmed-fill hedge`,
+          buyTakerPct: makerPct, sellTakerPct: hedgePct,
+          feeSource: fees ? "detected" : "assumed",
+          nets, net10,
+          bestSizeUsd: sweep.size, bestNetUsd: sweep.net, costsAtBest: sweep.costs,
+          category, blockedBy: blockedByOf(net10, nets, category, true, !!fees), requirement,
+          coinbaseFeeIsBlocker: false,
+          seenPositiveScans: streak,
+        });
+      }
+    }
+  }
+
   // 3. Rank: persistent, low-fee, high-net first.
-  const rank = (a: DiscRow, b: DiscRow) =>
+  // Executable candidates are ranked by the buffer-inclusive $10 net — the
+  // ONLY size live execution can use. Larger-size sweep results are research
+  // projections and rank only the research lists.
+  const rankExec = (a: DiscRow, b: DiscRow) =>
     (b.net10 ?? -1e9) - (a.net10 ?? -1e9) || b.seenPositiveScans - a.seenPositiveScans;
-  const executable = rows.filter(r => r.category === "executable_now").sort(rank).slice(0, 10);
+  const rank = (a: DiscRow, b: DiscRow) =>
+    (b.bestNetUsd ?? -1e9) - (a.bestNetUsd ?? -1e9) || b.seenPositiveScans - a.seenPositiveScans;
+  const executable = rows.filter(r => r.category === "executable_now").sort(rankExec).slice(0, 10);
   const setup = rows.filter(r => r.category === "requires_setup").sort(rank).slice(0, 15);
   const notProf = rows.filter(r => r.category === "not_profitable").sort(rank).slice(0, 10);
   const errors = getVenueErrors();
 
+  // Verdicts: the single best executable route, and the best near-miss on the
+  // live venues (closest to positive), with its exact shortfall and blocker.
+  const bestExecutable = executable[0] ?? null;
+  const liveRows = rows.filter(r => r.structure !== "taker-taker" || (["Kraken", "Coinbase"].includes(r.buyVenue) && ["Kraken", "Coinbase"].includes(r.sellVenue)));
+  const nearMisses = liveRows.filter(r => r.category !== "executable_now" && r.net10 != null).sort(rankExec);
+  const bestNearMiss = nearMisses[0] ?? null;
+
   res.json({
     at: new Date().toISOString(),
+    bestExecutable,
+    bestNearMiss,
     sizes: SIZES,
     executionCapUsd: EXEC_SIZE,
     feesNote: hasCreds && fees

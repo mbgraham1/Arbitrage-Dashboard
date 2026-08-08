@@ -912,6 +912,13 @@ export interface DiscoverySizeNet {
   netUsd?: number | null;
 }
 
+export type DiscoveryRowCostsAtBest = {
+  feesUsd?: number;
+  slippageUsd?: number;
+  basisHaircutUsd?: number;
+  bufferUsd?: number;
+} | null;
+
 export interface DiscoveryRow {
   asset?: string;
   buyVenue?: string;
@@ -923,6 +930,14 @@ export interface DiscoveryRow {
   feeSource?: string;
   nets?: DiscoverySizeNet[];
   net10?: number | null;
+  /** taker-taker | cb-maker-hedge | kraken-maker-hedge */
+  structure?: string;
+  /** size from the sweep where net peaks — projection only; live execution stays $10-capped */
+  bestSizeUsd?: number | null;
+  bestNetUsd?: number | null;
+  costsAtBest?: DiscoveryRowCostsAtBest;
+  /** NONE | NO_EDGE | BLOCKED_BY_FEES | INSUFFICIENT_INVENTORY | NEEDS_KEYS | NEEDS_ACCOUNT */
+  blockedBy?: string;
   /** executable_now | requires_setup | not_profitable */
   category?: string;
   requirement?: string;
@@ -941,6 +956,8 @@ export type DiscoveryResultVenuesItem = {
 
 export interface DiscoveryResult {
   at?: string;
+  bestExecutable?: DiscoveryRow | null;
+  bestNearMiss?: DiscoveryRow | null;
   sizes?: number[];
   executionCapUsd?: number;
   feesNote?: string;

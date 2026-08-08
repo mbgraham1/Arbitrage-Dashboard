@@ -1119,6 +1119,70 @@ export const DiscoveryScanBody = zod.object({
 
 export const DiscoveryScanResponse = zod.object({
   "at": zod.string().optional(),
+  "bestExecutable": zod.object({
+  "asset": zod.string().optional(),
+  "buyVenue": zod.string().optional(),
+  "sellVenue": zod.string().optional(),
+  "quoteNote": zod.string().optional(),
+  "buyTakerPct": zod.number().optional(),
+  "sellTakerPct": zod.number().optional(),
+  "feeSource": zod.string().optional().describe('detected | assumed | mixed'),
+  "nets": zod.array(zod.object({
+  "sizeUsd": zod.number().optional(),
+  "grossEdgeUsd": zod.number().nullish(),
+  "feesUsd": zod.number().nullish(),
+  "slippageUsd": zod.number().nullish(),
+  "basisHaircutUsd": zod.number().nullish(),
+  "netUsd": zod.number().nullish()
+})).optional(),
+  "net10": zod.number().nullish(),
+  "structure": zod.string().optional().describe('taker-taker | cb-maker-hedge | kraken-maker-hedge'),
+  "bestSizeUsd": zod.number().nullish().describe('size from the sweep where net peaks — projection only; live execution stays $10-capped'),
+  "bestNetUsd": zod.number().nullish(),
+  "costsAtBest": zod.object({
+  "feesUsd": zod.number().optional(),
+  "slippageUsd": zod.number().optional(),
+  "basisHaircutUsd": zod.number().optional(),
+  "bufferUsd": zod.number().optional()
+}).nullish(),
+  "blockedBy": zod.string().optional().describe('NONE | NO_EDGE | BLOCKED_BY_FEES | INSUFFICIENT_INVENTORY | NEEDS_KEYS | NEEDS_ACCOUNT'),
+  "category": zod.string().optional().describe('executable_now | requires_setup | not_profitable'),
+  "requirement": zod.string().optional(),
+  "coinbaseFeeIsBlocker": zod.boolean().optional(),
+  "seenPositiveScans": zod.number().optional()
+}).nullish(),
+  "bestNearMiss": zod.object({
+  "asset": zod.string().optional(),
+  "buyVenue": zod.string().optional(),
+  "sellVenue": zod.string().optional(),
+  "quoteNote": zod.string().optional(),
+  "buyTakerPct": zod.number().optional(),
+  "sellTakerPct": zod.number().optional(),
+  "feeSource": zod.string().optional().describe('detected | assumed | mixed'),
+  "nets": zod.array(zod.object({
+  "sizeUsd": zod.number().optional(),
+  "grossEdgeUsd": zod.number().nullish(),
+  "feesUsd": zod.number().nullish(),
+  "slippageUsd": zod.number().nullish(),
+  "basisHaircutUsd": zod.number().nullish(),
+  "netUsd": zod.number().nullish()
+})).optional(),
+  "net10": zod.number().nullish(),
+  "structure": zod.string().optional().describe('taker-taker | cb-maker-hedge | kraken-maker-hedge'),
+  "bestSizeUsd": zod.number().nullish().describe('size from the sweep where net peaks — projection only; live execution stays $10-capped'),
+  "bestNetUsd": zod.number().nullish(),
+  "costsAtBest": zod.object({
+  "feesUsd": zod.number().optional(),
+  "slippageUsd": zod.number().optional(),
+  "basisHaircutUsd": zod.number().optional(),
+  "bufferUsd": zod.number().optional()
+}).nullish(),
+  "blockedBy": zod.string().optional().describe('NONE | NO_EDGE | BLOCKED_BY_FEES | INSUFFICIENT_INVENTORY | NEEDS_KEYS | NEEDS_ACCOUNT'),
+  "category": zod.string().optional().describe('executable_now | requires_setup | not_profitable'),
+  "requirement": zod.string().optional(),
+  "coinbaseFeeIsBlocker": zod.boolean().optional(),
+  "seenPositiveScans": zod.number().optional()
+}).nullish(),
   "sizes": zod.array(zod.number()).optional(),
   "executionCapUsd": zod.number().optional(),
   "feesNote": zod.string().optional(),
@@ -1150,6 +1214,16 @@ export const DiscoveryScanResponse = zod.object({
   "netUsd": zod.number().nullish()
 })).optional(),
   "net10": zod.number().nullish(),
+  "structure": zod.string().optional().describe('taker-taker | cb-maker-hedge | kraken-maker-hedge'),
+  "bestSizeUsd": zod.number().nullish().describe('size from the sweep where net peaks — projection only; live execution stays $10-capped'),
+  "bestNetUsd": zod.number().nullish(),
+  "costsAtBest": zod.object({
+  "feesUsd": zod.number().optional(),
+  "slippageUsd": zod.number().optional(),
+  "basisHaircutUsd": zod.number().optional(),
+  "bufferUsd": zod.number().optional()
+}).nullish(),
+  "blockedBy": zod.string().optional().describe('NONE | NO_EDGE | BLOCKED_BY_FEES | INSUFFICIENT_INVENTORY | NEEDS_KEYS | NEEDS_ACCOUNT'),
   "category": zod.string().optional().describe('executable_now | requires_setup | not_profitable'),
   "requirement": zod.string().optional(),
   "coinbaseFeeIsBlocker": zod.boolean().optional(),
@@ -1172,6 +1246,16 @@ export const DiscoveryScanResponse = zod.object({
   "netUsd": zod.number().nullish()
 })).optional(),
   "net10": zod.number().nullish(),
+  "structure": zod.string().optional().describe('taker-taker | cb-maker-hedge | kraken-maker-hedge'),
+  "bestSizeUsd": zod.number().nullish().describe('size from the sweep where net peaks — projection only; live execution stays $10-capped'),
+  "bestNetUsd": zod.number().nullish(),
+  "costsAtBest": zod.object({
+  "feesUsd": zod.number().optional(),
+  "slippageUsd": zod.number().optional(),
+  "basisHaircutUsd": zod.number().optional(),
+  "bufferUsd": zod.number().optional()
+}).nullish(),
+  "blockedBy": zod.string().optional().describe('NONE | NO_EDGE | BLOCKED_BY_FEES | INSUFFICIENT_INVENTORY | NEEDS_KEYS | NEEDS_ACCOUNT'),
   "category": zod.string().optional().describe('executable_now | requires_setup | not_profitable'),
   "requirement": zod.string().optional(),
   "coinbaseFeeIsBlocker": zod.boolean().optional(),
@@ -1194,6 +1278,16 @@ export const DiscoveryScanResponse = zod.object({
   "netUsd": zod.number().nullish()
 })).optional(),
   "net10": zod.number().nullish(),
+  "structure": zod.string().optional().describe('taker-taker | cb-maker-hedge | kraken-maker-hedge'),
+  "bestSizeUsd": zod.number().nullish().describe('size from the sweep where net peaks — projection only; live execution stays $10-capped'),
+  "bestNetUsd": zod.number().nullish(),
+  "costsAtBest": zod.object({
+  "feesUsd": zod.number().optional(),
+  "slippageUsd": zod.number().optional(),
+  "basisHaircutUsd": zod.number().optional(),
+  "bufferUsd": zod.number().optional()
+}).nullish(),
+  "blockedBy": zod.string().optional().describe('NONE | NO_EDGE | BLOCKED_BY_FEES | INSUFFICIENT_INVENTORY | NEEDS_KEYS | NEEDS_ACCOUNT'),
   "category": zod.string().optional().describe('executable_now | requires_setup | not_profitable'),
   "requirement": zod.string().optional(),
   "coinbaseFeeIsBlocker": zod.boolean().optional(),

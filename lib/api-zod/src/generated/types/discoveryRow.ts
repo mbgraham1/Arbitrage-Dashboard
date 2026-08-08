@@ -5,6 +5,7 @@
  * CAT Arbitrage Dashboard API
  * OpenAPI spec version: 0.1.0
  */
+import type { DiscoveryRowCostsAtBest } from './discoveryRowCostsAtBest';
 import type { DiscoverySizeNet } from './discoverySizeNet';
 
 export interface DiscoveryRow {
@@ -18,6 +19,14 @@ export interface DiscoveryRow {
   feeSource?: string;
   nets?: DiscoverySizeNet[];
   net10?: number | null;
+  /** taker-taker | cb-maker-hedge | kraken-maker-hedge */
+  structure?: string;
+  /** size from the sweep where net peaks — projection only; live execution stays $10-capped */
+  bestSizeUsd?: number | null;
+  bestNetUsd?: number | null;
+  costsAtBest?: DiscoveryRowCostsAtBest;
+  /** NONE | NO_EDGE | BLOCKED_BY_FEES | INSUFFICIENT_INVENTORY | NEEDS_KEYS | NEEDS_ACCOUNT */
+  blockedBy?: string;
   /** executable_now | requires_setup | not_profitable */
   category?: string;
   requirement?: string;

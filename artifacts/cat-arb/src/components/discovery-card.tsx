@@ -14,6 +14,51 @@ import { cn } from "@/lib/utils";
 
 const fmt = (v: number | null | undefined, d = 4) => (v == null ? "—" : `$${v.toFixed(d)}`);
 
+const BLOCKER_LABEL: Record<string, string> = {
+  NONE: "clear to run",
+  NO_EDGE: "no gross edge — market too tight",
+  BLOCKED_BY_FEES: "fees exceed the gross edge",
+  INSUFFICIENT_INVENTORY: "positive net, blocked only by inventory",
+  NEEDS_KEYS: "connect API keys to verify",
+  NEEDS_ACCOUNT: "needs an account on another venue",
+};
+
+function Verdict({ row, kind }: { row: DiscoveryRow; kind: "best" | "nearmiss" }) {
+  const positive = (row.net10 ?? -1) > 0;
+  const c = row.costsAtBest;
+  return (
+    <div className={cn("rounded border p-2 space-y-1", kind === "best" && positive ? "border-green-500/60 bg-green-500/5" : "border-border bg-muted/30")}
+      data-testid={kind === "best" ? "panel-disc-best" : "panel-disc-nearmiss"}>
+      <div className="flex flex-wrap items-center gap-2">
+        <span className={cn("font-semibold", kind === "best" && positive ? "text-green-500" : "text-foreground")}>
+          {kind === "best" ? "BEST EXECUTABLE" : "BEST NEAR-MISS"}
+        </span>
+        <span>{row.asset} · {row.structure} · {row.buyVenue} → {row.sellVenue}</span>
+        <span className={cn("rounded px-1.5 py-0.5 font-semibold", (row.net10 ?? -1) > 0 ? "bg-green-500/15 text-green-500" : "bg-muted text-muted-foreground")}>
+          executable net @ $10: {fmt(row.net10)}
+        </span>
+        {row.bestSizeUsd != null && row.bestSizeUsd !== 10 && (
+          <span className="text-muted-foreground">
+            sweep peak {fmt(row.bestNetUsd)} @ ${row.bestSizeUsd} — <span className="text-amber-500">projection only; live execution is $10-capped</span>
+          </span>
+        )}
+      </div>
+      {c && (
+        <div className="text-muted-foreground">
+          costs @ optimal size: fees {fmt(c.feesUsd, 3)} · slippage {fmt(c.slippageUsd, 3)} · buffer {fmt(c.bufferUsd, 3)}{(c.basisHaircutUsd ?? 0) > 0 ? ` · basis ${fmt(c.basisHaircutUsd, 3)}` : ""}
+          {" "}· fee source: {row.feeSource}
+        </div>
+      )}
+      <div className="text-muted-foreground">
+        <span className={cn("mr-1 rounded px-1 py-0.5", row.blockedBy === "NONE" ? "bg-green-500/15 text-green-500" : row.blockedBy === "INSUFFICIENT_INVENTORY" ? "bg-orange-500/15 text-orange-500" : "bg-muted")}>
+          {BLOCKER_LABEL[row.blockedBy ?? ""] ?? row.blockedBy}
+        </span>
+        {row.requirement}
+      </div>
+    </div>
+  );
+}
+
 function RowTable({ rows, showRequirement }: { rows: DiscoveryRow[]; showRequirement: boolean }) {
   if (!rows.length) return <div className="text-muted-foreground">none</div>;
   return (
@@ -100,6 +145,8 @@ export function DiscoveryCard() {
             <div className={cn("font-semibold", (data.executableNow?.length ?? 0) > 0 ? "text-green-500" : "text-muted-foreground")} data-testid="text-disc-summary">
               {data.summary}
             </div>
+            {data.bestExecutable && <Verdict row={data.bestExecutable} kind="best" />}
+            {!data.bestExecutable && data.bestNearMiss && <Verdict row={data.bestNearMiss} kind="nearmiss" />}
             <div className="text-muted-foreground">
               {data.feesNote} {data.credNote && <span className="text-amber-500">{data.credNote}</span>}{" "}
               {(data.coinbaseFeeDrag ?? 0) > 0 && (

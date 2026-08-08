@@ -2223,6 +2223,18 @@ components:
           type: array
           items: { $ref: "#/components/schemas/DiscoverySizeNet" }
         net10: { type: number, nullable: true }
+        structure: { type: string, description: "taker-taker | cb-maker-hedge | kraken-maker-hedge" }
+        bestSizeUsd: { type: number, nullable: true, description: "size from the sweep where net peaks — projection only; live execution stays $10-capped" }
+        bestNetUsd: { type: number, nullable: true }
+        costsAtBest:
+          type: object
+          nullable: true
+          properties:
+            feesUsd: { type: number }
+            slippageUsd: { type: number }
+            basisHaircutUsd: { type: number }
+            bufferUsd: { type: number }
+        blockedBy: { type: string, description: "NONE | NO_EDGE | BLOCKED_BY_FEES | INSUFFICIENT_INVENTORY | NEEDS_KEYS | NEEDS_ACCOUNT" }
         category: { type: string, description: "executable_now | requires_setup | not_profitable" }
         requirement: { type: string }
         coinbaseFeeIsBlocker: { type: boolean }
@@ -2231,6 +2243,12 @@ components:
       type: object
       properties:
         at: { type: string }
+        bestExecutable:
+          nullable: true
+          allOf: [{ $ref: "#/components/schemas/DiscoveryRow" }]
+        bestNearMiss:
+          nullable: true
+          allOf: [{ $ref: "#/components/schemas/DiscoveryRow" }]
         sizes:
           type: array
           items: { type: number }

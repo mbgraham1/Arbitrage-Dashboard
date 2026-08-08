@@ -33,6 +33,7 @@ export * from './discoveryRequest';
 export * from './discoveryResult';
 export * from './discoveryResultVenuesItem';
 export * from './discoveryRow';
+export * from './discoveryRowCostsAtBest';
 export * from './discoverySizeNet';
 export * from './errorResponse';
 export * from './exchangeCredentials';
