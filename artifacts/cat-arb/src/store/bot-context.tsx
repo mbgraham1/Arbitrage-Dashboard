@@ -120,6 +120,13 @@ export interface BotContextType {
   obCycles: ObCycleEntry[];
   /** True while the auto-execute OB trade is in-flight */
   isAutoExecutingOb: boolean;
+  /** True while the auto-execute triangular trade is in-flight */
+  isAutoExecutingTri: boolean;
+  /**
+   * True while any cross-exchange trade (auto poll loop or forced) holds the
+   * shared execution lock. Used by the TRI card to show a "waiting" badge.
+   */
+  isExecutingCross: boolean;
   /** Route and timestamp of the last successfully auto-executed OB cycle */
   lastObAutoTrade: { route: string; timestamp: string; profitUsd: number | null } | null;
 }
@@ -246,6 +253,9 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
   const [triPriceSource, setTriPriceSource] = useState<Record<string, "direct" | "synthetic">>({});
   const [cointSignals, setCointSignals] = useState<CointegrationSignal[]>([]);
   const [isAutoExecutingOb, setIsAutoExecutingOb] = useState(false);
+  // Mirrors isExecutingRef for the auto cross-exchange executor so the UI can
+  // render a lock badge (refs don't trigger re-renders).
+  const [isAutoExecutingCross, setIsAutoExecutingCross] = useState(false);
   const [obCycles, setObCycles] = useState<ObCycleEntry[]>([]);
   const [lastObAutoTrade, setLastObAutoTrade] = useState<{ route: string; timestamp: string; profitUsd: number | null } | null>(null);
 
@@ -916,11 +926,13 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
         }
 
         isExecutingRef.current = true;
+        setIsAutoExecutingCross(true);
         lastTradeTimeRef.current = now;
         try {
           await runExecuteTrade(data, false);
         } finally {
           isExecutingRef.current = false;
+          setIsAutoExecutingCross(false);
         }
       } catch (err) {
         if (!cancelled) {
@@ -944,6 +956,7 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
   }, [isRunning]);
 
   const isExecutingTriangular = isForcingTriangular || isAutoExecutingTri || executeTriangularMutation.isPending;
+  const isExecutingCross = isForcingTrade || isAutoExecutingCross;
 
   const value: BotContextType = {
     credentials,
@@ -980,6 +993,8 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
     cointSignals,
     obCycles,
     isAutoExecutingOb,
+    isAutoExecutingTri,
+    isExecutingCross,
     lastObAutoTrade,
   };
 

@@ -152,6 +152,7 @@ export default function Dashboard() {
     emergencyStop, setEmergencyStop,
     startTime, failedTrades, sessionTradeCount, apiLatencyMs,
     triOpportunities, triPriceSource,
+    isAutoExecutingOb, isExecutingCross,
   } = useBotContext();
   const [uptimeStr, setUptimeStr] = useState("0h 0m");
   useEffect(() => {
@@ -664,7 +665,13 @@ export default function Dashboard() {
       {/* Inventory Mode Opportunities — shown only when the feature is toggled on in Config */}
       {settings.inventoryModeEnabled && <InventoryCard />}
 
-      <TriangularCard opportunities={triOpportunities} isRunning={isRunning} isExecutingTri={isExecutingTriangular} priceSource={triPriceSource} />
+      <TriangularCard
+        opportunities={triOpportunities}
+        isRunning={isRunning}
+        isExecutingTri={isExecutingTriangular}
+        priceSource={triPriceSource}
+        blockedBy={isAutoExecutingOb ? "OB" : isExecutingCross ? "CROSS" : null}
+      />
       <OrderBookHunterCard />
       <GraphEngineCard />
       <RealizedPnlCard />
@@ -892,8 +899,11 @@ function MultiCoinRankerCard({ settings }: { settings: { totalFees: number; slip
 // inventory on the expensive venue — no inter-exchange transfer needed.
 
 function InventoryCard() {
-  const { credentials, liveMode, settings, addLog } = useBotContext();
+  const { credentials, liveMode, settings, addLog, isAutoExecutingOb, isExecutingTriangular } = useBotContext();
   const executeMutation = useInventoryExecute();
+  // isExecutingTriangular covers both forced and auto TRI trades — both acquire
+  // the shared TRI execution lock that blocks cross-exchange auto-fires.
+  const crossBlockedBy = isAutoExecutingOb ? "OB" : isExecutingTriangular ? "TRI" : null;
   const [execResult, setExecResult] = useState<string | null>(null);
   const [executingAsset, setExecutingAsset] = useState<string | null>(null);
 
@@ -971,6 +981,14 @@ function InventoryCard() {
           Inventory Arb
           <span className="text-[9px] font-mono font-bold px-1 border border-primary text-primary">CROSS-EXCHANGE</span>
           <span className="text-[10px] font-mono text-muted-foreground">buy cheap · sell expensive · no transfer</span>
+          {crossBlockedBy && (
+            <span
+              className="text-[9px] font-mono font-bold px-1.5 py-0.5 rounded bg-muted text-muted-foreground border border-border animate-pulse"
+              title={`The ${crossBlockedBy} executor is holding the shared execution lock — cross-exchange auto-fires are paused until it finishes.`}
+            >
+              🔒 waiting — {crossBlockedBy} executing
+            </span>
+          )}
         </CardTitle>
         <div className="flex items-center gap-2">
           {isFetching && <RefreshCw className="h-3 w-3 animate-spin text-muted-foreground" />}
@@ -1530,11 +1548,14 @@ function TriangularCard({
   isRunning,
   isExecutingTri,
   priceSource,
+  blockedBy,
 }: {
   opportunities: Array<{ exchange: string; loop: string; profitPct: number; solUsd: number; ethUsd: number; ethSol: number; variant?: string; timestamp: string }>;
   isRunning: boolean;
   isExecutingTri?: boolean;
   priceSource?: Record<string, "direct" | "synthetic">;
+  /** Which other executor is holding the shared lock, blocking TRI auto-fires */
+  blockedBy?: "OB" | "CROSS" | null;
 }) {
   const krakenSynth = priceSource?.kraken === "synthetic";
   const coinbaseSynth = priceSource?.coinbase === "synthetic";
@@ -1607,6 +1628,14 @@ function TriangularCard({
           {isExecutingTri && (
             <span className="text-[9px] font-mono font-bold px-1.5 py-0.5 rounded bg-yellow-500/20 text-yellow-500 border border-yellow-500/50 animate-pulse">
               EXECUTING
+            </span>
+          )}
+          {!isExecutingTri && blockedBy && (
+            <span
+              className="text-[9px] font-mono font-bold px-1.5 py-0.5 rounded bg-muted text-muted-foreground border border-border animate-pulse"
+              title={`The ${blockedBy} executor is holding the shared execution lock — triangular auto-fires are paused until it finishes.`}
+            >
+              🔒 waiting — {blockedBy} executing
             </span>
           )}
         </CardTitle>
