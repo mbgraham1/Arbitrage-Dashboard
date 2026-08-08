@@ -12,6 +12,8 @@ import { getStreamTicker } from "./book-stream";
 export const PAIRS = [
   "BTC/USD", "ETH/USD", "SOL/USD", "AVAX/USD", "DOT/USD",
   "POL/USD", "LINK/USD", "UNI/USD", "ATOM/USD", "ADA/USD",
+  // Broadened liquid universe shared by Kraken AND Coinbase (cross-exchange arb)
+  "XRP/USD", "DOGE/USD", "LTC/USD", "BCH/USD", "AAVE/USD", "FIL/USD",
 ] as const;
 export type Pair = typeof PAIRS[number];
 
@@ -27,6 +29,12 @@ export const KRAKEN_REST_PAIRS: Record<Pair, string> = {
   "UNI/USD":  "UNIUSD",
   "ATOM/USD": "ATOMUSD",
   "ADA/USD":  "ADAUSD",    // Cardano — replaces FTM (no Coinbase USD market)
+  "XRP/USD":  "XRPUSD",
+  "DOGE/USD": "XDGUSD",    // Kraken legacy DOGE altname
+  "LTC/USD":  "LTCUSD",
+  "BCH/USD":  "BCHUSD",
+  "AAVE/USD": "AAVEUSD",
+  "FIL/USD":  "FILUSD",
 };
 
 /** Coinbase product IDs (dash-notation). */
@@ -41,6 +49,12 @@ export const COINBASE_PRODUCTS: Record<Pair, string> = {
   "UNI/USD":  "UNI-USD",
   "ATOM/USD": "ATOM-USD",
   "ADA/USD":  "ADA-USD",
+  "XRP/USD":  "XRP-USD",
+  "DOGE/USD": "DOGE-USD",
+  "LTC/USD":  "LTC-USD",
+  "BCH/USD":  "BCH-USD",
+  "AAVE/USD": "AAVE-USD",
+  "FIL/USD":  "FIL-USD",
 };
 
 // ---------------------------------------------------------------------------

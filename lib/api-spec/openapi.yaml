@@ -503,6 +503,44 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/AccountPnlResult"
+  /arb/inventory-imbalance:
+    get:
+      operationId: getInventoryImbalance
+      tags: [trades]
+      summary: Per-asset inventory imbalance from live cross-exchange trades
+      description: >
+        Aggregates completed LIVE cross-exchange inventory trades into per-asset
+        venue deltas (base units): buying on one venue and selling
+        pre-positioned inventory on the other shifts holdings between
+        exchanges. Bookkeeping for later rebalancing — not P&L.
+      responses:
+        "200":
+          description: Per-asset venue deltas
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [assets, note]
+                properties:
+                  assets:
+                    type: array
+                    items:
+                      type: object
+                      required: [asset, krakenDelta, coinbaseDelta, trades]
+                      properties:
+                        asset: { type: string }
+                        krakenDelta: { type: number, description: "Base units accumulated (+) or drawn down (−) on Kraken" }
+                        coinbaseDelta: { type: number }
+                        trades: { type: integer }
+                        lastTradeAt: { type: string, nullable: true }
+                  note: { type: string }
+        "500":
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
   /arb/fee-tier:
     post:
       operationId: getFeeTier

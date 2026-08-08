@@ -499,6 +499,22 @@ export const GetAccountPnlResponse = zod.object({
 
 
 /**
+ * Aggregates completed LIVE cross-exchange inventory trades into per-asset venue deltas (base units): buying on one venue and selling pre-positioned inventory on the other shifts holdings between exchanges. Bookkeeping for later rebalancing — not P&L.
+ * @summary Per-asset inventory imbalance from live cross-exchange trades
+ */
+export const GetInventoryImbalanceResponse = zod.object({
+  "assets": zod.array(zod.object({
+  "asset": zod.string(),
+  "krakenDelta": zod.number().describe('Base units accumulated (+) or drawn down (−) on Kraken'),
+  "coinbaseDelta": zod.number(),
+  "trades": zod.number(),
+  "lastTradeAt": zod.string().nullish()
+})),
+  "note": zod.string()
+})
+
+
+/**
  * Queries Kraken /0/private/TradeVolume for the caller's real taker fee on major pairs (max across pairs). Returns null when the query fails (bad keys, network) so callers can fall back to their configured assumption.
  * @summary Look up the account's actual Kraken taker fee tier
  */

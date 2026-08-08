@@ -39,6 +39,7 @@ import type {
   FeeTierResult,
   GetAllPairSnapshotsParams,
   GetGraphScanParams,
+  GetInventoryImbalance200,
   GetInventoryScanParams,
   GetObScanParams,
   GraphExecuteRequest,
@@ -1471,6 +1472,84 @@ export function useGetAccountPnl<TData = Awaited<ReturnType<typeof getAccountPnl
  ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
 
   const queryOptions = getGetAccountPnlQueryOptions(accountPnlRequest,options)
+
+  const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+
+export const getGetInventoryImbalanceUrl = () => {
+
+
+
+
+  return `/api/arb/inventory-imbalance`
+}
+
+/**
+ * Aggregates completed LIVE cross-exchange inventory trades into per-asset venue deltas (base units): buying on one venue and selling pre-positioned inventory on the other shifts holdings between exchanges. Bookkeeping for later rebalancing — not P&L.
+ * @summary Per-asset inventory imbalance from live cross-exchange trades
+ */
+export const getInventoryImbalance = async ( options?: RequestInit): Promise<GetInventoryImbalance200> => {
+
+  return customFetch<GetInventoryImbalance200>(getGetInventoryImbalanceUrl(),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getGetInventoryImbalanceQueryKey = () => {
+    return [
+    `/api/arb/inventory-imbalance`
+    ] as const;
+    }
+
+
+export const getGetInventoryImbalanceQueryOptions = <TData = Awaited<ReturnType<typeof getInventoryImbalance>>, TError = ErrorType<ErrorResponse>>( options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getInventoryImbalance>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getGetInventoryImbalanceQueryKey();
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof getInventoryImbalance>>> = ({ signal }) => getInventoryImbalance({ signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof getInventoryImbalance>>, TError, TData> & { queryKey: QueryKey }
+}
+
+export type GetInventoryImbalanceQueryResult = NonNullable<Awaited<ReturnType<typeof getInventoryImbalance>>>
+export type GetInventoryImbalanceQueryError = ErrorType<ErrorResponse>
+
+
+/**
+ * @summary Per-asset inventory imbalance from live cross-exchange trades
+ */
+
+export function useGetInventoryImbalance<TData = Awaited<ReturnType<typeof getInventoryImbalance>>, TError = ErrorType<ErrorResponse>>(
+  options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getInventoryImbalance>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+
+ ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+
+  const queryOptions = getGetInventoryImbalanceQueryOptions(options)
 
   const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
 

@@ -1,0 +1,121 @@
+/**
+ * cross-pricing.ts — executor-grade pricing for 2-leg Kraken↔Coinbase
+ * inventory-arbitrage routes (buy asset on the cheaper venue, sell existing
+ * inventory on the dearer venue; no transfer during execution).
+ *
+ * Same standard as the Kraken triangle simulator:
+ *  - LIVE timestamped in-memory books on BOTH venues (Kraken WS book channel,
+ *    Coinbase level2_batch) — no REST in the pricing path.
+ *  - Depth-walked VWAP fills, per-venue taker fees on notional, slippage vs
+ *    top-of-book, per-leg ages (oldest leg = route age), and a snapshot
+ *    identity (marketUpdateMs) so scanner and pre-fire numbers can be compared
+ *    on the SAME books (consistency gate).
+ */
+
+import { getStreamBook, getCoinbaseStreamBook } from "./book-stream";
+import { OB_USD_PAIRS, type ObAsset, type LegAge } from "./order-book";
+
+type Level = [number, number];
+
+export interface CrossLegDiag { venue: "kraken" | "coinbase"; pair: string; side: "buy" | "sell"; topPx: number; vwapPx: number; feePct: number; }
+
+export interface CrossBreakdown {
+  /** Executable net after both venues' taker fees and depth-walked slippage. */
+  netProfitUsd: number;
+  rawEdgeUsd: number;
+  feesUsd: number;
+  slippageUsd: number;
+  /** Base units bought on the cheap venue (== units sold from inventory). */
+  baseQty: number;
+  legDiag: CrossLegDiag[];
+  legAges: LegAge[];
+  /** Oldest leg age — the route age for the freshness gate. */
+  quoteAgeMs: number;
+  /** Snapshot identity: newest updatedAtMs across both legs. Two computations
+   *  with equal identity priced the same books. */
+  marketUpdateMs: number;
+}
+
+/** VWAP-buy `usd` notional from asks. Returns null when depth can't absorb it. */
+function walkBuy(asks: Level[], usd: number): { qty: number; vwap: number; top: number } | null {
+  let remaining = usd, qty = 0;
+  const top = asks[0]?.[0] ?? 0;
+  if (top <= 0) return null;
+  for (const [px, vol] of asks) {
+    const lvlUsd = px * vol;
+    const take = Math.min(remaining, lvlUsd);
+    qty += take / px;
+    remaining -= take;
+    if (remaining <= 1e-9) return { qty, vwap: usd / qty, top };
+  }
+  return null; // book exhausted — drop the route, never misprice it
+}
+
+/** VWAP-sell `qty` base units into bids. Returns null when depth can't absorb it. */
+function walkSell(bids: Level[], qty: number): { usd: number; vwap: number; top: number } | null {
+  let remaining = qty, usd = 0;
+  const top = bids[0]?.[0] ?? 0;
+  if (top <= 0) return null;
+  for (const [px, vol] of bids) {
+    const take = Math.min(remaining, vol);
+    usd += take * px;
+    remaining -= take;
+    if (remaining <= 1e-12) return { usd, vwap: usd / qty, top };
+  }
+  return null;
+}
+
+/**
+ * Price a cross-exchange inventory route from live books on both venues.
+ * Returns null when either stream book is unavailable (caller keeps the graph
+ * estimate but MUST mark it as such — an estimate is never executable).
+ */
+export function crossTakerBreakdown(
+  asset: ObAsset,
+  buyVenue: "kraken" | "coinbase",
+  sizeUsd: number,
+  krakenFeePct: number,
+  coinbaseFeePct: number,
+): CrossBreakdown | null {
+  const kPair = OB_USD_PAIRS[asset];
+  const cbProduct = `${asset}-USD`;
+  const kBook = getStreamBook(kPair);
+  const cBook = getCoinbaseStreamBook(cbProduct);
+  if (!kBook || !cBook) return null;
+
+  const sellVenue = buyVenue === "kraken" ? "coinbase" as const : "kraken" as const;
+  const buyBook  = buyVenue === "kraken" ? kBook : cBook;
+  const sellBook = buyVenue === "kraken" ? cBook : kBook;
+  const buyFeePct  = buyVenue === "kraken" ? krakenFeePct : coinbaseFeePct;
+  const sellFeePct = sellVenue === "kraken" ? krakenFeePct : coinbaseFeePct;
+
+  const buy = walkBuy(buyBook.asks, sizeUsd);
+  if (!buy) return null;
+  const sell = walkSell(sellBook.bids, buy.qty);
+  if (!sell) return null;
+
+  const buyFeeUsd  = sizeUsd * (buyFeePct / 100);
+  const sellFeeUsd = sell.usd * (sellFeePct / 100);
+  const feesUsd = buyFeeUsd + sellFeeUsd;
+  // Raw edge at top-of-book; slippage = depth cost vs the tops.
+  const rawEdgeUsd = buy.top > 0 ? (sell.top - buy.top) * (sizeUsd / buy.top) : 0;
+  const netProfitUsd = sell.usd - sizeUsd - feesUsd;
+  const slippageUsd = Math.max(0, rawEdgeUsd - (sell.usd - sizeUsd));
+
+  const buyPairName  = buyVenue === "kraken" ? kPair : cbProduct;
+  const sellPairName = sellVenue === "kraken" ? kPair : cbProduct;
+  const legAges: LegAge[] = [
+    { pair: `${buyPairName}[${buyVenue === "kraken" ? "K" : "C"}]`, ageMs: buyBook.ageMs, recvAgeMs: Math.max(0, Date.now() - buyBook.updatedAtMs) },
+    { pair: `${sellPairName}[${sellVenue === "kraken" ? "K" : "C"}]`, ageMs: sellBook.ageMs, recvAgeMs: Math.max(0, Date.now() - sellBook.updatedAtMs) },
+  ];
+  return {
+    netProfitUsd, rawEdgeUsd, feesUsd, slippageUsd, baseQty: buy.qty,
+    legDiag: [
+      { venue: buyVenue, pair: buyPairName, side: "buy", topPx: buy.top, vwapPx: buy.vwap, feePct: buyFeePct },
+      { venue: sellVenue, pair: sellPairName, side: "sell", topPx: sell.top, vwapPx: sell.vwap, feePct: sellFeePct },
+    ],
+    legAges,
+    quoteAgeMs: Math.max(buyBook.ageMs, cBook === buyBook ? kBook.ageMs : sellBook.ageMs),
+    marketUpdateMs: Math.max(buyBook.updatedAtMs, sellBook.updatedAtMs),
+  };
+}

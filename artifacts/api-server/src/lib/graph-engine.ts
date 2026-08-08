@@ -35,6 +35,12 @@ const CB_ASSET_MAP: Partial<Record<ObAsset, Pair>> = {
   UNI:  "UNI/USD",
   ATOM: "ATOM/USD",
   ADA:  "ADA/USD",
+  XRP:  "XRP/USD",
+  DOGE: "DOGE/USD",
+  LTC:  "LTC/USD",
+  BCH:  "BCH/USD",
+  AAVE: "AAVE/USD",
+  FIL:  "FIL/USD",
 };
 
 // ── Graph types ───────────────────────────────────────────────────────────────

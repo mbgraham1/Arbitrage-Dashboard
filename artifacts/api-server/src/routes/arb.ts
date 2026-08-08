@@ -59,6 +59,8 @@ import {
 import { getBestPairPrices, getTriPrices, getBtcTriPrices, scanAllPairs, getPairPrices, getAllPairSnapshots } from "../lib/price-cache";
 import { scanOrderBookCycles, preflightObCycle, discoverCrossPairs, freshJoinPrice, makerQuote, takerCycleBreakdown, cachedTakerCycleBreakdown, getEventScan, krakenStreamStats, getStreamBook, waitForBookTouch, formatLegAges, OB_ASSETS, OB_USD_PAIRS, CROSS_LOOKUP, type ObAsset } from "../lib/order-book";
 import { scanGraphOpportunities } from "../lib/graph-engine";
+import { crossTakerBreakdown } from "../lib/cross-pricing";
+import { coinbaseBookKey, coinbaseStreamStats, getCoinbaseStreamBook } from "../lib/book-stream";
 import { createPairHistory, updatePairHistory, type PairHistory } from "../lib/kalman";
 import { waitForTriLimitFill } from "../lib/tri-fill.js";
 
@@ -320,6 +322,48 @@ async function repriceKrakenTriangles(routes: { hops: { from: string; to: string
   }
 }
 
+/** Identify a 2-leg cross-exchange inventory route (buy venue A → bridge →
+ *  sell venue B, same asset) and return its pricing inputs, or null. */
+function crossRouteShape(r: { hops: { from: string; to: string; exchange: string; side?: string }[] }): { asset: ObAsset; buyVenue: "kraken" | "coinbase" } | null {
+  const real = r.hops.filter(h => h.exchange !== "bridge");
+  if (r.hops.length !== 3 || real.length !== 2) return null;
+  const a = (n: string) => n.split(":").pop()!;
+  const buy = real[0]!, sell = real[1]!;
+  if (a(buy.to) !== a(sell.from)) return null;
+  const assetName = a(buy.to) as ObAsset;
+  if (!(assetName in OB_USD_PAIRS)) return null;
+  const bv = buy.exchange;
+  if (bv !== "kraken" && bv !== "coinbase") return null;
+  if (sell.exchange !== (bv === "kraken" ? "coinbase" : "kraken")) return null;
+  return { asset: assetName, buyVenue: bv };
+}
+
+/** EXECUTOR-GRADE cross-route repricing: overwrite the graph estimate for
+ *  2-leg Kraken↔Coinbase inventory routes with the depth-walked net from
+ *  LIVE stream books on both venues (real fee tiers, VWAP fills). Routes
+ *  whose books aren't streaming keep the graph number but stay marked
+ *  "graph" — an estimate is never presented as executable. */
+function repriceCrossRoutes(routes: { hops: { from: string; to: string; exchange: string }[]; description: string; netProfitUsd: number; profitPct: number; quoteAgeMs?: number | null; pricedFrom?: string | null; marketUpdateMs?: number | null; repricedFeePct?: number | null }[], sizeUsd: number, krakenTakerFeePct: number, coinbaseTakerFeePct: number, log: { debug: (o: object, m: string) => void }): void {
+  for (const r of routes) {
+    const shape = crossRouteShape(r);
+    if (!shape) continue;
+    try {
+      const bd = crossTakerBreakdown(shape.asset, shape.buyVenue, sizeUsd, krakenTakerFeePct, coinbaseTakerFeePct);
+      if (bd) {
+        r.netProfitUsd = bd.netProfitUsd;
+        r.profitPct = (bd.netProfitUsd / sizeUsd) * 100;
+        r.quoteAgeMs = bd.quoteAgeMs;
+        r.pricedFrom = "stream";
+        r.marketUpdateMs = bd.marketUpdateMs;
+        r.repricedFeePct = krakenTakerFeePct;
+        log.debug({ route: r.description, netUsd: bd.netProfitUsd, quoteAgeMs: bd.quoteAgeMs, legs: bd.legDiag }, "[SCAN LEGS] stream-priced cross route");
+      } else {
+        r.pricedFrom = "graph";
+      }
+    } catch { r.pricedFrom = "graph"; }
+  }
+}
+
 router.get("/arb/graph-scan", async (req, res): Promise<void> => {
   const tradeSizeUsd    = Math.max(1,  parseFloat(String(req.query["tradeSizeUsd"]    ?? "10"))   || 10);
   const krakenFeesPct   = Math.max(0,  parseFloat(String(req.query["krakenFeesPct"]   ?? "0.16")) || 0.16);
@@ -334,7 +378,10 @@ router.get("/arb/graph-scan", async (req, res): Promise<void> => {
     const result = await scanGraphOpportunities(tradeSizeUsd, krakenFeesPct, coinbaseFeesPct, maxHops, executionStyle);
     // Taker/adaptive display: Kraken triangles priced by the executor's own
     // simulator on the streamed snapshot — table number == pre-fire number.
-    if (executionStyle === "taker") await repriceKrakenTriangles(result.routes, tradeSizeUsd, krakenFeesPct, req.log);
+    if (executionStyle === "taker") {
+      await repriceKrakenTriangles(result.routes, tradeSizeUsd, krakenFeesPct, req.log);
+      repriceCrossRoutes(result.routes, tradeSizeUsd, krakenFeesPct, coinbaseFeesPct, req.log);
+    }
     // Fill-rate-weighted ranking (advisor-reviewed): rank executable routes by
     // expected REALIZED profit — net profit × historical live fill rate — not
     // theoretical edge alone. A +$0.10 route that fills 20% of the time (≈$0.02)
@@ -2159,7 +2206,10 @@ router.post("/arb/graph-execute", async (req, res): Promise<void> => {
     // Same stream repricing as /arb/graph-scan (taker fee tier), so the route
     // net the gates see is the executable number, not the graph estimate.
     const scanTakerFeePct = tiers?.takerFeePct ?? krakenFeesPct;
-    if (executionStyleReq !== "maker") await repriceKrakenTriangles(scan.routes, tradeSizeUsd, scanTakerFeePct, req.log);
+    if (executionStyleReq !== "maker") {
+      await repriceKrakenTriangles(scan.routes, tradeSizeUsd, scanTakerFeePct, req.log);
+      repriceCrossRoutes(scan.routes, tradeSizeUsd, scanTakerFeePct, coinbaseFeesPct, req.log);
+    }
     const route = routeDescription
       ? scan.routes.find(r => r.description === routeDescription)
       : scan.routes[0];
@@ -2544,6 +2594,84 @@ router.post("/arb/graph-execute", async (req, res): Promise<void> => {
     const kCreds  = { krakenKey, krakenSecret };
     const log = { info: (m: string) => req.log.info(m), error: (m: string) => req.log.error(m) };
     const plannedVolume = buyHop.amountOut; // base units the route expects to acquire
+
+    // ── EXECUTOR-GRADE CROSS PRE-FIRE ────────────────────────────────────────
+    // Same standard as Kraken triangles: LIVE stream books on BOTH venues,
+    // per-leg freshness (route age = oldest leg, stale → wait-a-tick → skip),
+    // scanner/pre-fire consistency on the SAME snapshot, real fee tiers,
+    // depth-walked slippage, and a safety buffer — before ANY order.
+    const crossShape = crossRouteShape(route);
+    if (!crossShape) {
+      res.json({ success: false, isDryRun: false, executed: false, route: route.description, preflightProfitUsd: route.netProfitUsd, error: "Cross route shape could not be resolved for executor-grade pricing — refusing to fire on a graph estimate." });
+      return;
+    }
+    const crossKFee = routeTakerFeePct ?? scanTakerFeePct;
+    const crossWaitKeys = [OB_USD_PAIRS[crossShape.asset], coinbaseBookKey(`${crossShape.asset}-USD`)];
+    let crossBd = crossTakerBreakdown(crossShape.asset, crossShape.buyVenue, tradeSizeUsd, crossKFee, coinbaseFeesPct);
+    if (!crossBd || crossBd.quoteAgeMs > maxQuoteAgeMs) {
+      // Wait for the next relevant update on either venue, then re-evaluate on
+      // every touch until fresh or the wait budget runs out. No REST fallback.
+      const deadline = Date.now() + Math.min(2_000, Math.max(500, 4 * maxQuoteAgeMs));
+      req.log.info({ route: route.description, oldestAgeMs: crossBd?.quoteAgeMs ?? null, waitMs: deadline - Date.now() }, "Cross quotes stale — waiting for WebSocket updates before re-evaluating");
+      while (Date.now() < deadline) {
+        const touched = await waitForBookTouch(crossWaitKeys, deadline - Date.now());
+        if (!touched) break;
+        crossBd = crossTakerBreakdown(crossShape.asset, crossShape.buyVenue, tradeSizeUsd, crossKFee, coinbaseFeesPct);
+        if (crossBd && crossBd.quoteAgeMs <= maxQuoteAgeMs) break;
+      }
+    }
+    if (!crossBd || crossBd.quoteAgeMs > maxQuoteAgeMs) {
+      req.log.info({ route: route.description, oldestAgeMs: crossBd?.quoteAgeMs ?? null, maxQuoteAgeMs }, `[FRESHNESS] ${formatLegAges(crossBd?.legAges)} | STALE — SKIP`);
+      res.json({ success: false, isDryRun: false, executed: false, route: route.description, preflightProfitUsd: crossBd?.netProfitUsd ?? route.netProfitUsd, error: crossBd
+        ? `Pre-flight failed — cross SKIP: quotes are still ${crossBd.quoteAgeMs}ms old (max ${maxQuoteAgeMs}ms) after waiting for fresh WebSocket updates on both venues.`
+        : "Pre-flight failed — cross SKIP: live depth books unavailable on one or both venues (stream only; estimates never execute)." });
+      return;
+    }
+    req.log.info({ route: route.description }, `[FRESHNESS] ${formatLegAges(crossBd.legAges)} | FRESH — evaluating`);
+    // Consistency gate: scanner and pre-fire priced the SAME snapshot →
+    // numbers must agree within tolerance; disagreement = pricing bug, block.
+    if (route.pricedFrom === "stream" && route.marketUpdateMs != null && route.marketUpdateMs === crossBd.marketUpdateMs) {
+      const tol = Math.max(0.02, 0.002 * tradeSizeUsd);
+      if (Math.abs(route.netProfitUsd - crossBd.netProfitUsd) > tol) {
+        req.log.error({ route: route.description, scannerNetUsd: route.netProfitUsd, prefireNetUsd: crossBd.netProfitUsd, toleranceUsd: tol, legs: crossBd.legDiag }, "PRICING CONSISTENCY ERROR — cross scanner and pre-fire disagree on the same snapshot; execution blocked");
+        res.json({ success: false, isDryRun: false, executed: false, route: route.description, preflightProfitUsd: crossBd.netProfitUsd, error: `PRICING CONSISTENCY ERROR: scanner net $${route.netProfitUsd.toFixed(4)} vs pre-fire net $${crossBd.netProfitUsd.toFixed(4)} on the same snapshot (tolerance $${tol.toFixed(4)}). Execution blocked — this is a pricing bug, not market movement.` });
+        return;
+      }
+    }
+    // Floor + safety buffer on the EXECUTABLE net (both venues' real fees,
+    // depth-walked). Same buffer scale as the triangle executor.
+    const crossBufferUsd = Math.min(tradeSizeUsd * 0.05, Math.max(0.02, tradeSizeUsd * 0.0005));
+    const crossFloor = Math.max(0, minProfitUsd);
+    req.log.info({ route: route.description }, `[DECISION] ${formatLegAges(crossBd.legAges)} | scanner_net=$${route.netProfitUsd.toFixed(4)} | prefire_net=$${crossBd.netProfitUsd.toFixed(4)} | TAKER NET=$${(crossBd.netProfitUsd - crossBufferUsd).toFixed(4)} ${crossBd.netProfitUsd - crossBufferUsd > crossFloor ? ">" : "≤"} FLOOR=$${crossFloor.toFixed(4)} (buffer $${crossBufferUsd.toFixed(4)}) | ${crossBd.netProfitUsd - crossBufferUsd > crossFloor ? "FIRE" : "SKIP"}`);
+    if (crossBd.netProfitUsd - crossBufferUsd <= crossFloor) {
+      res.json({ success: false, isDryRun: false, executed: false, route: route.description, preflightProfitUsd: crossBd.netProfitUsd, error: `Pre-flight failed — cross executable net $${crossBd.netProfitUsd.toFixed(4)} (fees $${crossBd.feesUsd.toFixed(4)}, slippage $${crossBd.slippageUsd.toFixed(4)}) − safety buffer $${crossBufferUsd.toFixed(4)} ≤ floor $${crossFloor.toFixed(4)}.` });
+      return;
+    }
+    const crossDecisionAtMs = Date.now();
+    void crossDecisionAtMs;
+    // Pre-order inventory validation: buy venue must hold the USD, sell venue
+    // must hold the base units. Checked HERE (after all pricing gates, before
+    // any order) so a missing balance can never be discovered mid-trade.
+    try {
+      const [kBals, cBals] = await Promise.all([
+        getKrakenBalances({ krakenKey, krakenSecret }, true),
+        getCoinbaseBalances({ coinbaseKey: coinbaseKey ?? "", coinbaseSecret: coinbaseSecret ?? "" }),
+      ]);
+      const kVariants: Record<string, string[]> = { BTC: ["XXBT", "XBT", "BTC"], DOGE: ["XXDG", "XDG", "DOGE"], ETH: ["XETH", "ETH"], LTC: ["XLTC", "LTC"], XRP: ["XXRP", "XRP"] };
+      const kAmt = (names: string[]) => kBals.filter(b => names.includes(b.currency)).reduce((a, b) => a + b.amount, 0);
+      const cAmt = (name: string) => cBals.filter(b => b.currency === name).reduce((a, b) => a + b.amount, 0);
+      const baseNames = kVariants[crossShape.asset] ?? [crossShape.asset];
+      const usdAvail  = crossShape.buyVenue === "kraken" ? kAmt(["ZUSD", "USD"]) : cAmt("USD");
+      const baseAvail = crossShape.buyVenue === "kraken" ? cAmt(crossShape.asset) : kAmt(baseNames);
+      const needBase = crossBd.baseQty * 1.001; // tiny cushion for fill drift
+      if (usdAvail < tradeSizeUsd || baseAvail < needBase) {
+        res.json({ success: false, isDryRun: false, executed: false, route: route.description, preflightProfitUsd: crossBd.netProfitUsd, error: `Inventory check failed — need $${tradeSizeUsd.toFixed(2)} USD on ${crossShape.buyVenue} (have $${usdAvail.toFixed(2)}) and ${needBase.toFixed(6)} ${crossShape.asset} on ${crossShape.buyVenue === "kraken" ? "coinbase" : "kraken"} (have ${baseAvail.toFixed(6)}). Pre-position inventory first.` });
+        return;
+      }
+    } catch (balErr) {
+      res.json({ success: false, isDryRun: false, executed: false, route: route.description, preflightProfitUsd: crossBd.netProfitUsd, error: `Inventory check failed — could not fetch balances on both venues: ${(balErr as Error).message}. Refusing to fire unverified.` });
+      return;
+    }
 
     // Poll Kraken market order until closed (markets fill fast; 15 s cap).
     // 1s interval — QueryOrders counts against Kraken's private rate limit.
@@ -3863,9 +3991,48 @@ router.get("/arb/stream-stats", (_req, res) => {
   const es = getEventScan();
   res.json({
     kraken: krakenStreamStats(),
+    coinbase: coinbaseStreamStats(),
     eventScan: es ? { ...es, topRoutes: es.topRoutes.slice(0, 3) } : null,
     sampleEthAgeMs: getStreamBook(OB_USD_PAIRS.ETH)?.ageMs ?? null,
+    sampleCbEthAgeMs: getCoinbaseStreamBook("ETH-USD")?.ageMs ?? null,
   });
+});
+
+// ── GET /arb/inventory-imbalance ─────────────────────────────────────────────
+// Per-asset inventory imbalance from LIVE cross-exchange trades: buying on one
+// venue and selling pre-positioned inventory on the other shifts holdings
+// (+base on the buy venue, −base on the sell venue). This ledger view tells
+// the trader what needs rebalancing later — it is bookkeeping, not P&L.
+router.get("/arb/inventory-imbalance", async (_req, res): Promise<void> => {
+  try {
+    const rows = await db.select({
+      pair: tradesTable.pair, volume: tradesTable.volume, status: tradesTable.status,
+      buyExchange: tradesTable.buyExchange, sellExchange: tradesTable.sellExchange,
+      createdAt: tradesTable.createdAt,
+    }).from(tradesTable)
+      .where(dbAnd(dbEq(tradesTable.isDryRun, false), sql`${tradesTable.buyExchange} != ${tradesTable.sellExchange}`));
+    const byAsset = new Map<string, { kraken: number; coinbase: number; trades: number; lastAt: string | null }>();
+    for (const r of rows) {
+      // Completed cross trades only — failed rows with zero fills don't move inventory.
+      if (r.status !== "verified" && r.status !== "completed") continue;
+      const m = /→([A-Z0-9]+)\[/.exec(r.pair ?? "") ?? /USD→([A-Z0-9]+)/.exec(r.pair ?? "");
+      const assetName = m?.[1];
+      const vol = parseFloat(r.volume ?? "0");
+      if (!assetName || assetName === "USD" || !isFinite(vol) || vol <= 0) continue;
+      const e = byAsset.get(assetName) ?? { kraken: 0, coinbase: 0, trades: 0, lastAt: null };
+      if (r.buyExchange === "kraken") e.kraken += vol; else if (r.buyExchange === "coinbase") e.coinbase += vol;
+      if (r.sellExchange === "kraken") e.kraken -= vol; else if (r.sellExchange === "coinbase") e.coinbase -= vol;
+      e.trades += 1;
+      e.lastAt = r.createdAt ? new Date(r.createdAt as unknown as string | number | Date).toISOString() : e.lastAt;
+      byAsset.set(assetName, e);
+    }
+    res.json({
+      assets: [...byAsset.entries()].map(([assetName, e]) => ({ asset: assetName, krakenDelta: e.kraken, coinbaseDelta: e.coinbase, trades: e.trades, lastTradeAt: e.lastAt })),
+      note: "Deltas are base units moved by live cross-exchange inventory trades since ledger start. Positive = accumulated on that venue; negative = drawn down. Rebalance by transferring or trading back when deltas grow.",
+    });
+  } catch (err) {
+    res.status(500).json({ error: (err as Error).message });
+  }
 });
 
 // ── POST /fee-tier ────────────────────────────────────────────────────────────
@@ -4286,7 +4453,7 @@ router.get("/arb/inventory-scan", async (req, res): Promise<void> => {
       try {
         [krakenBalances, coinbaseBalances] = await Promise.all([
           getKrakenBalances({ krakenKey, krakenSecret }),
-          getCoinbaseBalances({ coinbaseKey, coinbaseSecret }),
+          getCoinbaseBalances({ coinbaseKey: coinbaseKey ?? "", coinbaseSecret: coinbaseSecret ?? "" }),
         ]);
       } catch { /* balance fetch is optional — skip rebalance alerts on error */ }
     }

@@ -1015,6 +1015,20 @@ export type ObPairsRefresh200 = {
   cachedAt: string | null;
 };
 
+export type GetInventoryImbalance200AssetsItem = {
+  asset: string;
+  /** Base units accumulated (+) or drawn down (−) on Kraken */
+  krakenDelta: number;
+  coinbaseDelta: number;
+  trades: number;
+  lastTradeAt?: string | null;
+};
+
+export type GetInventoryImbalance200 = {
+  assets: GetInventoryImbalance200AssetsItem[];
+  note: string;
+};
+
 export type GetGraphScanParams = {
 tradeSizeUsd?: number;
 krakenFeesPct?: number;

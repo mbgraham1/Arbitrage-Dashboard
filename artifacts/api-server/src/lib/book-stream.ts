@@ -198,10 +198,17 @@ export async function startKrakenBookStream(restPairKeys: string[]): Promise<voi
   }, 5_000).unref?.();
 }
 
-// ── Coinbase (public ticker stream: best bid/ask) ─────────────────────────────
+// ── Coinbase (public ticker + level2_batch depth streams) ────────────────────
 
 export interface StreamTicker { bid: number; ask: number; price: number; updatedAtMs: number; }
 const coinbaseTickers = new Map<string, StreamTicker>(); // keyed by product id, e.g. ETH-USD
+/** FULL-DEPTH Coinbase books, keyed by product id. The complete level2 state
+ *  must be retained (price → qty maps): l2update deltas reference ANY price
+ *  level, so a truncated top-N copy silently corrupts under churn — a removed
+ *  top level can't be backfilled from discarded depth, and pricing off that
+ *  corrupted book could overstate an edge. Top-10 is projected on read. */
+interface CbFullBook { bids: Map<number, number>; asks: Map<number, number>; updatedAtMs: number; exchangeTsMs: number | null; }
+const coinbaseBooks = new Map<string, CbFullBook>();
 let coinbaseWs: WebSocket | null = null;
 let coinbaseConnected = false;
 let cbReconnectMs = 1_000;
@@ -213,8 +220,24 @@ export function getStreamTicker(productId: string): (StreamTicker & { ageMs: num
   return { ...t, ageMs: Date.now() - t.updatedAtMs };
 }
 
-export function coinbaseStreamStats(): { connected: boolean; tickers: number } {
-  return { connected: coinbaseConnected, tickers: coinbaseTickers.size };
+/** Listener key for Coinbase book updates (used with onBookUpdate/waitForBookTouch). */
+export function coinbaseBookKey(productId: string): string { return `CB:${productId}`; }
+
+/** Live Coinbase depth book. Age follows the SAME per-leg rule as Kraken:
+ *  measured from THIS product's own last update (exchange event time when the
+ *  feed provides one), never from other products or connection activity. */
+export function getCoinbaseStreamBook(productId: string): (StreamBook & { ageMs: number }) | null {
+  const b = coinbaseBooks.get(productId);
+  if (!b || b.asks.size === 0 || b.bids.size === 0) return null;
+  // Project sorted top-N from the authoritative full-depth state on each read.
+  const asks: Level[] = [...b.asks.entries()].sort((x, y) => x[0] - y[0]).slice(0, DEPTH);
+  const bids: Level[] = [...b.bids.entries()].sort((x, y) => y[0] - x[0]).slice(0, DEPTH);
+  const ageMs = Math.max(0, Date.now() - (b.exchangeTsMs ?? b.updatedAtMs));
+  return { asks, bids, updatedAtMs: b.updatedAtMs, exchangeTsMs: b.exchangeTsMs, ageMs };
+}
+
+export function coinbaseStreamStats(): { connected: boolean; tickers: number; books: number } {
+  return { connected: coinbaseConnected, tickers: coinbaseTickers.size, books: coinbaseBooks.size };
 }
 
 function connectCoinbase(): void {
@@ -225,22 +248,70 @@ function connectCoinbase(): void {
     ws.onopen = () => {
       coinbaseConnected = true;
       cbReconnectMs = 1_000;
+      // ticker: best bid/ask for price feeds. level2_batch: full depth deltas
+      // (50 ms batches, public) so cross-exchange legs are VWAP-priced from a
+      // LIVE timestamped book — same standard as the Kraken legs.
       ws.send(JSON.stringify({ type: "subscribe", product_ids: cbProducts, channels: ["ticker"] }));
-      console.log(`[BookStream] Coinbase ticker WS connected — ${cbProducts.length} products`);
+      // level2_batch subscribed PER PRODUCT: one invalid product id in a batch
+      // subscribe rejects the whole request, and the tracked asset list
+      // includes assets that only exist on Kraken. Individual subscribes let
+      // valid products stream while invalid ones fail alone.
+      for (const p of cbProducts) {
+        ws.send(JSON.stringify({ type: "subscribe", product_ids: [p], channels: ["level2_batch"] }));
+      }
+      console.log(`[BookStream] Coinbase WS connected — ${cbProducts.length} products (ticker + level2 depth)`);
     };
     ws.onmessage = ev => {
       if (typeof ev.data !== "string") return;
       try {
-        const m = JSON.parse(ev.data) as { type?: string; product_id?: string; best_bid?: string; best_ask?: string; price?: string };
-        if (m.type !== "ticker" || !m.product_id) return;
-        const bid = parseFloat(m.best_bid ?? ""); const ask = parseFloat(m.best_ask ?? ""); const price = parseFloat(m.price ?? "");
-        if (!isFinite(bid) || !isFinite(ask)) return;
-        coinbaseTickers.set(m.product_id, { bid, ask, price: isFinite(price) ? price : (bid + ask) / 2, updatedAtMs: Date.now() });
+        const m = JSON.parse(ev.data) as {
+          type?: string; product_id?: string; best_bid?: string; best_ask?: string; price?: string; time?: string;
+          bids?: [string, string][]; asks?: [string, string][]; changes?: [string, string, string][];
+        };
+        if (!m.product_id) return;
+        const now = Date.now();
+        if (m.type === "ticker") {
+          const bid = parseFloat(m.best_bid ?? ""); const ask = parseFloat(m.best_ask ?? ""); const price = parseFloat(m.price ?? "");
+          if (!isFinite(bid) || !isFinite(ask)) return;
+          coinbaseTickers.set(m.product_id, { bid, ask, price: isFinite(price) ? price : (bid + ask) / 2, updatedAtMs: now });
+          return;
+        }
+        if (m.type === "snapshot") {
+          // Retain the COMPLETE snapshot — no truncation (see CbFullBook note).
+          const toMap = (rows: [string, string][] | undefined): Map<number, number> => {
+            const map = new Map<number, number>();
+            for (const [p, sz] of rows ?? []) {
+              const price = parseFloat(p), qty = parseFloat(sz);
+              if (isFinite(price) && isFinite(qty) && price > 0 && qty > 0) map.set(price, qty);
+            }
+            return map;
+          };
+          coinbaseBooks.set(m.product_id, { asks: toMap(m.asks), bids: toMap(m.bids), updatedAtMs: now, exchangeTsMs: null });
+          return;
+        }
+        if (m.type === "l2update") {
+          const book = coinbaseBooks.get(m.product_id);
+          if (!book) return; // update before snapshot — wait for resync
+          for (const [side, p, s] of m.changes ?? []) {
+            const price = parseFloat(p), qty = parseFloat(s);
+            if (!isFinite(price) || !isFinite(qty) || price <= 0) continue;
+            const sideMap = side === "buy" ? book.bids : side === "sell" ? book.asks : null;
+            if (!sideMap) continue;
+            if (qty <= 0) sideMap.delete(price); else sideMap.set(price, qty);
+          }
+          book.updatedAtMs = now;
+          const exch = m.time ? Date.parse(m.time) : NaN;
+          if (Number.isFinite(exch)) book.exchangeTsMs = exch;
+          const key = coinbaseBookKey(m.product_id);
+          for (const cb of updateListeners) { try { cb(key); } catch { /* listener errors must not kill the feed */ } }
+          return;
+        }
       } catch { /* ignore malformed frames */ }
     };
     ws.onclose = () => {
       coinbaseConnected = false;
       coinbaseTickers.clear();
+      coinbaseBooks.clear(); // never serve books from a dead stream
       if (stopped) return;
       setTimeout(connectCoinbase, cbReconnectMs);
       cbReconnectMs = Math.min(cbReconnectMs * 2, 30_000);

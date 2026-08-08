@@ -33,6 +33,8 @@ export * from './feeTierResultSource';
 export * from './getAllPairSnapshotsParams';
 export * from './getGraphScanExecutionStyle';
 export * from './getGraphScanParams';
+export * from './getInventoryImbalance200';
+export * from './getInventoryImbalance200AssetsItem';
 export * from './getInventoryScanParams';
 export * from './getObScanMaxLegs';
 export * from './getObScanParams';

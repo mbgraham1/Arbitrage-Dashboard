@@ -45,7 +45,9 @@ const COINBASE_SYMBOL: Record<Pair, string> = {
   "BTC/USD":  "BTC-USD",  "ETH/USD":  "ETH-USD",  "SOL/USD":  "SOL-USD",
   "AVAX/USD": "AVAX-USD", "DOT/USD":  "DOT-USD",  "POL/USD":  "POL-USD",
   "LINK/USD": "LINK-USD", "UNI/USD":  "UNI-USD",  "ATOM/USD": "ATOM-USD",
-  "ADA/USD":  "ADA-USD",
+  "ADA/USD":  "ADA-USD",  "XRP/USD":  "XRP-USD",  "DOGE/USD": "DOGE-USD",
+  "LTC/USD":  "LTC-USD",  "BCH/USD":  "BCH-USD",  "AAVE/USD": "AAVE-USD",
+  "FIL/USD":  "FIL-USD",
 };
 
 // Binance bookTicker symbols (POL still listed as MATICUSDT on Binance as of 2026-08)
@@ -53,14 +55,18 @@ const BINANCE_SYMBOL: Record<Pair, string> = {
   "BTC/USD":  "BTCUSDT",  "ETH/USD":  "ETHUSDT",  "SOL/USD":  "SOLUSDT",
   "AVAX/USD": "AVAXUSDT", "DOT/USD":  "DOTUSDT",  "POL/USD":  "MATICUSDT",
   "LINK/USD": "LINKUSDT", "UNI/USD":  "UNIUSDT",  "ATOM/USD": "ATOMUSDT",
-  "ADA/USD":  "ADAUSDT",
+  "ADA/USD":  "ADAUSDT",  "XRP/USD":  "XRPUSDT",  "DOGE/USD": "DOGEUSDT",
+  "LTC/USD":  "LTCUSDT",  "BCH/USD":  "BCHUSDT",  "AAVE/USD": "AAVEUSDT",
+  "FIL/USD":  "FILUSDT",
 };
 
 const KUCOIN_SYMBOL: Record<Pair, string> = {
   "BTC/USD":  "BTC-USDT", "ETH/USD":  "ETH-USDT", "SOL/USD":  "SOL-USDT",
   "AVAX/USD": "AVAX-USDT","DOT/USD":  "DOT-USDT", "POL/USD":  "POL-USDT",
   "LINK/USD": "LINK-USDT","UNI/USD":  "UNI-USDT", "ATOM/USD": "ATOM-USDT",
-  "ADA/USD":  "ADA-USDT",
+  "ADA/USD":  "ADA-USDT", "XRP/USD":  "XRP-USDT", "DOGE/USD": "DOGE-USDT",
+  "LTC/USD":  "LTC-USDT", "BCH/USD":  "BCH-USDT", "AAVE/USD": "AAVE-USDT",
+  "FIL/USD":  "FIL-USDT",
 };
 
 // ── Triangular arb cache — ETH/SOL and SOL/BTC direct markets ────────────────
