@@ -1451,6 +1451,14 @@ components:
           type: number
           nullable: true
           description: "Historical live fill rate 0..1; null until the route has ≥10 live attempts (insufficient history to judge)."
+        quoteAgeMs:
+          type: number
+          nullable: true
+          description: "Age (ms) of the streamed book snapshot this route's netProfitUsd was priced from; null when stream pricing was unavailable"
+        pricedFrom:
+          type: string
+          nullable: true
+          description: "Pricing source for netProfitUsd: 'stream' = executor-grade simulator on live streamed books (matches the pre-fire math exactly); 'graph' = graph engine estimate (stream unavailable)"
         effectiveScoreUsd:
           type: number
           description: "Ranking score: net profit × historical fill rate (0.7 neutral prior when history is insufficient). Approximates expected realized profit."
@@ -1617,7 +1625,7 @@ components:
             fresh order book.
         maxQuoteAgeMs:
           type: number
-          default: 250
+          default: 200
           description: >
             Micro-check freshness threshold (ms, clamped 50–5000): the cached
             in-memory book snapshot used for the adaptive pre-fire decision

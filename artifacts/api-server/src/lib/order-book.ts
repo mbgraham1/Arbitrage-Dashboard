@@ -586,7 +586,13 @@ interface CycleSimResult {
   slippagePct: number;
   confidencePct: number;
   legs: number;
+  /** Per-leg pricing diagnostic: pair, side, top-of-book and VWAP price in the
+   *  pair's native quote units. Lets scanner and pre-fire assert they priced
+   *  the same route the same way on the same books. */
+  legDiag: LegDiag[];
 }
+
+export interface LegDiag { pair: string; side: "buy" | "sell"; topPx: number; vwapPx: number }
 
 /** Per-leg |avg − best| / best in %. */
 const slip = (avg: number, best: number) => best > 0 ? Math.abs(avg - best) / best * 100 : 0;
@@ -640,6 +646,7 @@ function simulatePath(
   // Require a FULL fill — a partial fill is not an executable cycle.
   if (aAmt === 0 || remainingUsd > 0) return null;
   const avg1  = totalSpent / aAmt; // USD per A
+  const legDiag: LegDiag[] = [{ pair: OB_USD_PAIRS[first], side: "buy", topPx: obFirst.asks[0]![0], vwapPx: avg1 }];
   let slippagePct = slip(avg1, obFirst.asks[0]![0]);
   let covSum = coverage(obFirst.asks[0]?.[1], aAmt); // leg 1: A units
 
@@ -690,6 +697,8 @@ function simulatePath(
     }
     if (outAmt === 0 || remaining > 0) return null;
     const avg = outAmt / holding; // `to` per `from`
+    // Book-native VWAP: buy → quote-per-base (spent/received); sell → bid px.
+    legDiag.push({ pair: cross.pair, side: cross.aIsQuote ? "buy" : "sell", topPx: crossTop[0], vwapPx: cross.aIsQuote ? holding / outAmt : avg });
     slippagePct += slip(avg, best);
     covSum += cross.aIsQuote
       ? coverage(obCross.asks[0]?.[1], outAmt)   // buying base `to`: `to` units
@@ -712,6 +721,7 @@ function simulatePath(
   }
   if (usdFinal === 0 || remainingB > 0) return null;
   const avg3 = usdFinal / holding; // USD per final asset
+  legDiag.push({ pair: OB_USD_PAIRS[last], side: "sell", topPx: obLast.bids[0]![0], vwapPx: avg3 });
   slippagePct += slip(avg3, obLast.bids[0]![0]);
   covSum += coverage(obLast.bids[0]?.[1], holding); // final leg: last-asset units
 
@@ -728,7 +738,7 @@ function simulatePath(
 
   const confidencePct = Math.round((covSum / legs) * 100);
 
-  return { profitUsd: netProfit, grossProfitUsd: grossProfit, feeUsd, avg1, avg2: firstCrossRate, avg3, volA: aAmt, slippagePct, confidencePct, legs };
+  return { profitUsd: netProfit, grossProfitUsd: grossProfit, feeUsd, avg1, avg2: firstCrossRate, avg3, volA: aAmt, slippagePct, confidencePct, legs, legDiag };
 }
 
 /** 3-leg triangle: USD→A→B→USD. Thin wrapper over the generic path simulator. */
@@ -776,6 +786,10 @@ export async function preflightObCycle(
   sizeUsd: number,
   feesPct: number,
   pricing: "maker" | "taker" = "taker",
+  /** Trader's freshness window: when set, ALL THREE legs must come from the
+   *  live stream within this age (exchange-timestamp based) — REST is never
+   *  used and one stale leg fails the whole preflight (returns null). */
+  maxQuoteAgeMs?: number,
 ): Promise<ObPreflightResult | null> {
   // v19: use the same dynamically-discovered cross map so preflight covers
   // pairs that aren't in the hardcoded fallback.
@@ -785,9 +799,13 @@ export async function preflightObCycle(
   const pairA = OB_USD_PAIRS[assetA];
   const pairB = OB_USD_PAIRS[assetB];
 
-  // Freshest books: live stream snapshot (<400ms) or cache-bypassing REST.
+  // Freshest books: strict mode (maxQuoteAgeMs set) = stream-only within the
+  // trader's window, any stale leg → whole route stale (null). Legacy mode =
+  // stream <400ms or cache-bypassing REST.
+  const strict = maxQuoteAgeMs != null;
+  const winMs = maxQuoteAgeMs ?? 400;
   const [sA, sX, sB] = await Promise.all([
-    bookSnapshot(pairA, 400, true), bookSnapshot(cross.pair, 400, true), bookSnapshot(pairB, 400, true),
+    bookSnapshot(pairA, winMs, !strict), bookSnapshot(cross.pair, winMs, !strict), bookSnapshot(pairB, winMs, !strict),
   ]);
   if (!sA || !sX || !sB) return null;
   const [obA, obX, obB] = [sA.book, sX.book, sB.book];
@@ -852,6 +870,8 @@ export interface TakerCycleBreakdown {
   /** Executable net = VWAP gross − fees (before any safety buffer). */
   netProfitUsd: number;
   volumeA: number;
+  /** Per-leg price/side diagnostic from the depth-walk simulator. */
+  legDiag: LegDiag[];
 }
 
 /** Fresh-book taker breakdown for USD→A→B→USD at the given size and taker fee.
@@ -885,14 +905,28 @@ export async function takerCycleBreakdown(
   const volB = cross.aIsQuote ? volA / crossPx : volA * crossPx;
   const rawEdgeUsd = volB * bidB - sizeUsd;
   const slippageUsd = Math.max(0, rawEdgeUsd - sim.grossProfitUsd);
-  return { rawEdgeUsd, slippageUsd, feesUsd: sim.feeUsd, netProfitUsd: sim.profitUsd, volumeA: sim.volA };
+  return { rawEdgeUsd, slippageUsd, feesUsd: sim.feeUsd, netProfitUsd: sim.profitUsd, volumeA: sim.volA, legDiag: sim.legDiag };
 }
 
 /** Micro-check result: the same taker breakdown computed purely from the
  *  in-memory stream snapshot — zero network requests. */
+/** Per-leg freshness: pair + age. `ageMs` is measured from the exchange's own
+ *  event timestamp when available (strictest); `recvAgeMs` from our local
+ *  ws_received_timestamp — both preserved and logged. */
+export interface LegAge { pair: string; ageMs: number | null; recvAgeMs?: number | null }
+
 export type CachedBreakdownResult =
-  | { ok: true; bd: TakerCycleBreakdown; quoteAgeMs: number; marketUpdateMs: number }
-  | { ok: false; reason: "stale" | "unavailable"; oldestAgeMs: number | null };
+  | { ok: true; bd: TakerCycleBreakdown; quoteAgeMs: number; marketUpdateMs: number; legAges: LegAge[] }
+  | { ok: false; reason: "stale" | "unavailable"; oldestAgeMs: number | null; legAges?: LegAge[] };
+
+/** "ETH/USD 74ms | BCH/ETH 118ms | BCH/USD 163ms | route_age 163ms" */
+export function formatLegAges(legAges: LegAge[] | undefined): string {
+  if (!legAges || legAges.length === 0) return "(no leg ages)";
+  const parts = legAges.map(l => `${l.pair} ${l.ageMs == null ? "n/a" : Math.round(l.ageMs) + "ms"}${l.recvAgeMs != null && l.ageMs != null && Math.round(l.recvAgeMs) !== Math.round(l.ageMs) ? ` (recv ${Math.round(l.recvAgeMs)}ms)` : ""}`);
+  const ages = legAges.map(l => l.ageMs).filter((a): a is number => a != null);
+  const routeAge = ages.length === legAges.length ? `${Math.round(Math.max(...ages))}ms` : "n/a";
+  return `${parts.join(" | ")} | route_age ${routeAge}`;
+}
 
 /**
  * Executor micro-check: taker breakdown for USD→A→B→USD read from the SAME
@@ -900,6 +934,21 @@ export type CachedBreakdownResult =
  * network. Fails with reason "stale" when any leg's book is older than
  * `maxQuoteAgeMs`, "unavailable" when the stream has no book for a leg.
  */
+/**
+ * Wait until the stream pushes an update touching ANY of the given pairs, or
+ * the timeout elapses. Lets a stale pre-fire wait for the next WebSocket tick
+ * and re-evaluate instead of reusing old data or fetching REST.
+ */
+export function waitForBookTouch(restPairKeys: string[], timeoutMs: number): Promise<boolean> {
+  return new Promise(resolve => {
+    let done = false;
+    const finish = (hit: boolean) => { if (!done) { done = true; clearTimeout(t); off(); resolve(hit); } };
+    const t = setTimeout(() => finish(false), timeoutMs);
+    const wanted = new Set(restPairKeys);
+    const off = onBookUpdate(key => { if (!done && wanted.has(key)) finish(true); });
+  });
+}
+
 export async function cachedTakerCycleBreakdown(
   assetA: ObAsset,
   assetB: ObAsset,
@@ -912,10 +961,14 @@ export async function cachedTakerCycleBreakdown(
   if (!cross) return null;
   const pairA = OB_USD_PAIRS[assetA];
   const pairB = OB_USD_PAIRS[assetB];
-  const snaps = [pairA, cross.pair, pairB].map(p => getStreamBook(p));
-  if (snaps.some(s => !s)) return { ok: false, reason: "unavailable", oldestAgeMs: null };
+  const routePairs = [pairA, cross.pair, pairB];
+  const snaps = routePairs.map(p => getStreamBook(p));
+  // Per-leg freshness (exchange-timestamp based): route age = OLDEST leg.
+  const nowTs = Date.now();
+  const legAges = routePairs.map((p, i) => ({ pair: p, ageMs: snaps[i]?.ageMs ?? null, recvAgeMs: snaps[i] ? Math.max(0, nowTs - snaps[i]!.updatedAtMs) : null }));
+  if (snaps.some(s => !s)) return { ok: false, reason: "unavailable", oldestAgeMs: null, legAges };
   const oldestAgeMs = Math.max(...snaps.map(s => s!.ageMs));
-  if (oldestAgeMs > maxQuoteAgeMs) return { ok: false, reason: "stale", oldestAgeMs };
+  if (oldestAgeMs > maxQuoteAgeMs) return { ok: false, reason: "stale", oldestAgeMs, legAges };
   const [sA, sX, sB] = snaps as [NonNullable<typeof snaps[0]>, NonNullable<typeof snaps[0]>, NonNullable<typeof snaps[0]>];
   const books = new Map<string, OrderBook>([
     [pairA, { asks: sA.asks, bids: sA.bids }],
@@ -923,19 +976,20 @@ export async function cachedTakerCycleBreakdown(
     [pairB, { asks: sB.asks, bids: sB.bids }],
   ]);
   const sim = simulateCycle(assetA, assetB, sizeUsd, books, takerFeePct, activeLookup);
-  if (!sim) return { ok: false, reason: "unavailable", oldestAgeMs }; // depth can't absorb the size
+  if (!sim) return { ok: false, reason: "unavailable", oldestAgeMs, legAges }; // depth can't absorb the size
   const askA = sA.asks[0]?.[0]; const bidB = sB.bids[0]?.[0];
   const crossPx = cross.aIsQuote ? sX.asks[0]?.[0] : sX.bids[0]?.[0];
-  if (!askA || !bidB || !crossPx) return { ok: false, reason: "unavailable", oldestAgeMs };
+  if (!askA || !bidB || !crossPx) return { ok: false, reason: "unavailable", oldestAgeMs, legAges };
   const volA = sizeUsd / askA;
   const volB = cross.aIsQuote ? volA / crossPx : volA * crossPx;
   const rawEdgeUsd = volB * bidB - sizeUsd;
   const slippageUsd = Math.max(0, rawEdgeUsd - sim.grossProfitUsd);
   return {
     ok: true,
-    bd: { rawEdgeUsd, slippageUsd, feesUsd: sim.feeUsd, netProfitUsd: sim.profitUsd, volumeA: sim.volA },
+    bd: { rawEdgeUsd, slippageUsd, feesUsd: sim.feeUsd, netProfitUsd: sim.profitUsd, volumeA: sim.volA, legDiag: sim.legDiag },
     quoteAgeMs: oldestAgeMs,
     marketUpdateMs: Math.max(...snaps.map(s => s!.updatedAtMs)),
+    legAges,
   };
 }
 

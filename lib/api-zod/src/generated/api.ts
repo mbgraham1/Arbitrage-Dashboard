@@ -558,6 +558,8 @@ export const GetGraphScanResponse = zod.object({
   "executable": zod.boolean().describe('True when the live executor supports this route shape (Kraken triangle or 2-leg cross-exchange). Unsupported shapes are dry-run only.'),
   "histLiveAttempts": zod.number().optional().describe('Recent live execution attempts recorded for this route+style (max 20 considered).'),
   "histFillRate": zod.number().nullish().describe('Historical live fill rate 0..1; null until the route has ≥10 live attempts (insufficient history to judge).'),
+  "quoteAgeMs": zod.number().nullish().describe('Age (ms) of the streamed book snapshot this route\'s netProfitUsd was priced from; null when stream pricing was unavailable'),
+  "pricedFrom": zod.string().nullish().describe('Pricing source for netProfitUsd: \'stream\' = executor-grade simulator on live streamed books (matches the pre-fire math exactly); \'graph\' = graph engine estimate (stream unavailable)'),
   "effectiveScoreUsd": zod.number().optional().describe('Ranking score: net profit × historical fill rate (0.7 neutral prior when history is insufficient). Approximates expected realized profit.')
 })),
   "tradeSizeUsd": zod.number(),
@@ -582,7 +584,7 @@ export const graphExecuteBodyExecutionStyleDefault = `taker`;
 export const graphExecuteBodyForceModeDefault = false;
 export const graphExecuteBodyMaxRepricesDefault = 4;
 export const graphExecuteBodyAlwaysTakerFallbackDefault = false;
-export const graphExecuteBodyMaxQuoteAgeMsDefault = 250;
+export const graphExecuteBodyMaxQuoteAgeMsDefault = 200;
 
 export const GraphExecuteBody = zod.object({
   "krakenKey": zod.string(),

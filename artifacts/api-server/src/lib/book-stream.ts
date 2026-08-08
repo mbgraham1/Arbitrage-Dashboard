@@ -18,7 +18,13 @@
  */
 
 type Level = [number, number]; // [price, volume]
-export interface StreamBook { asks: Level[]; bids: Level[]; updatedAtMs: number; }
+export interface StreamBook {
+  asks: Level[]; bids: Level[];
+  /** Local arrival time of the last update for this book. */
+  updatedAtMs: number;
+  /** EXCHANGE-side timestamp of the last update (Kraken v2 `timestamp` field) — the true market-data time. Null until the first timestamped update (snapshots carry none). */
+  exchangeTsMs: number | null;
+}
 
 const DEPTH = 10;
 
@@ -32,20 +38,28 @@ const updateListeners: Array<(restKey: string) => void> = [];
 let krakenWs: WebSocket | null = null;
 let krakenConnected = false;
 let krakenLastMsgAt = 0;
+let krakenLastExchTsMs = 0; // newest exchange-side timestamp across all tracked book updates
 let reconnectDelayMs = 1_000;
 let trackedRestKeys: string[] = [];
 let stopped = false;
 
-export function onBookUpdate(cb: (restKey: string) => void): void { updateListeners.push(cb); }
+export function onBookUpdate(cb: (restKey: string) => void): () => void {
+  updateListeners.push(cb);
+  return () => { const i = updateListeners.indexOf(cb); if (i >= 0) updateListeners.splice(i, 1); };
+}
 
 export function getStreamBook(restPairKey: string): (StreamBook & { ageMs: number }) | null {
   const b = krakenBooks.get(restPairKey);
   if (!b || b.asks.length === 0 || b.bids.length === 0) return null;
-  // Freshness = connection currency, not last book change: Kraken pushes every
-  // change, so an unchanged book is CURRENT as of the last message received on
-  // the connection (heartbeats ~1s). A quiet pair's book is not stale data.
+  // Age is PER-LEG and measured from THIS pair's own EXCHANGE update
+  // timestamp (market-data time) — never from when we cached or read the
+  // object, and never discounted by activity on OTHER pairs or the
+  // connection. A silently stalled subscription must read as stale even
+  // while the rest of the feed is busy; the trader's rule is that any stale
+  // leg makes the whole route stale. Quiet pairs simply wait for their next
+  // tick (waitForBookTouch). Clock skew clamped at 0.
   const now = Date.now();
-  const ageMs = Math.min(now - b.updatedAtMs, krakenLastMsgAt > 0 ? now - krakenLastMsgAt : Infinity);
+  const ageMs = Math.max(0, now - (b.exchangeTsMs ?? b.updatedAtMs));
   return { ...b, ageMs };
 }
 
@@ -89,10 +103,12 @@ function applyDelta(side: Level[], price: number, qty: number, desc: boolean): v
 }
 
 interface WsLevel { price: number; qty: number; }
-interface WsBookMsg { channel?: string; type?: string; data?: Array<{ symbol: string; bids?: WsLevel[]; asks?: WsLevel[] }>; }
+interface WsBookMsg { channel?: string; type?: string; data?: Array<{ symbol: string; bids?: WsLevel[]; asks?: WsLevel[]; timestamp?: string }>; }
 
 function handleKrakenMessage(raw: string): void {
   krakenLastMsgAt = Date.now();
+  // krakenLastExchTs: newest EXCHANGE timestamp seen on any tracked book update.
+  // Connection currency is measured against this, not local arrival time.
   let msg: WsBookMsg;
   try { msg = JSON.parse(raw) as WsBookMsg; } catch { return; }
   if (msg.channel !== "book" || !msg.data) return;
@@ -105,6 +121,7 @@ function handleKrakenMessage(raw: string): void {
         asks: (d.asks ?? []).map(l => [l.price, l.qty] as Level).slice(0, DEPTH),
         bids: (d.bids ?? []).map(l => [l.price, l.qty] as Level).slice(0, DEPTH),
         updatedAtMs: now,
+        exchangeTsMs: null, // snapshots carry no exchange timestamp; first update sets it
       });
     } else if (msg.type === "update") {
       const book = krakenBooks.get(restKey);
@@ -112,6 +129,11 @@ function handleKrakenMessage(raw: string): void {
       for (const l of d.asks ?? []) applyDelta(book.asks, l.price, l.qty, false);
       for (const l of d.bids ?? []) applyDelta(book.bids, l.price, l.qty, true);
       book.updatedAtMs = now;
+      const exch = d.timestamp ? Date.parse(d.timestamp) : NaN;
+      if (Number.isFinite(exch)) {
+        book.exchangeTsMs = exch;
+        if (exch > krakenLastExchTsMs) krakenLastExchTsMs = exch;
+      }
     } else continue;
     for (const cb of updateListeners) { try { cb(restKey); } catch { /* listener errors must not kill the feed */ } }
   }

@@ -561,6 +561,10 @@ export interface GraphRoute {
   histLiveAttempts?: number;
   /** Historical live fill rate 0..1; null until the route has ≥10 live attempts (insufficient history to judge). */
   histFillRate?: number | null;
+  /** Age (ms) of the streamed book snapshot this route's netProfitUsd was priced from; null when stream pricing was unavailable */
+  quoteAgeMs?: number | null;
+  /** Pricing source for netProfitUsd: 'stream' = executor-grade simulator on live streamed books (matches the pre-fire math exactly); 'graph' = graph engine estimate (stream unavailable) */
+  pricedFrom?: string | null;
   /** Ranking score: net profit × historical fill rate (0.7 neutral prior when history is insufficient). Approximates expected realized profit. */
   effectiveScoreUsd?: number;
 }

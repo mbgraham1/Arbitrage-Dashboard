@@ -96,6 +96,14 @@ export interface GraphRoute {
   histFillRate?: number | null;
   /** Ranking score: netProfitUsd × fill-rate multiplier — approximates expected realized profit. */
   effectiveScoreUsd?: number;
+  /** Age (ms) of the streamed snapshot this route was re-priced from (executor-grade math); null/undefined when not stream-priced. */
+  quoteAgeMs?: number | null;
+  /** "stream" = executor's simulator on live streamed books (matches pre-fire exactly); "graph" = graph-engine estimate. */
+  pricedFrom?: string | null;
+  /** Snapshot identity: latest book-update ms of the streamed snapshot used for repricing. Lets the executor distinguish "same snapshot, different number = pricing bug" from "books ticked = market movement". */
+  marketUpdateMs?: number | null;
+  /** Taker fee %/leg the stream repricing used — the pre-fire must decide with the same fee or re-price. */
+  repricedFeePct?: number | null;
 }
 
 /** Mirror of the live executor's dispatch predicate — keep in lockstep with

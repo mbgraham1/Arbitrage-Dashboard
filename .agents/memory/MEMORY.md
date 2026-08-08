@@ -4,4 +4,4 @@
 - [Kraken nonce concurrency](kraken-nonce-concurrency.md) — nonces are per-key account-wide; multi-process key sharing can't be fixed in code, only detected/surfaced; nonce failures are safe to retry once.
 - [Executor lock coverage](executor-locks.md) — forced/manual trade paths must acquire the same shared locks the auto-executors gate on (withExecutionLock, finally release), or double-fires slip through.
 - [Generated client drift](generated-client-drift.md) — task agents hand-edit orval-generated files; port drift into openapi.yaml before codegen, verify per-artifact tsc.
-- [WS streaming & latency](latency-streaming.md) — Kraken WS v2 symbols need XBT→BTC translation; quote age = connection currency; stale→skip policy; scaled buffer must reach the executor.
+- [WS streaming & latency](latency-streaming.md) — Kraken WS v2 symbols need XBT→BTC translation; quote age = per-leg from exchange update ts (never connection-wide); stale→wait-a-tick→skip; scaled buffer must reach the executor.

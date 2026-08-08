@@ -57,7 +57,7 @@ import {
   type Pair,
 } from "../lib/exchange";
 import { getBestPairPrices, getTriPrices, getBtcTriPrices, scanAllPairs, getPairPrices, getAllPairSnapshots } from "../lib/price-cache";
-import { scanOrderBookCycles, preflightObCycle, discoverCrossPairs, freshJoinPrice, makerQuote, takerCycleBreakdown, cachedTakerCycleBreakdown, getEventScan, krakenStreamStats, getStreamBook, OB_ASSETS, OB_USD_PAIRS, CROSS_LOOKUP, type ObAsset } from "../lib/order-book";
+import { scanOrderBookCycles, preflightObCycle, discoverCrossPairs, freshJoinPrice, makerQuote, takerCycleBreakdown, cachedTakerCycleBreakdown, getEventScan, krakenStreamStats, getStreamBook, waitForBookTouch, formatLegAges, OB_ASSETS, OB_USD_PAIRS, CROSS_LOOKUP, type ObAsset } from "../lib/order-book";
 import { scanGraphOpportunities } from "../lib/graph-engine";
 import { createPairHistory, updatePairHistory, type PairHistory } from "../lib/kalman";
 import { waitForTriLimitFill } from "../lib/tri-fill.js";
@@ -283,6 +283,43 @@ router.get("/arb/fresh-quote", async (req, res): Promise<void> => {
 // Cross-exchange routes use an inventory bridge (no transfer lag assumed).
 // Query params: tradeSizeUsd (default 10), krakenFeesPct (default 0.16),
 //               coinbaseFeesPct (default 0.40), maxHops (default 4)
+/** Detect a directly-executable Kraken triangle route: USD→A→B→USD, all Kraken. */
+function krakenTriangleAssets(r: { hops: { from: string; to: string; exchange: string }[] }): { a: string; b: string } | null {
+  const real = r.hops.filter(h => h.exchange !== "bridge");
+  if (r.hops.length !== 3 || real.length !== 3 || !real.every(h => h.exchange === "kraken")) return null;
+  const asset = (n: string) => n.split(":").pop()!;
+  return { a: asset(r.hops[0]!.to), b: asset(r.hops[1]!.to) };
+}
+
+/**
+ * PRICING CONSISTENCY: re-price every Kraken-triangle route with the SAME
+ * depth-walk simulator, fee application, and streamed in-memory snapshot the
+ * executor's pre-fire micro-check uses. The graph engine's own estimate
+ * (separate leg math, possibly REST-cached books) is what caused the table to
+ * show +1.3% while a 1ms-later pre-fire computed a negative net — the
+ * displayed number must be the executable number.
+ */
+async function repriceKrakenTriangles(routes: { hops: { from: string; to: string; exchange: string }[]; description: string; netProfitUsd: number; profitPct: number; startUsd: number; quoteAgeMs?: number | null; pricedFrom?: string | null; marketUpdateMs?: number | null; repricedFeePct?: number | null }[], sizeUsd: number, takerFeePct: number, log: { debug: (o: object, m: string) => void }): Promise<void> {
+  for (const r of routes) {
+    const tri = krakenTriangleAssets(r);
+    if (!tri) continue;
+    try {
+      const c = await cachedTakerCycleBreakdown(tri.a as ObAsset, tri.b as ObAsset, sizeUsd, takerFeePct, 30_000);
+      if (c?.ok) {
+        r.netProfitUsd = c.bd.netProfitUsd;
+        r.profitPct = (c.bd.netProfitUsd / sizeUsd) * 100;
+        r.quoteAgeMs = c.quoteAgeMs;
+        r.pricedFrom = "stream";
+        r.marketUpdateMs = c.marketUpdateMs;
+        r.repricedFeePct = takerFeePct;
+        log.debug({ route: r.description, netUsd: c.bd.netProfitUsd, quoteAgeMs: c.quoteAgeMs, legs: c.bd.legDiag }, "[SCAN LEGS] stream-priced route");
+      } else {
+        r.pricedFrom = "graph"; // stream unavailable — graph estimate retained, marked
+      }
+    } catch { r.pricedFrom = "graph"; }
+  }
+}
+
 router.get("/arb/graph-scan", async (req, res): Promise<void> => {
   const tradeSizeUsd    = Math.max(1,  parseFloat(String(req.query["tradeSizeUsd"]    ?? "10"))   || 10);
   const krakenFeesPct   = Math.max(0,  parseFloat(String(req.query["krakenFeesPct"]   ?? "0.16")) || 0.16);
@@ -295,6 +332,9 @@ router.get("/arb/graph-scan", async (req, res): Promise<void> => {
   const accountId = String(req.query["accountId"] ?? "").trim() || null;
   try {
     const result = await scanGraphOpportunities(tradeSizeUsd, krakenFeesPct, coinbaseFeesPct, maxHops, executionStyle);
+    // Taker/adaptive display: Kraken triangles priced by the executor's own
+    // simulator on the streamed snapshot — table number == pre-fire number.
+    if (executionStyle === "taker") await repriceKrakenTriangles(result.routes, tradeSizeUsd, krakenFeesPct, req.log);
     // Fill-rate-weighted ranking (advisor-reviewed): rank executable routes by
     // expected REALIZED profit — net profit × historical live fill rate — not
     // theoretical edge alone. A +$0.10 route that fills 20% of the time (≈$0.02)
@@ -732,6 +772,11 @@ interface TriangleExecInput {
   tradeSizeUsd: number; feesPct: number; minProfitUsd: number; isDryRun: boolean;
   /** Override the per-leg maker fill window (e.g. 2s probe attempts). */
   makerTimeoutMs?: number;
+  /** Trader's freshness window (adaptive path): the pre-submission pre-flight
+   *  must price ALL legs from the live stream within this age (measured from
+   *  the EXCHANGE's market-data timestamps). Any stale leg → whole route
+   *  stale → no order is submitted. REST is never consulted. */
+  maxQuoteAgeMs?: number;
   /** Max leg-1 maker reprices before abandoning the route (default 4). */
   maxReprices?: number;
   /** Trader-directed: when leg-1 maker doesn't fill in its window, go taker
@@ -831,7 +876,7 @@ async function runKrakenTriangle(input: TriangleExecInput, reqLog: ReqLog): Prom
     // limits at join prices (maker), not a taker depth-walk — otherwise the
     // simulation understates the edge by the spread and rejects routes the
     // maker scanner correctly approved.
-    const pf = await preflightObCycle(assetA as ObAsset, assetB as ObAsset, tradeSizeUsd, effectiveFeesPct, takerOnly ? "taker" : "maker");
+    const pf = await preflightObCycle(assetA as ObAsset, assetB as ObAsset, tradeSizeUsd, effectiveFeesPct, takerOnly ? "taker" : "maker", input.maxQuoteAgeMs);
     if (!pf) {
       return { body: { success: false, isDryRun, executed: false, route, preflightProfitUsd: null, error: "Could not fetch fresh order books (or depth can't absorb the size)." } };
     }
@@ -1225,7 +1270,7 @@ async function runKrakenTriangle(input: TriangleExecInput, reqLog: ReqLog): Prom
           throw new LockRevokedError("leg1", "aborted before taker fallback — no new orders placed.");
         }
         const takerFeePct = tiers?.takerFeePct ?? effectiveFeesPct;
-        const freshTaker = await preflightObCycle(assetA as ObAsset, assetB as ObAsset, tradeSizeUsd, takerFeePct, "taker");
+        const freshTaker = await preflightObCycle(assetA as ObAsset, assetB as ObAsset, tradeSizeUsd, takerFeePct, "taker", input.maxQuoteAgeMs);
         // Floor for the taker fire: taker mode adds the safety buffer on top
         // of the trader's minimum — fresh taker net must clear BOTH.
         const takerFloor = threshold + safetyBufferUsd;
@@ -2029,7 +2074,7 @@ router.post("/arb/graph-execute", async (req, res): Promise<void> => {
   const tRequestMs = Date.now(); // latency: request in (≈ opportunity handed to executor)
   // Micro-check freshness threshold — cached quotes older than this SKIP the
   // fire instead of executing blind. Clamped 50ms..5s; default 250ms.
-  const maxQuoteAgeMs = Math.min(5_000, Math.max(50, Math.round(parsed.data.maxQuoteAgeMs ?? 250)));
+  const maxQuoteAgeMs = Math.min(5_000, Math.max(50, Math.round(parsed.data.maxQuoteAgeMs ?? 200)));
   // Server-side safety bounds — never trust client numbers for live orders:
   // finite positive size, non-negative fees, and (live only) a non-negative
   // profit floor so a negative minProfitUsd can't push a losing route through.
@@ -2092,6 +2137,10 @@ router.post("/arb/graph-execute", async (req, res): Promise<void> => {
 
     // 1. Fresh pre-flight scan (depth-walked VWAP prices in taker mode)
     const scan = await scanGraphOpportunities(tradeSizeUsd, effectiveKrakenFeesPct, coinbaseFeesPct, 4, executionStyle);
+    // Same stream repricing as /arb/graph-scan (taker fee tier), so the route
+    // net the gates see is the executable number, not the graph estimate.
+    const scanTakerFeePct = tiers?.takerFeePct ?? krakenFeesPct;
+    if (executionStyleReq !== "maker") await repriceKrakenTriangles(scan.routes, tradeSizeUsd, scanTakerFeePct, req.log);
     const route = routeDescription
       ? scan.routes.find(r => r.description === routeDescription)
       : scan.routes[0];
@@ -2105,9 +2154,11 @@ router.post("/arb/graph-execute", async (req, res): Promise<void> => {
     //     (per Kraken leg, on notional) so the gate can't approve on an
     //     understated fee. A lower route fee is left as safety margin.
     let routeFeeAdjustedNetUsd = route.netProfitUsd;
+    let routeTakerFeePct: number | null = null; // actual taker tier for THIS route's pairs — adaptive must decide with it
     const routeKrakenPairs = [...new Set(route.hops.filter(h => h.exchange === "kraken" && h.pair).map(h => h.pair!))];
     if (routeKrakenPairs.length > 0) {
       const routeTiers = await krakenFeeTiers({ krakenKey, krakenSecret }, routeKrakenPairs);
+      routeTakerFeePct = routeTiers?.takerFeePct ?? null;
       const routeFeePct = (executionStyle === "maker" ? routeTiers?.makerFeePct : routeTiers?.takerFeePct) ?? null;
       if (routeFeePct != null && routeFeePct > effectiveKrakenFeesPct) {
         const deltaUsd = ((routeFeePct - effectiveKrakenFeesPct) / 100) * tradeSizeUsd * routeKrakenPairs.length;
@@ -2141,30 +2192,80 @@ router.post("/arb/graph-execute", async (req, res): Promise<void> => {
     let marketUpdateMs: number | null = null;  // latency: last book update in that snapshot
     let adaptiveBufferUsd: number | null = null; // scaled buffer the adaptive approval used — MUST be enforced by the executor too
     if (executionStyleReq === "adaptive" && isKrakenTriangle) {
-      const takerFeePct = tiers?.takerFeePct ?? krakenFeesPct;
+      // Decide with the ROUTE's actual taker tier (never lower than the
+      // account default) — a higher-fee pair must not be approved on an
+      // understated fee.
+      const takerFeePct = Math.max(routeTakerFeePct ?? 0, tiers?.takerFeePct ?? krakenFeesPct);
+      // If the scan repriced this route at a lower fee, re-price it at the
+      // decision fee so the buffer, gates, and consistency check all see the
+      // same executable number.
+      if (route.pricedFrom === "stream" && route.repricedFeePct != null && takerFeePct > route.repricedFeePct + 1e-9) {
+        await repriceKrakenTriangles([route], tradeSizeUsd, takerFeePct, req.log);
+      }
       // Safety buffer scales with the SCANNER edge: a large stale edge earns a
       // larger margin (10% of it), never a bypass of profitability validation.
       const bufferUsd = Math.max(0.02, tradeSizeUsd * 0.0005, route.netProfitUsd * 0.10);
       adaptiveBufferUsd = bufferUsd;
       // MICRO-CHECK: read the same timestamped in-memory stream snapshot the
-      // scanner sees — zero network. Stale (> maxQuoteAgeMs) → SKIP, never a
-      // blind fire. Stream unavailable (WS down) → REST fallback, logged.
+      // scanner sees — zero network. Stale (> maxQuoteAgeMs) → wait for the
+      // next WebSocket tick on this route's pairs and evaluate ONCE more;
+      // still stale → SKIP. Old data is never reused and REST is never
+      // fetched in the fire path.
       let bd: import("../lib/order-book").TakerCycleBreakdown | null = null;
-      const cachedRes = await cachedTakerCycleBreakdown(asset(route.hops[0]!.to) as ObAsset, asset(route.hops[1]!.to) as ObAsset, tradeSizeUsd, takerFeePct, maxQuoteAgeMs);
+      const triA = asset(route.hops[0]!.to) as ObAsset, triB = asset(route.hops[1]!.to) as ObAsset;
+      let cachedRes = await cachedTakerCycleBreakdown(triA, triB, tradeSizeUsd, takerFeePct, maxQuoteAgeMs);
+      if (cachedRes && !cachedRes.ok && cachedRes.reason === "stale") {
+        // Watch the SAME pairs pricing uses — dynamically discovered cross,
+        // not the hardcoded fallback (a discovered-only cross would otherwise
+        // never wake this wait).
+        const { lookup: activeLookup } = await discoverCrossPairs();
+        const routePairs = [OB_USD_PAIRS[triA], OB_USD_PAIRS[triB], activeLookup.get(`${triA}-${triB}`)?.pair].filter((p): p is string => !!p);
+        const waitMs = Math.min(2_000, Math.max(500, maxQuoteAgeMs * 4));
+        req.log.info({ route: route.description, oldestAgeMs: cachedRes.oldestAgeMs, waitMs }, "Quotes stale — waiting for WebSocket updates before re-evaluating");
+        // Re-evaluate on EVERY tick until the budget runs out: all three legs
+        // must be inside the window at the same moment (one busy leg's tick
+        // must not end the wait while a quiet leg is still stale).
+        const deadline = Date.now() + waitMs;
+        while (Date.now() < deadline && cachedRes && !cachedRes.ok && cachedRes.reason === "stale") {
+          const touched = await waitForBookTouch(routePairs, deadline - Date.now());
+          if (!touched) break;
+          cachedRes = await cachedTakerCycleBreakdown(triA, triB, tradeSizeUsd, takerFeePct, maxQuoteAgeMs);
+        }
+      }
       if (cachedRes?.ok) {
         bd = cachedRes.bd;
         quoteAgeMs = cachedRes.quoteAgeMs;
         marketUpdateMs = cachedRes.marketUpdateMs;
+        // Per-leg pricing diagnostic — pair, side, top-of-book, VWAP for every leg.
+        req.log.info({ route: route.description, netUsd: bd.netProfitUsd, quoteAgeMs, legs: bd.legDiag }, "[PRE-FIRE LEGS] stream snapshot pricing");
+        req.log.info({ route: route.description }, `[FRESHNESS] ${formatLegAges(cachedRes.legAges)} | FRESH — evaluating`);
+        // CONSISTENCY GATE: the scan above priced this route with the SAME
+        // simulator + fee on the SAME stream books milliseconds ago. Any gap
+        // beyond tiny book movement means a pricing bug — block, never fire.
+        if (route.pricedFrom === "stream") {
+          const tolUsd = Math.max(0.02, tradeSizeUsd * 0.002);
+          const gap = Math.abs(route.netProfitUsd - bd.netProfitUsd);
+          const sameSnapshot = route.marketUpdateMs != null && route.marketUpdateMs === cachedRes.marketUpdateMs;
+          if (gap > tolUsd && !sameSnapshot) {
+            // Books ticked between scan and micro-check — market movement,
+            // not a pricing bug. The strict fresh pre-fire below governs.
+            req.log.info({ route: route.description, scannerNetUsd: route.netProfitUsd, preFireNetUsd: bd.netProfitUsd, gapUsd: gap }, "Scanner/pre-fire gap across DIFFERENT snapshots — treating as market movement; fresh pre-fire decides");
+          } else if (gap > tolUsd) {
+            req.log.error({ route: route.description, scannerNetUsd: route.netProfitUsd, preFireNetUsd: bd.netProfitUsd, gapUsd: gap, tolUsd, quoteAgeMs, scannerQuoteAgeMs: route.quoteAgeMs ?? null, legs: bd.legDiag }, "PRICING CONSISTENCY ERROR — scanner and pre-fire disagree on the same snapshot; blocking execution");
+            res.json({ success: false, isDryRun, executed: false, route: route.description, preflightProfitUsd: bd.netProfitUsd, error: `Pre-flight failed — PRICING CONSISTENCY ERROR: scanner net $${route.netProfitUsd.toFixed(4)} vs pre-fire net $${bd.netProfitUsd.toFixed(4)} on the same snapshot (gap $${gap.toFixed(4)} > tol $${tolUsd.toFixed(4)}). Execution blocked until pricing agrees.` });
+            return;
+          }
+        }
       } else if (cachedRes && !cachedRes.ok && cachedRes.reason === "stale") {
-        req.log.info({ route: route.description, oldestAgeMs: cachedRes.oldestAgeMs, maxQuoteAgeMs }, "ADAPTIVE → SKIP (cached quotes stale — refusing to fire on old data)");
-        res.json({ success: false, isDryRun, executed: false, route: route.description, preflightProfitUsd: null, error: `Pre-flight failed — adaptive SKIP: cached quotes are ${cachedRes.oldestAgeMs}ms old (max ${maxQuoteAgeMs}ms). Stale data never fires — waiting for a fresh book update.` });
+        req.log.info({ route: route.description, oldestAgeMs: cachedRes.oldestAgeMs, maxQuoteAgeMs }, `[FRESHNESS] ${formatLegAges(cachedRes.legAges)} | STALE — SKIP`);
+        res.json({ success: false, isDryRun, executed: false, route: route.description, preflightProfitUsd: null, error: `Pre-flight failed — adaptive SKIP: quotes are still ${cachedRes.oldestAgeMs}ms old (max ${maxQuoteAgeMs}ms) after waiting for the next book update. Stale data never fires.` });
         return;
       } else {
-        // Stream has no book for a leg (WS down or warming up) — REST
-        // fallback keeps the bot functional at REST latency, logged loudly.
-        req.log.warn({ route: route.description, stream: krakenStreamStats() }, "Stream snapshot unavailable — falling back to REST taker pre-flight (slow path)");
-        bd = await takerCycleBreakdown(asset(route.hops[0]!.to) as ObAsset, asset(route.hops[1]!.to) as ObAsset, tradeSizeUsd, takerFeePct);
-        if (bd) { quoteAgeMs = 0; marketUpdateMs = Date.now(); }
+        // Stream has no book for a leg (WS down or warming up) — SKIP. The
+        // fire path never falls back to REST: fresh streamed data or nothing.
+        req.log.warn({ route: route.description, stream: krakenStreamStats() }, "ADAPTIVE → SKIP (stream snapshot unavailable — no REST fallback in the fire path)");
+        res.json({ success: false, isDryRun, executed: false, route: route.description, preflightProfitUsd: null, error: `Pre-flight failed — adaptive SKIP: live streamed books unavailable for this route (stream down or warming up). The fire path never uses REST data — waiting for the stream.` });
+        return;
       }
       if (!bd) {
         // No fresh taker breakdown (books unavailable or depth can't absorb the
@@ -2184,6 +2285,8 @@ router.post("/arb/graph-execute", async (req, res): Promise<void> => {
         effNetProfitUsd = takerNet; // buffered fresh taker net — what taker execution actually expects
         effSlippagePct = bd ? (bd.slippageUsd / tradeSizeUsd) * 100 : 0;
         req.log.info({ route: route.description, takerNetUsd: takerNet, makerEvUsd, bufferUsd, takerFeePct }, "ADAPTIVE → TAKER (fresh buffered taker net clears floor — no maker attempt)");
+        // Single-line trader-readable decision record: freshness + both nets + gate + verdict.
+        req.log.info({ route: route.description }, `[DECISION] ${formatLegAges(cachedRes?.ok ? cachedRes.legAges : undefined)} | scanner_net=$${route.netProfitUsd.toFixed(4)} | prefire_net=$${(bd?.netProfitUsd ?? takerNet).toFixed(4)} | TAKER NET=$${takerNet.toFixed(4)} > FLOOR=$${minProfitUsd.toFixed(4)} (buffer $${bufferUsd.toFixed(4)}) | FIRE`);
       } else if (makerEvUsd >= minProfitUsd) {
         req.log.info({ route: route.description, takerNetUsd: takerNet, makerEvUsd, fillProb: evM?.pAll ?? 0.55, historyBacked: !!evM }, "ADAPTIVE → MAKER (taker net below floor, maker expected realized clears it)");
       } else {
@@ -2316,6 +2419,11 @@ router.post("/arb/graph-execute", async (req, res): Promise<void> => {
         // TAKER path (requested or adaptive-chosen): market/IOC all 3 legs,
         // gated by the fresh taker pre-flight + safety buffer inside.
         takerOnly: executionStyle === "taker",
+        // Adaptive fires: extend the freshness contract THROUGH submission —
+        // the executor's own pre-submission pre-flight must price every leg
+        // from the stream within the trader's window (exchange timestamps);
+        // any stale leg aborts before any order is placed. Never REST.
+        maxQuoteAgeMs: adaptiveResolved ? maxQuoteAgeMs : undefined,
         // Enforce the SAME scaled buffer the adaptive approval used — the
         // executor's own preflight and taker-fallback gates must not be
         // looser than the decision that authorized this fire.
