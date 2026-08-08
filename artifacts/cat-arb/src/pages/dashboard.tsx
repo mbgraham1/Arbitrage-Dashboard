@@ -950,6 +950,27 @@ function OrderBookHunterCard() {
               aria-label="Trade size in USD"
             /> trade size
           </span>
+          <TooltipProvider>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <span className={cn(
+                  "flex items-center gap-0.5 text-[10px] font-mono font-normal px-1.5 py-0.5 border cursor-default",
+                  actualFee != null
+                    ? "border-success/60 text-success bg-success/5"
+                    : "border-border text-muted-foreground",
+                )}>
+                  fees: {effectiveFeePct.toFixed(2)}%
+                  {actualFee != null && <span className="text-[8px] font-bold ml-0.5">✓</span>}
+                </span>
+              </TooltipTrigger>
+              <TooltipContent side="bottom" className="max-w-[200px]">
+                {actualFee != null
+                  ? <p className="text-[11px]">Your actual Kraken taker fee tier: <span className="font-bold">{actualFee.toFixed(2)}%</span> per leg. Overrides the configured {settings.obFeesPct.toFixed(2)}% assumption.</p>
+                  : <p className="text-[11px]">Configured OB fee assumption: <span className="font-bold">{settings.obFeesPct.toFixed(2)}%</span> per leg. Add Kraken credentials to auto-detect your actual tier.</p>
+                }
+              </TooltipContent>
+            </Tooltip>
+          </TooltipProvider>
           <span className="flex items-center gap-1 text-[10px] font-mono font-normal text-muted-foreground">
             min $<input
               type="number"
