@@ -19,6 +19,8 @@ import {
   useGetObScan,
   useObExecute,
   getGetObScanQueryKey,
+  useGetFeeTier,
+  getGetFeeTierQueryKey,
 } from "@workspace/api-client-react";
 import type { ExchangeCredentials, PriceData, BalanceData, TriangularOpportunity, CointegrationSignal, ObCycleEntry } from "@workspace/api-client-react";
 import { useQueryClient } from "@tanstack/react-query";
@@ -38,6 +40,29 @@ export const ALL_PAIRS = [
 ] as const;
 
 export type ScanPair = typeof ALL_PAIRS[number];
+
+/**
+ * Coinbase taker fee assumption (% per leg) for market-executed force trades.
+ * Mirrors the configured maker assumption (0.40% maker → 0.60% taker at the
+ * same Coinbase Advanced tier). Coinbase has no fee-tier API we call, so this
+ * stays an assumption; the Kraken side uses the account's detected taker tier.
+ */
+export const COINBASE_TAKER_PCT = 0.60;
+
+/**
+ * Fee model applied to Force Scan & Trade (market orders on both exchanges).
+ * When the account's Kraken taker tier is detected, `feesPct` = detected
+ * Kraken taker + COINBASE_TAKER_PCT; otherwise it falls back to the
+ * configured (maker-based) totalFees.
+ */
+export interface ForceFeeModel {
+  /** Total fee % subtracted for force-trade net edge */
+  feesPct: number;
+  /** True when feesPct is taker-based (Kraken tier detected) */
+  takerDetected: boolean;
+  /** Detected Kraken taker fee % per leg, or null when unavailable */
+  krakenTakerPct: number | null;
+}
 
 export interface BotSettings {
   minNetEdge: number;
@@ -129,6 +154,11 @@ export interface BotContextType {
   isExecutingCross: boolean;
   /** Route and timestamp of the last successfully auto-executed OB cycle */
   lastObAutoTrade: { route: string; timestamp: string; profitUsd: number | null } | null;
+  /**
+   * Fee model used for Force Scan & Trade (market orders → taker fees).
+   * Taker-based when the Kraken tier is detected, else configured totalFees.
+   */
+  forceFeeModel: ForceFeeModel;
 }
 
 const BotContext = createContext<BotContextType | undefined>(undefined);
@@ -290,6 +320,34 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
   const cachedBalancesRef = useRef<BalanceData | null>(null);
 
   const BALANCE_CACHE_TTL_MS = 30_000; // refresh balances at most once per 30 s (mirrors Python)
+
+  // ── Detected Kraken taker fee tier ─────────────────────────────────────────
+  // Force trades execute as MARKET orders on both exchanges and therefore pay
+  // taker fees — the configured totalFees (maker-based) understates that cost.
+  // Fetch the account's actual Kraken taker tier (same cached endpoint the
+  // dashboard cards use) and keep it in a ref for the async force paths.
+  const hasKrakenCreds = !!credentials.krakenKey && !!credentials.krakenSecret;
+  const { data: feeTierData } = useGetFeeTier(
+    { krakenKey: credentials.krakenKey, krakenSecret: credentials.krakenSecret },
+    { query: { queryKey: getGetFeeTierQueryKey({ krakenKey: credentials.krakenKey, krakenSecret: credentials.krakenSecret }), enabled: hasKrakenCreds, staleTime: 10 * 60_000, refetchInterval: 10 * 60_000 } },
+  );
+  const krakenTakerPct = feeTierData?.takerFeePct ?? null;
+  const krakenTakerRef = useRef<number | null>(null);
+  useEffect(() => { krakenTakerRef.current = krakenTakerPct; }, [krakenTakerPct]);
+  // Total fee % for a market-executed force trade: detected Kraken taker +
+  // Coinbase taker assumption; falls back to configured totalFees when the
+  // Kraken tier isn't available (no creds / lookup failed).
+  const forcedFeesPctNow = useCallback((s: BotSettings): { feesPct: number; takerDetected: boolean } => {
+    const kTaker = krakenTakerRef.current;
+    return kTaker != null
+      ? { feesPct: kTaker + COINBASE_TAKER_PCT, takerDetected: true }
+      : { feesPct: s.totalFees, takerDetected: false };
+  }, []);
+  const forceFeeModel: ForceFeeModel = {
+    feesPct: krakenTakerPct != null ? krakenTakerPct + COINBASE_TAKER_PCT : settings.totalFees,
+    takerDetected: krakenTakerPct != null,
+    krakenTakerPct,
+  };
 
   const fetchPricesMutation = useFetchPrices();
   const fetchBalancesMutation = useFetchBalances();
@@ -544,7 +602,15 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
       // Force Trade always uses market orders; auto-loop uses limit (post-only, lower fees)
       const orderType = forced ? "market" : "limit";
       const tag = forced ? "[FORCE·MKT]" : live ? "[LIVE·LMT]" : "[DRY RUN]";
-      const netEdge = data.grossSpreadPct - s.totalFees - s.slippage;
+      // Forced trades are market orders → taker fees on both exchanges.
+      // Auto-loop trades are limit (post-only) → configured maker-based totalFees.
+      const feeInfo = forced ? forcedFeesPctNow(s) : { feesPct: s.totalFees, takerDetected: false };
+      const netEdge = data.grossSpreadPct - feeInfo.feesPct - s.slippage;
+      if (forced) {
+        addLog("info", feeInfo.takerDetected
+          ? `${tag} Fee model: TAKER ${feeInfo.feesPct.toFixed(2)}% (Kraken tier ${krakenTakerRef.current!.toFixed(2)}% + Coinbase ${COINBASE_TAKER_PCT.toFixed(2)}%) — market orders`
+          : `${tag} Fee model: configured ${feeInfo.feesPct.toFixed(2)}% (Kraken taker tier not detected — add Kraken keys for accurate taker fees)`);
+      }
 
       // Derive the base asset symbol from the active pair (e.g. "BTC" from "BTC/USD")
       const baseAsset = data.pair ? data.pair.split("/")[0] : "SOL";
@@ -624,8 +690,9 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
         setFailedTrades((n) => n + 1);
       }
     },
-    // executeTradeMutation and queryClient are stable (React Query guarantees)
-    [addLog, executeTradeMutation, queryClient],
+    // executeTradeMutation and queryClient are stable (React Query guarantees);
+    // forcedFeesPctNow is a stable useCallback([]) reading krakenTakerRef.
+    [addLog, executeTradeMutation, queryClient, forcedFeesPctNow],
   );
 
   // ── Force Triangular ──────────────────────────────────────────────────────────
@@ -719,13 +786,16 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
 
           const s = settingsRef.current;
           const quoteAgeMs = Date.now() - new Date(freshQ.quotedAt).getTime();
-          const freshNetEdge = freshQ.grossSpreadPct - s.totalFees - s.slippage;
+          // Force trades execute at market → gate on taker fees, not the
+          // maker-based configured totalFees (which understates the cost).
+          const feeInfo = forcedFeesPctNow(s);
+          const freshNetEdge = freshQ.grossSpreadPct - feeInfo.feesPct - s.slippage;
 
           if (freshNetEdge < s.minNetEdge) {
             addLog(
               "warning",
               `[FORCE] Spread collapsed — aborting. Live net edge ${freshNetEdge.toFixed(3)}% < min ${s.minNetEdge}% ` +
-              `(prices refreshed ${quoteAgeMs}ms ago)`,
+              `(${feeInfo.takerDetected ? "taker" : "configured"} fees ${feeInfo.feesPct.toFixed(2)}% + slip ${s.slippage.toFixed(2)}%, prices refreshed ${quoteAgeMs}ms ago)`,
             );
             return;
           }
@@ -828,7 +898,7 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
       setIsForcingTrade(false);
     }
     });
-  }, [addLog, fetchPricesMutation, runExecuteTrade]);
+  }, [addLog, fetchPricesMutation, runExecuteTrade, forcedFeesPctNow]);
 
   // ── Polling loop — only re-runs when isRunning changes ───────────────────────
   useEffect(() => {
@@ -996,6 +1066,7 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
     isAutoExecutingTri,
     isExecutingCross,
     lastObAutoTrade,
+    forceFeeModel,
   };
 
   return <BotContext.Provider value={value}>{children}</BotContext.Provider>;

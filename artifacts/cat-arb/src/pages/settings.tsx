@@ -296,7 +296,9 @@ export default function Settings() {
             <div className="space-y-3">
               <div className="flex flex-col gap-1">
                 <Label>Combined Fees (%)</Label>
-                <span className="text-xs text-muted-foreground font-mono">Total taker fees across both exchanges (default 0.80%)</span>
+                <span className="text-xs text-muted-foreground font-mono">
+                  Combined fees across both exchanges (default 0.56% = Kraken maker 0.16% + Coinbase maker 0.40%). Used by the auto bot loop, which places LIMIT (maker) orders. Force Scan &amp; Trade places MARKET orders instead — it pays TAKER fees, so that path uses your detected Kraken taker tier + a {`0.60%`} Coinbase taker assumption, and only falls back to this value when the Kraken tier can't be detected.
+                </span>
               </div>
               <Input
                 type="number"

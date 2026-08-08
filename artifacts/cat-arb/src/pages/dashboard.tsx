@@ -153,6 +153,7 @@ export default function Dashboard() {
     startTime, failedTrades, sessionTradeCount, apiLatencyMs,
     triOpportunities, triPriceSource,
     isAutoExecutingOb, isExecutingCross,
+    forceFeeModel,
   } = useBotContext();
   const [uptimeStr, setUptimeStr] = useState("0h 0m");
   useEffect(() => {
@@ -184,14 +185,18 @@ export default function Dashboard() {
     return () => clearInterval(id);
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
   const feesAndSlip = settings.totalFees + settings.slippage;
+  // Force trades execute at MARKET → the gate/tooltip must use taker fees
+  // (detected Kraken tier + Coinbase taker assumption) when available, not
+  // the maker-based configured totalFees. Mirrors the bot-context force gate.
+  const forceFeesAndSlip = forceFeeModel.feesPct + settings.slippage;
   const bestForcePair = React.useMemo(() => {
     const entries = forceScanQuery.data ?? [];
     if (entries.length === 0) return null;
     const sorted = [...entries]
       .filter(e => e.grossSpreadPct != null)
-      .sort((a, b) => (b.grossSpreadPct - feesAndSlip) - (a.grossSpreadPct - feesAndSlip));
+      .sort((a, b) => (b.grossSpreadPct - forceFeesAndSlip) - (a.grossSpreadPct - forceFeesAndSlip));
     return sorted[0] ?? null;
-  }, [forceScanQuery.data, feesAndSlip]);
+  }, [forceScanQuery.data, forceFeesAndSlip]);
 
   const toggleBot = () => {
     if (!credentials.krakenKey && !isRunning) {
@@ -298,8 +303,8 @@ export default function Dashboard() {
                 disabled={isForcingTrade}
                 title={
                   bestForcePair
-                    ? `Rescans, then trades ${bestForcePair.pair} if net edge clears your minimum · net edge ${(bestForcePair.grossSpreadPct - feesAndSlip) >= 0 ? "+" : ""}${(bestForcePair.grossSpreadPct - feesAndSlip).toFixed(3)}% (gross ${bestForcePair.grossSpreadPct >= 0 ? "+" : ""}${bestForcePair.grossSpreadPct.toFixed(3)}% − ${feesAndSlip.toFixed(2)}% fees+slip) · buy ${bestForcePair.buyExchange} → sell ${bestForcePair.sellExchange}`
-                    : "Rescans all pairs, fetches a fresh quote, then trades only if net edge clears your minimum"
+                    ? `Rescans, then trades ${bestForcePair.pair} if net edge clears your minimum · net edge ${(bestForcePair.grossSpreadPct - forceFeesAndSlip) >= 0 ? "+" : ""}${(bestForcePair.grossSpreadPct - forceFeesAndSlip).toFixed(3)}% (gross ${bestForcePair.grossSpreadPct >= 0 ? "+" : ""}${bestForcePair.grossSpreadPct.toFixed(3)}% − ${forceFeesAndSlip.toFixed(2)}% ${forceFeeModel.takerDetected ? `taker fees [Kraken ${forceFeeModel.krakenTakerPct!.toFixed(2)}% + Coinbase ${(forceFeeModel.feesPct - forceFeeModel.krakenTakerPct!).toFixed(2)}%]` : "configured fees (taker tier not detected)"}+slip) · market orders · buy ${bestForcePair.buyExchange} → sell ${bestForcePair.sellExchange}`
+                    : "Rescans all pairs, fetches a fresh quote, then trades only if net edge clears your minimum (market orders — taker fees)"
                 }
               >
                 <Siren className="h-4 w-4 mr-2" />
@@ -307,7 +312,7 @@ export default function Dashboard() {
               </Button>
               <span className="text-[10px] font-mono text-muted-foreground leading-none">
                 {bestForcePair
-                  ? <>Best: <span className="font-bold text-foreground">{bestForcePair.pair}</span> <span className={cn((bestForcePair.grossSpreadPct - feesAndSlip) >= 0 ? "text-success" : "text-destructive")}>{(bestForcePair.grossSpreadPct - feesAndSlip) >= 0 ? "+" : ""}{(bestForcePair.grossSpreadPct - feesAndSlip).toFixed(3)}% net</span></>
+                  ? <>Best: <span className="font-bold text-foreground">{bestForcePair.pair}</span> <span className={cn((bestForcePair.grossSpreadPct - forceFeesAndSlip) >= 0 ? "text-success" : "text-destructive")}>{(bestForcePair.grossSpreadPct - forceFeesAndSlip) >= 0 ? "+" : ""}{(bestForcePair.grossSpreadPct - forceFeesAndSlip).toFixed(3)}% net</span> <span className="text-muted-foreground">({forceFeeModel.takerDetected ? "taker" : "cfg"} fees)</span></>
                   : <span className="italic">SOL/USD (fallback)</span>
                 }
               </span>
