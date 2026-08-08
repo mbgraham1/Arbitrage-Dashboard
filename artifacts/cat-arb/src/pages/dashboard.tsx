@@ -11,6 +11,7 @@ import {
 import { format } from "date-fns";
 import { cn } from "@/lib/utils";
 import { useToast } from "@/hooks/use-toast";
+import { useLocalStorage } from "@/hooks/use-local-storage";
 import { useGetTradeSummary, useListTrades, useScanAllPairs, useGetObScan, getGetObScanQueryKey, useObExecute, useGetAllPairSnapshots, getGetAllPairSnapshotsQueryKey, useGetGraphScan, getGetGraphScanQueryKey, useGraphExecute, useGetFeeTier, getGetFeeTierQueryKey, useGetExecutionQuality, getGetExecutionQualityQueryKey, useGetExecutionStatus, getGetExecutionStatusQueryKey, useGetAccountPnl, getGetAccountPnlQueryKey, useGetInventoryScan, getGetInventoryScanQueryKey, useInventoryExecute, TradeRecord, PairScanEntry, ObCycleEntry, AllPairSnapshot, GraphRoute, GraphRouteHop, InventoryOpportunity, InventoryRebalanceAlert } from "@workspace/api-client-react";
 
 // ── Small helpers ──────────────────────────────────────────────────────────────
@@ -1087,7 +1088,10 @@ function OrderBookHunterCard() {
   // assumption makes a 1.2% 3-leg hurdle that hides every real edge.
   const actualFee = useActualKrakenFees().taker;
   const effectiveFeePct = actualFee ?? settings.obFeesPct;
-  const [volatilityFilter, setVolatilityFilter] = useState(true);
+  // Persisted so a trader's preference survives page refreshes. The hook
+  // reads localStorage synchronously in its initializer, so the saved value
+  // is applied before the first scan query fires.
+  const [volatilityFilter, setVolatilityFilter] = useLocalStorage<boolean>("ob-volatility-filter", true);
   const obParams = { tradeSizeUsd: tradeSize, feesPct: effectiveFeePct, minProfitUsd: 0.02, maxSlippagePct: 0.5, volatilityFilter };
   const { data, isLoading } = useGetObScan(obParams, {
     query: { queryKey: getGetObScanQueryKey(obParams), refetchInterval: 5_000, staleTime: 4_000 },
