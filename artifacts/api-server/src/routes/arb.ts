@@ -554,6 +554,10 @@ interface TriangleExecInput {
   tradeSizeUsd: number; feesPct: number; minProfitUsd: number; isDryRun: boolean;
   /** Override the per-leg maker fill window (e.g. 2s probe attempts). */
   makerTimeoutMs?: number;
+  /** Caller ALREADY holds the live execution lock with this generation token.
+   *  Skip the internal acquire (which would see the caller's own lock and
+   *  self-block) — the caller releases it. */
+  heldLockGen?: number;
 }
 interface TriangleExecOut { badRequest?: string; body?: Record<string, unknown>; }
 type ReqLog = { info: (o: unknown, m?: string) => void; error: (o: unknown, m?: string) => void };
@@ -568,6 +572,7 @@ async function runKrakenTriangle(input: TriangleExecInput, reqLog: ReqLog): Prom
   const creds = { krakenKey, krakenSecret };
   const route = `USD→${assetA}→${assetB}→USD`;
   let lockGen: number | null = null;
+  let ownsLock = false; // true only when WE acquired the lock (not adopted from caller)
   // Per-leg diagnostic: how many legs CONFIRMED filled before the run ended.
   // null until a live run actually starts placing orders (dry runs, pre-flight
   // rejections stay null so they can't skew leg-level fill rates).
@@ -637,11 +642,18 @@ async function runKrakenTriangle(input: TriangleExecInput, reqLog: ReqLog): Prom
     //    the execution aborts and unwinds the ACTUAL residual positions
     //    (queried from the exchange, never assumed from the plan). Success is
     //    only reported when the position ends flat.
-    // Single-flight: only one LIVE triangle may run in this process.
-    if (liveLockBusy()) {
-      return { body: { success: false, isDryRun, executed: false, route, preflightProfitUsd: pf.profitUsd, error: "Another live execution is already in progress — wait for it to finish." } };
+    // Single-flight: only one LIVE triangle may run in this process. When the
+    // caller (graph-execute) already holds the lock, adopt its token instead
+    // of re-checking — checking would see the caller's own lock and self-block.
+    if (input.heldLockGen != null) {
+      lockGen = input.heldLockGen;
+    } else {
+      if (liveLockBusy()) {
+        return { body: { success: false, isDryRun, executed: false, route, preflightProfitUsd: pf.profitUsd, error: "Another live execution is already in progress — wait for it to finish." } };
+      }
+      lockGen = acquireLiveLock();
+      ownsLock = true;
     }
-    lockGen = acquireLiveLock();
     legsCompleted = 0;
 
     const log = { info: (m: string) => reqLog.info(m), error: (m: string) => reqLog.error(m) };
@@ -977,8 +989,9 @@ async function runKrakenTriangle(input: TriangleExecInput, reqLog: ReqLog): Prom
   } finally {
     // Only the CURRENT lock holder may reset shared state — the generation
     // token makes this a no-op if this run was stale-evicted and a newer
-    // execution now owns the lock.
-    if (lockGen != null) releaseLiveLock(lockGen);
+    // execution now owns the lock. An ADOPTED lock (heldLockGen) is released
+    // by its owning caller, not here.
+    if (ownsLock && lockGen != null) releaseLiveLock(lockGen);
   }
 }
 
@@ -1459,6 +1472,7 @@ router.post("/arb/graph-execute", async (req, res): Promise<void> => {
         assetB: asset(route.hops[1]!.to),
         tradeSizeUsd, feesPct: krakenFeesPct, minProfitUsd, isDryRun,
         makerTimeoutMs: probeAttempt ? PROBE_MAKER_TIMEOUT_MS : undefined,
+        heldLockGen: lockGen ?? undefined, // graph-execute already holds the live lock
       }, req.log);
       if (out.badRequest) { res.status(400).json({ error: out.badRequest }); return; }
       const b = out.body!;
