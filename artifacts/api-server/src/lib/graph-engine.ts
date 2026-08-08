@@ -20,7 +20,7 @@ import {
   CROSS_LOOKUP,
   type ObAsset,
 } from "./order-book";
-import { getCoinbaseBidAsk, type Pair } from "./exchange";
+import { getCoinbaseOrderBook, type Pair } from "./exchange";
 
 // ── Coinbase asset overlap ────────────────────────────────────────────────────
 
@@ -194,7 +194,7 @@ async function buildGraph(
   // ── Fetch all data in parallel ────────────────────────────────────────────
 
   const krakenBooks = new Map<string, { asks: [number,number][]; bids: [number,number][] }>();
-  const cbPrices    = new Map<string, { bid: number; ask: number }>();
+  const cbBooks     = new Map<string, { asks: [number,number][]; bids: [number,number][] }>();
   const crossBooks  = new Map<string, { asks: [number,number][]; bids: [number,number][] }>();
 
   await Promise.all([
@@ -208,11 +208,12 @@ async function buildGraph(
       const book = await fetchOrderBook(pair, 10);
       if (book) crossBooks.set(pair, book as { asks: [number,number][]; bids: [number,number][] });
     }),
-    // Coinbase tickers for the 9 shared assets
+    // Coinbase level-2 order books for the 9 shared assets — full depth so
+    // Coinbase legs are VWAP-priced like Kraken legs, not top-of-book quotes.
     ...Object.entries(CB_ASSET_MAP).map(async ([asset, cbPair]) => {
       try {
-        const prices = await getCoinbaseBidAsk(cbPair as Pair);
-        cbPrices.set(asset, prices);
+        const book = await getCoinbaseOrderBook(cbPair as Pair);
+        cbBooks.set(asset, book);
       } catch { /* exchange may be unavailable */ }
     }),
   ]);
@@ -321,27 +322,54 @@ async function buildGraph(
 
   // ── Coinbase USD edges ────────────────────────────────────────────────────
 
-  for (const [asset, prices] of cbPrices.entries()) {
-    const { bid, ask } = prices;
-    if (!bid || !ask) continue;
+  for (const [asset, book] of cbBooks.entries()) {
+    const bestAsk = book.asks[0]?.[0] ?? 0;
+    const bestBid = book.bids[0]?.[0] ?? 0;
+    if (!bestAsk || !bestBid) continue;
 
-    // USD → Asset on Coinbase
-    const buyGross = 1 / ask;
-    add("coinbase:USD", {
-      to: `coinbase:${asset}`, exchange: "coinbase",
-      pair: `${asset}-USD`, side: "buy",
-      grossRate: buyGross, netRate: buyGross * (1 - coinbaseFeesPct / 100),
-      feePct: coinbaseFeesPct, slippagePct: 0, limitPrice: ask,
-    });
+    if (maker) {
+      // Maker: post-only join — buy at best BID, sell at best ASK (mirrors
+      // the Kraken maker path). No depth slippage; fills not guaranteed.
+      const buyGross = 1 / bestBid;
+      add("coinbase:USD", {
+        to: `coinbase:${asset}`, exchange: "coinbase",
+        pair: `${asset}-USD`, side: "buy",
+        grossRate: buyGross, netRate: buyGross * (1 - coinbaseFeesPct / 100),
+        feePct: coinbaseFeesPct, slippagePct: 0, limitPrice: bestBid,
+      });
+      const sellGross = bestAsk;
+      add(`coinbase:${asset}`, {
+        to: "coinbase:USD", exchange: "coinbase",
+        pair: `${asset}-USD`, side: "sell",
+        grossRate: sellGross, netRate: sellGross * (1 - coinbaseFeesPct / 100),
+        feePct: coinbaseFeesPct, slippagePct: 0, limitPrice: bestAsk,
+      });
+    } else {
+      // Taker: depth-walked VWAP for the actual trade size — same rules as
+      // Kraken legs. If the visible book can't absorb the size, DROP the edge.
+      const buyVwap  = vwapBuy(book.asks, tradeSizeUsd);
+      const sellVwap = vwapSell(book.bids, tradeSizeUsd / bestBid);
 
-    // Asset → USD on Coinbase
-    const sellGross = bid;
-    add(`coinbase:${asset}`, {
-      to: "coinbase:USD", exchange: "coinbase",
-      pair: `${asset}-USD`, side: "sell",
-      grossRate: sellGross, netRate: sellGross * (1 - coinbaseFeesPct / 100),
-      feePct: coinbaseFeesPct, slippagePct: 0, limitPrice: bid,
-    });
+      if (buyVwap != null) {
+        const buySlip  = ((buyVwap - bestAsk) / bestAsk) * 100;
+        const buyGross = 1 / buyVwap;
+        add("coinbase:USD", {
+          to: `coinbase:${asset}`, exchange: "coinbase",
+          pair: `${asset}-USD`, side: "buy",
+          grossRate: buyGross, netRate: buyGross * (1 - coinbaseFeesPct / 100),
+          feePct: coinbaseFeesPct, slippagePct: Math.max(0, buySlip), limitPrice: bestAsk,
+        });
+      }
+      if (sellVwap != null) {
+        const sellSlip = ((bestBid - sellVwap) / bestBid) * 100;
+        add(`coinbase:${asset}`, {
+          to: "coinbase:USD", exchange: "coinbase",
+          pair: `${asset}-USD`, side: "sell",
+          grossRate: sellVwap, netRate: sellVwap * (1 - coinbaseFeesPct / 100),
+          feePct: coinbaseFeesPct, slippagePct: Math.max(0, sellSlip), limitPrice: bestBid,
+        });
+      }
+    }
   }
 
   // ── Inventory bridge edges ────────────────────────────────────────────────
@@ -349,7 +377,7 @@ async function buildGraph(
   // delay — you buy on one side and sell on the other from existing inventory.
 
   for (const asset of Object.keys(CB_ASSET_MAP) as ObAsset[]) {
-    if (krakenBooks.has(asset) && cbPrices.has(asset)) {
+    if (krakenBooks.has(asset) && cbBooks.has(asset)) {
       const bridgeEdge = (to: GraphNode): GraphEdge => ({
         to, exchange: "bridge", pair: asset, side: "bridge",
         grossRate: 1, netRate: 1, feePct: 0, slippagePct: 0, limitPrice: 0,

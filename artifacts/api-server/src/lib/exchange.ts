@@ -624,6 +624,31 @@ export async function getCoinbaseBidAsk(pair: Pair = "SOL/USD"): Promise<{ bid: 
   return { bid, ask, mid: (bid + ask) / 2 };
 }
 
+/**
+ * Public endpoint — full level-2 order book (aggregated price levels) for
+ * depth-walked VWAP pricing of Coinbase graph edges. Levels are returned
+ * best-first as [price, size] number tuples.
+ */
+export async function getCoinbaseOrderBook(pair: Pair = "SOL/USD"): Promise<{
+  bids: [number, number][];
+  asks: [number, number][];
+}> {
+  const product = COINBASE_PRODUCTS[pair];
+  const resp = await fetch(`https://api.exchange.coinbase.com/products/${product}/book?level=2`, {
+    signal: AbortSignal.timeout(10_000),
+  });
+  if (!resp.ok) throw new Error(`Coinbase book HTTP ${resp.status}`);
+  const json = await resp.json() as { bids?: [string, string, unknown][]; asks?: [string, string, unknown][] };
+  const toLevels = (rows: [string, string, unknown][] | undefined): [number, number][] =>
+    (rows ?? [])
+      .map(([p, s]) => [parseFloat(p), parseFloat(s)] as [number, number])
+      .filter(([p, s]) => isFinite(p) && isFinite(s) && p > 0 && s > 0);
+  const bids = toLevels(json.bids);
+  const asks = toLevels(json.asks);
+  if (bids.length === 0 || asks.length === 0) throw new Error(`Coinbase: empty book for ${product}`);
+  return { bids, asks };
+}
+
 export async function getCoinbaseBalances(creds: CoinbaseCreds): Promise<BalanceEntry[]> {
   const data = await coinbaseRequest<{ accounts: Array<{ currency: string; available_balance: { value: string } }> }>(
     creds,
