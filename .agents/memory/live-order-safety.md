@@ -74,3 +74,6 @@ Ledger rows carry status: verified | failed | simulated | estimated. Rules that 
 - Market BUYS have no spend ceiling; always convert to an IOC limit capped ~0.2% above the fresh ask and re-size volume so worst-case spend ≈ trade size incl. fees.
 - When a mode decision (adaptive) resolves scan style ≠ execution style, all downstream profit/history gates must be fed the RESOLVED style's fresh numbers — a maker-priced net overstates a taker fire's edge (fees ~3× maker).
 - Any pre-fire preview shown to the trader must apply the same floor and decision logic as the live path, or it will advertise fires that the server would refuse.
+
+## Adaptive is profitability-first (trader-mandated, Aug 2026)
+Trader's rule ordering: fresh taker breakdown (real fees/leg, depth-walked slip, buffer) BEFORE any maker order; taker net ≥ floor → taker immediately; else maker expected realized (net × fill prob − unwind cost) ≥ floor → maker; else skip. Unavailable fresh books = SKIP, never a maker authorization. The adaptive decision is terminal — don't let generic downstream floor gates re-reject it (double-counts the buffer). Stale scanner edge never overrides the fresh pre-flight.

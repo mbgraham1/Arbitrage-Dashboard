@@ -1694,8 +1694,9 @@ components:
         netEdgeUsd: { type: number, nullable: true, description: "Final executable net edge = raw − slippage − fees − buffer" }
         expectedProfitUsd: { type: number, nullable: true, description: "Expected dollar profit if fired as taker (net of fees+slippage, before buffer)" }
         makerNetUsd: { type: number, nullable: true, description: "Maker-priced net edge (post-only joins, maker fees, zero slippage)" }
-        makerEvUsd: { type: number, nullable: true, description: "Risk-adjusted maker EV using this route's historical per-leg fill rates" }
-        adaptiveChoice: { type: string, nullable: true, description: "Which path adaptive mode would fire right now: maker, taker, or abort" }
+        makerEvUsd: { type: number, nullable: true, description: "Maker expected realized P&L = maker net × historical full-cycle fill probability − expected unwind cost" }
+        makerFillProbability: { type: number, nullable: true, description: "Historical full-cycle fill probability used in the maker EV (0-1); conservative default when history is thin" }
+        adaptiveChoice: { type: string, nullable: true, description: "Which path adaptive mode would fire right now: taker (fresh taker net ≥ floor), maker (maker expected realized ≥ floor), or skip" }
         error: { type: string, nullable: true }
 
     ObExecuteResult:

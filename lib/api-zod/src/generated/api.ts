@@ -652,8 +652,9 @@ export const ExecPreviewResponse = zod.object({
   "netEdgeUsd": zod.number().nullish().describe('Final executable net edge = raw − slippage − fees − buffer'),
   "expectedProfitUsd": zod.number().nullish().describe('Expected dollar profit if fired as taker (net of fees+slippage, before buffer)'),
   "makerNetUsd": zod.number().nullish().describe('Maker-priced net edge (post-only joins, maker fees, zero slippage)'),
-  "makerEvUsd": zod.number().nullish().describe('Risk-adjusted maker EV using this route\'s historical per-leg fill rates'),
-  "adaptiveChoice": zod.string().nullish().describe('Which path adaptive mode would fire right now: maker, taker, or abort'),
+  "makerEvUsd": zod.number().nullish().describe('Maker expected realized P&L = maker net × historical full-cycle fill probability − expected unwind cost'),
+  "makerFillProbability": zod.number().nullish().describe('Historical full-cycle fill probability used in the maker EV (0-1); conservative default when history is thin'),
+  "adaptiveChoice": zod.string().nullish().describe('Which path adaptive mode would fire right now: taker (fresh taker net ≥ floor), maker (maker expected realized ≥ floor), or skip'),
   "error": zod.string().nullish()
 })
 

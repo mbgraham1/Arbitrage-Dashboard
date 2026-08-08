@@ -26,9 +26,11 @@ export interface ExecPreviewResult {
   expectedProfitUsd?: number | null;
   /** Maker-priced net edge (post-only joins, maker fees, zero slippage) */
   makerNetUsd?: number | null;
-  /** Risk-adjusted maker EV using this route's historical per-leg fill rates */
+  /** Maker expected realized P&L = maker net × historical full-cycle fill probability − expected unwind cost */
   makerEvUsd?: number | null;
-  /** Which path adaptive mode would fire right now: maker, taker, or abort */
+  /** Historical full-cycle fill probability used in the maker EV (0-1); conservative default when history is thin */
+  makerFillProbability?: number | null;
+  /** Which path adaptive mode would fire right now: taker (fresh taker net ≥ floor), maker (maker expected realized ≥ floor), or skip */
   adaptiveChoice?: string | null;
   error?: string | null;
 }

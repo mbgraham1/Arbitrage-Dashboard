@@ -2030,16 +2030,30 @@ function GraphEngineCard() {
       </CardHeader>
 
       {preview?.ok && topRoute && (
-        <div data-testid="panel-exec-preview" className="px-3 py-1.5 border-b border-border/50 text-[10px] font-mono flex flex-wrap items-center gap-x-3 gap-y-0.5">
-          <span className="text-muted-foreground font-bold">PRE-FIRE ({style.toUpperCase()})</span>
-          <span title="Gross edge at top-of-book taker prices, before fees and slippage">raw <span className="text-foreground">${(preview.rawEdgeUsd ?? 0).toFixed(4)}</span></span>
-          <span title={`Total taker fees, 3 legs at ${preview.takerFeePct?.toFixed(2) ?? "?"}%/leg (your real tier when keys are set)`}>fees <span className="text-foreground">−${(preview.takerFeesUsd ?? 0).toFixed(4)}</span></span>
-          <span title="Depth-walk cost at your size: top-of-book edge minus executable VWAP edge">slip <span className="text-foreground">−${(preview.slippageUsd ?? 0).toFixed(4)}</span></span>
-          <span title="Safety buffer for movement between pre-flight and fills">buffer <span className="text-foreground">−${(preview.safetyBufferUsd ?? 0).toFixed(4)}</span></span>
-          <span title="Final executable net edge = raw − fees − slippage − buffer; a taker fire only happens when this clears your floor" className={cn("font-bold", (preview.netEdgeUsd ?? 0) > minProfit ? "text-success" : "text-destructive")}>net ${(preview.netEdgeUsd ?? 0).toFixed(4)} ({((preview.netEdgeUsd ?? 0) / tradeSize * 100).toFixed(3)}%)</span>
-          <span title="Expected dollar profit if fired as taker right now (net of fees + slippage, before buffer)">exp <span className={cn((preview.expectedProfitUsd ?? 0) > 0 ? "text-success" : "text-destructive")}>${(preview.expectedProfitUsd ?? 0).toFixed(4)}</span></span>
-          {style === "adaptive" && (
-            <span title={`Adaptive decision right now — maker EV ${preview.makerEvUsd != null ? `$${preview.makerEvUsd.toFixed(4)}` : "n/a"} vs buffered taker net`} className="font-bold text-primary">→ {(preview.adaptiveChoice ?? "—").toUpperCase()}</span>
+        <div data-testid="panel-exec-preview" className="px-3 py-1.5 border-b border-border/50 text-[10px] font-mono space-y-0.5">
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5">
+            <span className="text-muted-foreground font-bold">PRE-FIRE ({style.toUpperCase()})</span>
+            <span title="Gross edge at fresh top-of-book taker prices, before fees and slippage">RAW <span className="text-foreground">${(preview.rawEdgeUsd ?? 0).toFixed(4)}</span></span>
+            <span className="text-muted-foreground">→</span>
+            <span title={`Total taker fees, 3 legs at ${preview.takerFeePct?.toFixed(2) ?? "?"}%/leg (your real tier when keys are set)`}>TAKER FEES <span className="text-foreground">−${(preview.takerFeesUsd ?? 0).toFixed(4)}</span></span>
+            <span className="text-muted-foreground">→</span>
+            <span title="Depth-walk cost at your size: top-of-book edge minus executable VWAP edge">SLIPPAGE <span className="text-foreground">−${(preview.slippageUsd ?? 0).toFixed(4)}</span></span>
+            <span className="text-muted-foreground">→</span>
+            <span title="Safety buffer for movement between pre-flight and fills">BUFFER <span className="text-foreground">−${(preview.safetyBufferUsd ?? 0).toFixed(4)}</span></span>
+            <span className="text-muted-foreground">→</span>
+            <span title="Fresh executable taker net = raw − fees − slippage − buffer; taker fires immediately when this ≥ your floor" className={cn("font-bold", (preview.netEdgeUsd ?? 0) >= minProfit ? "text-success" : "text-destructive")}>TAKER NET ${(preview.netEdgeUsd ?? 0).toFixed(4)} ({((preview.netEdgeUsd ?? 0) / tradeSize * 100).toFixed(3)}%)</span>
+          </div>
+          {style !== "taker" && (
+            <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5">
+              <span title="Maker-priced net edge (post-only joins, maker fees, zero slippage) — before fill risk">MAKER NET <span className="text-foreground">{preview.makerNetUsd != null ? `$${preview.makerNetUsd.toFixed(4)}` : "n/a"}</span></span>
+              <span className="text-muted-foreground">→</span>
+              <span title="Historical full-cycle fill probability for this route's maker legs (conservative 55% default when history is thin)">FILL PROB <span className="text-foreground">{preview.makerFillProbability != null ? `${(preview.makerFillProbability * 100).toFixed(0)}%` : "n/a"}</span></span>
+              <span className="text-muted-foreground">→</span>
+              <span title="Maker expected realized P&L = maker net × fill probability − expected unwind cost" className={cn("font-bold", (preview.makerEvUsd ?? -1) >= minProfit ? "text-success" : "text-destructive")}>MAKER EXPECTED REALIZED {preview.makerEvUsd != null ? `$${preview.makerEvUsd.toFixed(4)}` : "n/a"}</span>
+              {style === "adaptive" && (
+                <span title="Profitability-first decision: taker net ≥ floor → TAKER; else maker expected realized ≥ floor → MAKER; else SKIP" className={cn("font-bold", preview.adaptiveChoice === "skip" ? "text-destructive" : "text-primary")}>CHOSEN: {(preview.adaptiveChoice ?? "—").toUpperCase()}</span>
+              )}
+            </div>
           )}
         </div>
       )}

@@ -2114,32 +2114,51 @@ router.post("/arb/graph-execute", async (req, res): Promise<void> => {
     const isCrossInventory = realHops.length === 2 && route.hops.length === 3 &&
       realHops[0]!.side === "buy" && realHops[1]!.side === "sell" &&
       asset(realHops[0]!.to) === asset(realHops[1]!.from);
-    // 1c. ADAPTIVE mode: resolve to maker or taker for THIS fire — whichever
-    //     path has the higher expected realized P&L. Taker EV = fresh
-    //     depth-walked taker net − safety buffer (fill probability ≈ 1).
-    //     Maker EV = risk-adjusted EV from this route's measured per-leg fill
-    //     history, or a conservative default (55% fill, 1.5% strand cost)
-    //     when history is thin. Taker only wins when it ALSO clears the floor.
+    // 1c. ADAPTIVE mode: PROFITABILITY-FIRST resolution for THIS fire. The
+    //     stale scanner edge never decides — a fresh taker breakdown (fresh
+    //     executable books, real taker fees per leg, depth-walked slippage,
+    //     safety buffer) is computed BEFORE any maker order:
+    //       1. fresh taker net ≥ floor            → fire TAKER immediately
+    //       2. else maker expected realized ≥ floor → attempt MAKER
+    //          (maker expected realized = maker net × historical full-cycle
+    //           fill probability − expected unwind cost; conservative default
+    //           55% fill / 1.5% strand cost when history is thin)
+    //       3. else                                → SKIP (falls through to
+    //          the next-best route on the client).
     // Gate inputs must match the RESOLVED style: when adaptive picks taker,
     // the maker-scanned net/slippage would overstate the edge to the history
     // gates below — substitute the fresh taker numbers instead.
     let effNetProfitUsd = route.netProfitUsd;
     let effSlippagePct = route.slippagePct;
+    let adaptiveResolved = false; // adaptive decision is TERMINAL — generic floor gate below must not re-reject it
     if (executionStyleReq === "adaptive" && isKrakenTriangle) {
       const takerFeePct = tiers?.takerFeePct ?? krakenFeesPct;
       const bufferUsd = Math.max(0.02, tradeSizeUsd * 0.0005);
       const bd = await takerCycleBreakdown(asset(route.hops[0]!.to) as ObAsset, asset(route.hops[1]!.to) as ObAsset, tradeSizeUsd, takerFeePct);
-      const takerNet = bd ? bd.netProfitUsd - bufferUsd : null;
+      if (!bd) {
+        // No fresh taker breakdown (books unavailable or depth can't absorb the
+        // size) → SKIP. A maker order must never be authorized without the
+        // fresh taker pre-flight, and the stale scanner edge never decides.
+        req.log.info({ route: route.description }, "ADAPTIVE → SKIP (fresh taker breakdown unavailable — books unfetchable or depth insufficient)");
+        res.json({ success: false, isDryRun, executed: false, route: route.description, preflightProfitUsd: null, error: `Pre-flight failed — adaptive SKIP: fresh order books unavailable (or depth can't absorb $${tradeSizeUsd.toFixed(2)}), so the taker pre-flight could not run. No maker order is placed without it.` });
+        return;
+      }
+      const takerNet = bd.netProfitUsd - bufferUsd;
       const riskM = await routeLegRisk(route.description, "maker", accountIdFromKey(krakenKey, coinbaseKey));
       const evM = riskAdjustedEv(riskM, route.netProfitUsd, tradeSizeUsd);
       const makerEvUsd = evM ? evM.evUsd : route.netProfitUsd * 0.55 - 0.45 * DEFAULT_UNWIND_LOSS_FRAC * tradeSizeUsd;
-      if (takerNet != null && takerNet > minProfitUsd && takerNet >= makerEvUsd) {
+      adaptiveResolved = true;
+      if (takerNet >= minProfitUsd) {
         executionStyle = "taker";
         effNetProfitUsd = takerNet; // buffered fresh taker net — what taker execution actually expects
         effSlippagePct = bd ? (bd.slippageUsd / tradeSizeUsd) * 100 : 0;
-        req.log.info({ route: route.description, takerNetUsd: takerNet, makerEvUsd, bufferUsd, takerFeePct }, "ADAPTIVE → taker (buffered taker net clears floor and beats maker EV)");
+        req.log.info({ route: route.description, takerNetUsd: takerNet, makerEvUsd, bufferUsd, takerFeePct }, "ADAPTIVE → TAKER (fresh buffered taker net clears floor — no maker attempt)");
+      } else if (makerEvUsd >= minProfitUsd) {
+        req.log.info({ route: route.description, takerNetUsd: takerNet, makerEvUsd, fillProb: evM?.pAll ?? 0.55, historyBacked: !!evM }, "ADAPTIVE → MAKER (taker net below floor, maker expected realized clears it)");
       } else {
-        req.log.info({ route: route.description, takerNetUsd: takerNet, makerEvUsd, historyBacked: !!evM }, "ADAPTIVE → maker (taker net below floor or maker EV higher)");
+        req.log.info({ route: route.description, takerNetUsd: takerNet, makerEvUsd }, "ADAPTIVE → SKIP (neither taker net nor maker expected realized clears floor)");
+        res.json({ success: false, isDryRun, executed: false, route: route.description, preflightProfitUsd: takerNet ?? route.netProfitUsd, error: `Pre-flight failed — adaptive SKIP: fresh taker net ${takerNet != null ? `$${takerNet.toFixed(4)}` : "unavailable (books)"} and maker expected realized $${makerEvUsd.toFixed(4)} (net × fill probability − unwind cost) are both below your $${minProfitUsd.toFixed(4)} floor. Stale scanner edge $${route.netProfitUsd.toFixed(4)} does not override the fresh pre-flight.` });
+        return;
       }
     } else if (executionStyleReq === "adaptive") {
       executionStyle = "taker"; // cross/inventory shapes execute at market regardless
@@ -2148,7 +2167,10 @@ router.post("/arb/graph-execute", async (req, res): Promise<void> => {
     //    slippage in taker mode) must also clear a residual slippage buffer —
     //    edge must exceed fees + slippage + your floor, not just fees.
     const slippageBufferUsd = (effSlippagePct / 100) * tradeSizeUsd * 0.5; // half again, for movement between scan and fill
-    if (effNetProfitUsd - slippageBufferUsd <= minProfitUsd) {
+    // When adaptive already resolved (profitability-first, fresh taker
+    // breakdown incl. buffer), its decision is terminal — don't re-reject with
+    // this generic residual gate, which would double-count the buffer.
+    if (!adaptiveResolved && effNetProfitUsd - slippageBufferUsd <= minProfitUsd) {
       res.json({ success: false, isDryRun, executed: false, route: route.description, preflightProfitUsd: effNetProfitUsd, error: `Pre-flight failed — fresh net profit $${effNetProfitUsd.toFixed(4)} minus slippage buffer $${slippageBufferUsd.toFixed(4)} (${effSlippagePct.toFixed(3)}% depth-walked) ≤ minimum $${minProfitUsd.toFixed(4)}.` });
       return;
     }
@@ -3609,17 +3631,18 @@ router.post("/arb/exec-preview", async (req, res): Promise<void> => {
     const accountId = creds ? accountIdFromKey(krakenKey!, undefined) : "anon";
     const risk = await routeLegRisk(routeDescription, "maker", accountId);
     const evM = makerNetUsd != null ? riskAdjustedEv(risk, makerNetUsd, tradeSizeUsd) : null;
+    const makerFillProbability = evM ? evM.pAll : makerNetUsd != null ? 0.55 : null;
     const makerEvUsd = evM ? evM.evUsd : makerNetUsd != null ? makerNetUsd * 0.55 - 0.45 * DEFAULT_UNWIND_LOSS_FRAC * tradeSizeUsd : null;
-    // Mirror the live adaptive decision against the trader's actual floor.
+    // Mirror the live adaptive decision (profitability-first) against the trader's floor:
+    // taker net ≥ floor → taker; else maker expected realized ≥ floor → maker; else skip.
     const minFloor = Math.max(0, parsed.data.minProfitUsd ?? 0);
-    const takerFires = netEdgeUsd > minFloor;
-    const adaptiveChoice = takerFires && (makerEvUsd == null || netEdgeUsd >= makerEvUsd)
-      ? "taker" : (makerEvUsd != null && makerEvUsd > 0) || (makerNetUsd != null && makerNetUsd > 0) ? "maker" : "abort";
+    const adaptiveChoice = netEdgeUsd >= minFloor ? "taker"
+      : makerEvUsd != null && makerEvUsd >= minFloor ? "maker" : "skip";
     res.json({
       route: routeDescription, ok: true,
       rawEdgeUsd: bd.rawEdgeUsd, takerFeesUsd: bd.feesUsd, takerFeePct,
       slippageUsd: bd.slippageUsd, safetyBufferUsd, netEdgeUsd,
-      expectedProfitUsd: bd.netProfitUsd, makerNetUsd, makerEvUsd, adaptiveChoice,
+      expectedProfitUsd: bd.netProfitUsd, makerNetUsd, makerEvUsd, makerFillProbability, adaptiveChoice,
       error: null,
     });
   } catch (e) {
