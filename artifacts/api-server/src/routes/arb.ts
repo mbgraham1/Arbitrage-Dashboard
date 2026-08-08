@@ -836,7 +836,7 @@ async function runKrakenTriangle(input: TriangleExecInput, reqLog: ReqLog): Prom
     // passive order a real chance to be hit — while the edge-recheck cancels
     // it early if the opportunity decays. Legs 2/3 keep the short window (we
     // hold inventory there; completing at market beats waiting).
-    const LEG1_MAX_REST_MS = input.makerTimeoutMs ?? 30_000;
+    const LEG1_MAX_REST_MS = input.makerTimeoutMs ?? 3_000; // trader-tuned: fast fill-or-move, no long resting
     const MAX_LEG_ATTEMPTS = 1;
     interface AggFill { volExec: number; cost: number; fee: number; txid: string }
     const isFinal = (s: string) => s === "closed" || s === "canceled" || s === "expired";
@@ -1034,9 +1034,11 @@ async function runKrakenTriangle(input: TriangleExecInput, reqLog: ReqLog): Prom
       usdSpent = f1.cost + f1.fee;
       totalFees += f1.fee;
       if (aHeld < l1.volume * FILL_TOLERANCE) {
-        // Taker fallback gate: nothing is at risk yet, so only pay taker fees
-        // when a FRESH taker-priced pre-flight (depth-walked, taker tier) says
-        // the cycle still clears the profit floor.
+        // Taker fallback gate (trader-tuned): fire whenever the FRESH
+        // taker-priced pre-flight (depth-walked, taker fee tier) is POSITIVE —
+        // any net profit after taker fees, however small, beats no trade.
+        // Never fire on a NEGATIVE fresh number: that is a certain loss (fees
+        // exceed the edge), not a partial profit.
         // A revoked run must not place NEW orders — re-verify lock ownership
         // immediately before the fallback order.
         if (lockGen != null && !liveLockOwned(lockGen)) {
@@ -1044,17 +1046,18 @@ async function runKrakenTriangle(input: TriangleExecInput, reqLog: ReqLog): Prom
         }
         const takerFeePct = tiers?.takerFeePct ?? effectiveFeesPct;
         const freshTaker = await preflightObCycle(assetA as ObAsset, assetB as ObAsset, tradeSizeUsd, takerFeePct, "taker");
-        if (freshTaker && freshTaker.profitUsd > threshold) {
+        if (freshTaker && freshTaker.profitUsd > 0) {
+          log.info(`leg1 taker fallback firing — taker-priced net $${freshTaker.profitUsd.toFixed(4)} > $0`);
           const m = await marketFill(1, "leg1", l1.side, l1.volume - aHeld, l1.pair);
           aHeld += m.volExec; usdSpent += m.cost + m.fee; totalFees += m.fee;
           leg1Id = [leg1Id, m.txid].filter(Boolean).join(",");
         } else {
-          log.info(`leg1 taker fallback declined — taker-priced edge ${freshTaker ? `$${freshTaker.profitUsd.toFixed(4)}` : "unavailable"} ≤ floor $${threshold.toFixed(4)}`);
+          log.info(`leg1 taker fallback declined — taker-priced net ${freshTaker ? `$${freshTaker.profitUsd.toFixed(4)}` : "unavailable"} ≤ $0 (fees exceed the edge — certain loss)`);
         }
       }
       if (aHeld < l1.volume * FILL_TOLERANCE) {
         if (aHeld > 0) await tryUnwindMarket(creds, "sell", aHeld, pairA, `sell ${assetA} (unwind partial leg1)`, log);
-        throw new Error(`Leg 1 unfilled: rested up to ${LEG1_MAX_REST_MS / 1000}s (cancelled early if the edge decayed) and taker fallback ${aHeld > 0 ? "left a shortfall" : "was declined (edge doesn't cover taker fees)"} (${aHeld.toFixed(8)}/${l1.volume.toFixed(8)} ${assetA}); order canceled, lock released.`);
+        throw new Error(`Leg 1 unfilled: rested up to ${LEG1_MAX_REST_MS / 1000}s (cancelled early if the edge decayed) and taker fallback ${aHeld > 0 ? "left a shortfall" : "was declined (taker-priced net ≤ $0 — fees exceed the edge)"} (${aHeld.toFixed(8)}/${l1.volume.toFixed(8)} ${assetA}); order canceled, lock released.`);
       }
       legsCompleted = 1;
     }
