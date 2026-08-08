@@ -400,7 +400,7 @@ export default function Settings() {
               <BookOpen className="h-5 w-5" /> Order Book Hunter
             </CardTitle>
             <CardDescription>
-              Parameters for the OB triangular scanner. Trade size controls how deep into the book each simulation walks — larger sizes reveal real slippage. Fees estimate Kraken's per-leg taker rate for profit calculations.
+              Parameters for the OB triangular scanner and auto-execute loop. Trade size controls how deep into the book each simulation walks and is the dollar amount the auto-executor fires. Fees estimate Kraken's per-leg taker rate; the auto-executor uses the Min Net Profit (USD) from Strategy Parameters as its profit floor.
             </CardDescription>
           </CardHeader>
           <CardContent className="flex flex-col gap-6">

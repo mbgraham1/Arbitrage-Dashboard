@@ -822,8 +822,9 @@ function OrderBookHunterCard() {
     return () => clearTimeout(t);
   }, [tradeSizeInput]);
   const tradeSize = Math.max(1, parseFloat(debouncedSize) || settings.obTradeSize);
-  // Min-profit floor: skip few-cent edges (advisor rec). Default $0.10.
-  const [minProfitInput, setMinProfitInput] = useState("0.10");
+  // Min-profit floor: seeded from settings.minProfitUsd so it matches the
+  // auto-execute threshold that the bot loop uses.
+  const [minProfitInput, setMinProfitInput] = useState(String(settings.minProfitUsd));
   const minProfit = Math.max(0, parseFloat(minProfitInput) || 0);
   // Fee per leg: prefer the account's ACTUAL Kraken taker fee tier (fetched
   // once, shared across cards) over the configured assumption. A 0.40%
