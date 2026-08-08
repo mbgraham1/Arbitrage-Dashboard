@@ -107,6 +107,12 @@ export function TwoExchangeTestCard() {
                     ))}
                   </div>
                 )}
+                {(last.balances.coinbaseUsd != null || last.balances.krakenEth != null) && (
+                  <div data-testid="text-2xtest-reverse">
+                    Reverse direction (buy on Coinbase → sell on Kraken): Coinbase USD <span className="font-semibold">${(last.balances.coinbaseUsd ?? 0).toFixed(2)}</span>
+                    {" · "}Kraken tradable ETH <span className="font-semibold">{(last.balances.krakenEth ?? 0).toFixed(8)}</span>
+                  </div>
+                )}
                 {last.balances.coinbaseEthAccounts && last.balances.coinbaseEthAccounts.length === 0 && (
                   <div className="text-red-500">
                     No ETH account is visible to this API key's portfolio ({last.balances.coinbaseAccountsScanned ?? 0} accounts scanned) — your ETH likely sits in a different Coinbase portfolio or in staking the trading API can't see. Move/buy unstaked ETH in this key's portfolio, or create an API key on the portfolio holding the ETH.

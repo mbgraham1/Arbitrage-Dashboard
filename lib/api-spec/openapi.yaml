@@ -1566,6 +1566,8 @@ components:
             coinbaseEthHold: { type: number, description: "ETH locked by open orders / pending activity" }
             coinbaseEthTotal: { type: number, description: "Total ETH held (available + hold + staked)" }
             coinbaseAccountsScanned: { type: number, description: "How many Coinbase accounts the key's portfolio exposed" }
+            coinbaseUsd: { type: number, description: "Tradable USD on Coinbase (funds a reverse-direction buy)" }
+            krakenEth: { type: number, description: "Tradable ETH on Kraken (funds a reverse-direction sell)" }
             coinbaseEthAccounts:
               type: array
               description: Every ETH-related account visible to this API key's portfolio

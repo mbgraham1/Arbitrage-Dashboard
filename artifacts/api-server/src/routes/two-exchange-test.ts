@@ -64,6 +64,7 @@ router.post("/arb/two-exchange-test", async (req, res): Promise<void> => {
     krakenUsd: number; coinbaseEth: number; coinbaseEthStaked: number; coinbaseEthHold: number; coinbaseEthTotal: number;
     coinbaseEthAccounts: Array<{ currency: string; name: string | null; type: string | null; available: number; hold: number; staked: boolean }>;
     coinbaseAccountsScanned: number;
+    coinbaseUsd: number; krakenEth: number;
   } | null = null;
   const blocked = (reason: string) => {
     res.json({ success: false, isDryRun, outcome: "blocked", blockReason: reason, balances: balancesSeen, buyLeg: null, sellLeg: null, realizedProfitUsd: null, residualEthOpen: null, startedAt, finishedAt: new Date().toISOString(), error: null });
@@ -86,13 +87,20 @@ router.post("/arb/two-exchange-test", async (req, res): Promise<void> => {
     const estQty = sizeUsd / kAsk;
     let kUsd = 0, cbEth = 0;
     try {
-      const [kBals, ethDetail] = await Promise.all([getKrakenBalances(kCreds, true), getCoinbaseAssetDetail(cbCreds, "ETH")]);
+      const [kBals, ethDetail, usdDetail] = await Promise.all([
+        getKrakenBalances(kCreds, true),
+        getCoinbaseAssetDetail(cbCreds, "ETH"),
+        getCoinbaseAssetDetail(cbCreds, "USD"),
+      ]);
       kUsd = kBals.filter(x => ["ZUSD", "USD"].includes(x.currency)).reduce((a, x) => a + x.amount, 0);
+      // Kraken ETH (tradable) — needed for the REVERSE direction's sell leg.
+      const kEth = kBals.filter(x => ["XETH", "ETH"].includes(x.currency)).reduce((a, x) => a + x.amount, 0);
       cbEth = ethDetail.available; // ONLY tradable ETH counts — staked/held ETH cannot fund a sell
       balancesSeen = {
         krakenUsd: kUsd, coinbaseEth: ethDetail.available, coinbaseEthStaked: ethDetail.staked,
         coinbaseEthHold: ethDetail.hold, coinbaseEthTotal: ethDetail.total,
         coinbaseEthAccounts: ethDetail.accounts, coinbaseAccountsScanned: ethDetail.accountsScanned,
+        coinbaseUsd: usdDetail.available, krakenEth: kEth,
       };
       req.log.info({ eth: ethDetail, krakenUsd: kUsd }, "[2XTEST] balance check breakdown");
     } catch (e) {

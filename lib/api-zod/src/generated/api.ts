@@ -630,6 +630,8 @@ export const RunTwoExchangeTestResponse = zod.object({
   "coinbaseEthHold": zod.number().optional().describe('ETH locked by open orders \/ pending activity'),
   "coinbaseEthTotal": zod.number().optional().describe('Total ETH held (available + hold + staked)'),
   "coinbaseAccountsScanned": zod.number().optional().describe('How many Coinbase accounts the key\'s portfolio exposed'),
+  "coinbaseUsd": zod.number().optional().describe('Tradable USD on Coinbase (funds a reverse-direction buy)'),
+  "krakenEth": zod.number().optional().describe('Tradable ETH on Kraken (funds a reverse-direction sell)'),
   "coinbaseEthAccounts": zod.array(zod.object({
   "currency": zod.string().optional(),
   "name": zod.string().nullish(),

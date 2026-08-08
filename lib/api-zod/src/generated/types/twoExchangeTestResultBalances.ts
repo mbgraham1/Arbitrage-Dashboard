@@ -22,6 +22,10 @@ export type TwoExchangeTestResultBalances = {
   coinbaseEthTotal?: number;
   /** How many Coinbase accounts the key's portfolio exposed */
   coinbaseAccountsScanned?: number;
+  /** Tradable USD on Coinbase (funds a reverse-direction buy) */
+  coinbaseUsd?: number;
+  /** Tradable ETH on Kraken (funds a reverse-direction sell) */
+  krakenEth?: number;
   /** Every ETH-related account visible to this API key's portfolio */
   coinbaseEthAccounts?: TwoExchangeTestResultBalancesCoinbaseEthAccountsItem[];
 } | null;
