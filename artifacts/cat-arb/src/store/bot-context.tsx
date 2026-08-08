@@ -160,15 +160,23 @@ function kellySize(
   kellyFraction: number,
   buyPrice: number,
   maxPositionUsd: number,
-): number {
-  if (edgePct <= 0 || bankrollUsd <= 0 || buyPrice <= 0) return 0;
+): { volume: number; kellyUsd: number; appliedUsd: number; capBinding: boolean } {
+  if (edgePct <= 0 || bankrollUsd <= 0 || buyPrice <= 0) {
+    return { volume: 0, kellyUsd: 0, appliedUsd: 0, capBinding: false };
+  }
   const b = edgePct / 100;
   const p = winRate;
   const q = 1 - p;
   const fStar = b > 0 ? (b * p - q) / b : 0;
   const f = Math.max(0, Math.min(fStar, kellyFraction));
-  const sizeUsd = Math.min(bankrollUsd * f, maxPositionUsd); // cap in USD, not base units
-  return Math.max(sizeUsd / buyPrice, 0);
+  const kellyUsd = bankrollUsd * f;                     // what Kelly wants, in USD
+  const appliedUsd = Math.min(kellyUsd, maxPositionUsd); // cap in USD, not base units
+  return {
+    volume: Math.max(appliedUsd / buyPrice, 0),
+    kellyUsd,
+    appliedUsd,
+    capBinding: kellyUsd > maxPositionUsd,
+  };
 }
 
 export function BotProvider({ children }: { children: React.ReactNode }) {
@@ -516,7 +524,7 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
       // USD cap read directly from settings — pair-agnostic, no unit conversion needed.
       const maxPositionUsd = s.maxPositionUsd;
 
-      let volume = kellySize(
+      const kelly = kellySize(
         netEdge,
         cachedBalancesRef.current?.usdOnCoinbase ?? 0,
         s.winRate,
@@ -524,6 +532,13 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
         data.buyPrice,
         maxPositionUsd,
       );
+      let volume = kelly.volume;
+      if (kelly.capBinding) {
+        addLog(
+          "warning",
+          `${tag} Kelly capped at $${maxPositionUsd.toFixed(0)} USD — Kelly wanted $${kelly.kellyUsd.toFixed(2)} (maxPositionUsd is binding)`,
+        );
+      }
       // Force-trade minimum: $10 USD equivalent in base units (asset-agnostic).
       // Clamp to maxPositionUsd so the minimum never overrides the hard cap.
       const minVolumeUsd = 10;
@@ -840,7 +855,7 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
           return;
         }
 
-        const kellyVol = kellySize(netEdge, cachedBalancesRef.current?.usdOnCoinbase ?? 0, s.winRate, s.kellyFraction, data.buyPrice ?? 0, s.maxPositionUsd);
+        const kellyVol = kellySize(netEdge, cachedBalancesRef.current?.usdOnCoinbase ?? 0, s.winRate, s.kellyFraction, data.buyPrice ?? 0, s.maxPositionUsd).volume;
         const estimatedNetProfit = (netEdge / 100) * (data.buyPrice ?? 0) * kellyVol;
         if (estimatedNetProfit < s.minProfitUsd) {
           addLog("info", `No trade — est. profit $${estimatedNetProfit.toFixed(2)} < $${s.minProfitUsd.toFixed(2)} minimum ${wsInfo}`);
