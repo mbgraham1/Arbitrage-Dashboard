@@ -4,8 +4,9 @@
  * These functions directly gate live trades: a sign error or off-by-one in the
  * "book too thin → drop edge" rule would silently overstate profit.
  */
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import {
+  scanGraphOpportunities,
   vwapBuy,
   vwapSell,
   takerBuyQuote,
@@ -190,5 +191,118 @@ describe("maker vs taker edge rates", () => {
     expect(makerSellQuote(100, 0.16)!.netRate).toBeCloseTo(100 * (1 - 0.0016), 9);
     expect(makerBuyQuote(0, 0.16)).toBeNull();
     expect(makerSellQuote(0, 0.16)).toBeNull();
+  });
+});
+
+// ── scanGraphOpportunities: thin books DROP routes ───────────────────────────
+//
+// End-to-end guard: if a leg's book cannot absorb the full trade size, the
+// route must be absent from the scan output — never included with a
+// partial-fill approximation. Fetches are stubbed; the order-book module's
+// 5s REST cache is defeated by jumping the fake clock 5 minutes per test.
+
+/** Kraken Depth API response for one pair (same shape as order-book.test.ts). */
+function depthResponse(pair: string, asks: [number, number][], bids: [number, number][]) {
+  return {
+    error: [],
+    result: {
+      [pair]: {
+        asks: asks.map(([p, v]) => [String(p), String(v), 0]),
+        bids: bids.map(([p, v]) => [String(p), String(v), 0]),
+      },
+    },
+  };
+}
+
+function mockFetch(responses: Record<string, object>) {
+  return vi.fn((url: string) => {
+    const m = url.match(/[?&]pair=([^&]+)/);
+    const key = m ? decodeURIComponent(m[1]) : url;
+    for (const [k, body] of Object.entries(responses)) {
+      if (key.includes(k) || url.includes(k)) {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve(body) });
+      }
+    }
+    // Fallback: empty valid Kraken response. Coinbase book calls hit this too
+    // and throw inside getCoinbaseOrderBook (no bids/asks), which buildGraph
+    // catches — so no Coinbase edges exist in these tests.
+    return Promise.resolve({ ok: true, json: () => Promise.resolve({ error: [], result: {} }) });
+  });
+}
+
+describe("scanGraphOpportunities — drops routes when books can't fill the size", () => {
+  let fakeNow = 1_800_000_000_000;
+
+  beforeEach(async () => {
+    fakeNow += 300_000; // jump past the OB 5s REST cache and cross-pair cache TTLs
+    vi.useFakeTimers();
+    vi.setSystemTime(fakeNow);
+    const { _testOnly_clearCrossCache } = await import("./order-book.js");
+    _testOnly_clearCrossCache();
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+  });
+
+  // Fixture books for the Kraken triangle USD→BTC→ETH→USD at $100:
+  //   Leg 1: buy BTC with 100 USD on XXBTZUSD asks (needs ≥ 0.002 BTC @ 50 000)
+  //   Leg 2: buy ETH with 0.002 BTC on ETHXBT asks (aIsQuote=true; needs ≥ 0.04 ETH @ 0.05)
+  //   Leg 3: sell 0.04 ETH on ETHUSD bids
+  const DEEP = {
+    XXBTZUSD: depthResponse("XXBTZUSD", [[50_000, 1]], [[49_900, 1]]),
+    ETHXBT:   depthResponse("ETHXBT",   [[0.05, 10]],  [[0.049, 10]]),
+    ETHUSD:   depthResponse("ETHUSD",   [[3_010, 100]], [[3_000, 100]]),
+  };
+
+  const ROUTE = "USD[K]→BTC[K]→ETH[K]→USD[K]";
+
+  it("includes the triangle when every book covers the full trade size (control)", async () => {
+    vi.stubGlobal("fetch", mockFetch(DEEP));
+    const result = await scanGraphOpportunities(100, 0.40, 0.60, 3, "taker");
+    const route = result.routes.find(r => r.description === ROUTE);
+    expect(route).toBeDefined();
+    // Sanity: pricing is the full-fill VWAP, not some partial approximation.
+    // 100 USD → 0.002 BTC → 0.04 ETH → 120 USD gross; fees compound per leg.
+    expect(route!.grossProfitUsd).toBeCloseTo(20, 6);
+    expect(route!.netProfitUsd).toBeCloseTo(120 * Math.pow(1 - 0.004, 3) - 100, 6);
+  });
+
+  it("drops the route when the first leg's ask book is too thin for the size", async () => {
+    // Only 0.001 BTC visible at 50 000 = $50 depth — cannot fill $100.
+    vi.stubGlobal("fetch", mockFetch({
+      ...DEEP,
+      XXBTZUSD: depthResponse("XXBTZUSD", [[50_000, 0.001]], [[49_900, 1]]),
+    }));
+    const result = await scanGraphOpportunities(100, 0.40, 0.60, 3, "taker");
+    const route = result.routes.find(r => r.description === ROUTE);
+    expect(route).toBeUndefined();
+  });
+
+  it("drops the route when the cross-pair book is too thin for the middle leg", async () => {
+    // ETHXBT asks show only 0.001 ETH — 0.002 BTC of buying can't be absorbed.
+    vi.stubGlobal("fetch", mockFetch({
+      ...DEEP,
+      ETHXBT: depthResponse("ETHXBT", [[0.05, 0.001]], [[0.049, 0.001]]),
+    }));
+    const result = await scanGraphOpportunities(100, 0.40, 0.60, 3, "taker");
+    const route = result.routes.find(r => r.description === ROUTE);
+    expect(route).toBeUndefined();
+    // And no route may traverse the thin cross edge in either direction.
+    for (const r of result.routes) {
+      for (const hop of r.hops) expect(hop.pair).not.toBe("ETHXBT");
+    }
+  });
+
+  it("drops the route when the final leg's bid book can't absorb the sell", async () => {
+    // ETHUSD bids show only 0.01 ETH — the 0.04 ETH sell can't fill.
+    vi.stubGlobal("fetch", mockFetch({
+      ...DEEP,
+      ETHUSD: depthResponse("ETHUSD", [[3_010, 100]], [[3_000, 0.01]]),
+    }));
+    const result = await scanGraphOpportunities(100, 0.40, 0.60, 3, "taker");
+    const route = result.routes.find(r => r.description === ROUTE);
+    expect(route).toBeUndefined();
   });
 });
