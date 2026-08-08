@@ -1387,36 +1387,48 @@ function GraphEngineCard() {
     execInFlight.current = true;
     setThinEdgePending(false);
     setExecResult(null);
-    addLog("trade", `[GRAPH·EXEC] ${topRoute.description} | $${tradeSize} | ${liveMode ? "LIVE" : "dry run"} — pre-flight…`);
+    // Fall-through: if a route is rejected by the feedback-loop gate (its own
+    // fill history), immediately try the next-best viable route from the same
+    // scan instead of stalling until the next scan. Max 3 candidates per fire.
+    const candidates = [topRoute, ...viable.filter(r => r.description !== topRoute.description && r.netProfitUsd > minProfit)].slice(0, 3);
     try {
-      const r = await executeMutation.mutateAsync({
-        data: {
-          krakenKey: credentials.krakenKey,
-          krakenSecret: credentials.krakenSecret,
-          coinbaseKey: credentials.coinbaseKey || undefined,
-          coinbaseSecret: credentials.coinbaseSecret || undefined,
-          routeDescription: topRoute.description,
-          tradeSizeUsd: tradeSize,
-          krakenFeesPct: settings.obFeesPct,
-          coinbaseFeesPct: 0.40,
-          minProfitUsd: minProfit,
-          isDryRun: !liveMode,
-          executionStyle: style,
-        },
-      });
-      if (r.success && r.executed) {
-        const profit = r.realizedProfitUsd ?? r.preflightProfitUsd ?? 0;
-        const label = r.realizedProfitUsd != null ? "realized" : "expected";
-        addLog("success", `[GRAPH·EXEC] ✅ ${r.route} | ${label} $${profit.toFixed(4)}${r.isDryRun ? " (dry run)" : ` | orders ${(r.orderIds ?? []).join(", ")}`}`);
-        setExecResult(`✅ Executed ${r.route} — ${label} $${profit.toFixed(4)}${r.isDryRun ? " (dry run, recorded to ledger)" : ""}`);
-      } else {
-        addLog("warning", `[GRAPH·EXEC] ❌ ${r.error ?? "Pre-flight failed."}`);
-        setExecResult(`❌ ${r.error ?? "Pre-flight failed — edge disappeared."}`);
-        // No orders were placed on a pre-flight/gate rejection — clear the
-        // cooldown so AUTO can evaluate the next fresh scan immediately.
+      for (let ci = 0; ci < candidates.length; ci++) {
+        const cand = candidates[ci];
+        addLog("trade", `[GRAPH·EXEC] ${cand.description} | $${tradeSize} | ${liveMode ? "LIVE" : "dry run"}${ci > 0 ? ` — fallback #${ci} after gate` : ""} — pre-flight…`);
+        const r = await executeMutation.mutateAsync({
+          data: {
+            krakenKey: credentials.krakenKey,
+            krakenSecret: credentials.krakenSecret,
+            coinbaseKey: credentials.coinbaseKey || undefined,
+            coinbaseSecret: credentials.coinbaseSecret || undefined,
+            routeDescription: cand.description,
+            tradeSizeUsd: tradeSize,
+            krakenFeesPct: settings.obFeesPct,
+            coinbaseFeesPct: 0.40,
+            minProfitUsd: minProfit,
+            isDryRun: !liveMode,
+            executionStyle: style,
+          },
+        });
+        if (r.success && r.executed) {
+          const profit = r.realizedProfitUsd ?? r.preflightProfitUsd ?? 0;
+          const label = r.realizedProfitUsd != null ? "realized" : "expected";
+          addLog("success", `[GRAPH·EXEC] ✅ ${r.route} | ${label} $${profit.toFixed(4)}${r.isDryRun ? " (dry run)" : ` | orders ${(r.orderIds ?? []).join(", ")}`}`);
+          setExecResult(`✅ Executed ${r.route} — ${label} $${profit.toFixed(4)}${r.isDryRun ? " (dry run, recorded to ledger)" : ""}`);
+          return;
+        }
         const err = r.error ?? "";
-        if (!r.executed && (err.startsWith("Pre-flight failed") || err.startsWith("Feedback-loop gate") || err.startsWith("Could not fetch"))) {
-          lastAutoFire.current = 0;
+        addLog("warning", `[GRAPH·EXEC] ❌ ${err || "Pre-flight failed."}`);
+        setExecResult(`❌ ${err || "Pre-flight failed — edge disappeared."}`);
+        const noOrdersPlaced = !r.executed && (err.startsWith("Pre-flight failed") || err.startsWith("Feedback-loop gate") || err.startsWith("Could not fetch"));
+        // Only a feedback-loop gate rejection falls through to the next route —
+        // pre-flight failures mean the market moved; a fresh scan handles that.
+        const isLastCandidate = ci === candidates.length - 1 || !err.startsWith("Feedback-loop gate");
+        if (isLastCandidate) {
+          // Clear the AUTO cooldown ONLY when the whole fire ended with no
+          // orders placed — a successful fallback keeps the full cooldown.
+          if (noOrdersPlaced) lastAutoFire.current = 0;
+          return;
         }
       }
     } catch (e) {
@@ -1924,7 +1936,7 @@ function ExecutionQualityCard() {
           </table>
         </div>
         <div className="px-3 py-1.5 text-[9px] font-mono text-muted-foreground border-t border-border/50">
-          Shortfall = scanner expectation − realized fills. Routes with ≥3 live attempts and &lt;50% fill rate are blocked from live execution; persistent shortfalls raise the edge a route must clear.
+          Shortfall = scanner expectation − realized fills. Routes with ≥10 live attempts and &lt;50% fill rate are blocked from live execution (block decays 1h after the last attempt, earning a fresh probe); persistent shortfalls raise the edge a route must clear. When the top route is gated, AUTO immediately falls through to the next-best viable route.
         </div>
       </CardContent>
     </Card>

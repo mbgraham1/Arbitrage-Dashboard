@@ -761,12 +761,19 @@ async function recordQuality(row: {
   } catch (err) { log.error({ err }, "failed to record execution quality"); }
 }
 
+// Feedback-loop gate tuning (advisor-reviewed):
+const GATE_MIN_ATTEMPTS = 10;        // don't blacklist on a thin sample — 3 misses can just be a fast market
+const GATE_MIN_FILL_RATE = 0.5;      // block when fewer than half of attempts ever fill
+const GATE_DECAY_MS = 60 * 60_000;   // 1h since last attempt → penalty decays, route earns a fresh probe
+
 /**
  * Historical penalty for a route+style, from LIVE attempts only:
  *  - shortfallUsd: average (expected − realized) across filled live attempts
  *    (≥2 samples) — added to the edge the route must clear.
- *  - blockReason: set when the route has ≥3 live attempts and <50% ever
- *    filled — history says this opportunity doesn't actually execute.
+ *  - blockReason: set when the route has ≥GATE_MIN_ATTEMPTS live attempts,
+ *    <GATE_MIN_FILL_RATE ever filled, AND the streak is recent — history says
+ *    this opportunity doesn't actually execute. Blocks decay: once the last
+ *    attempt is over an hour old, the route gets one fresh probe.
  */
 async function routeQualityPenalty(route: string, style: string, tradeSizeUsd: number): Promise<{ shortfallUsd: number; attempts: number; blockReason: string | null }> {
   try {
@@ -775,8 +782,10 @@ async function routeQualityPenalty(route: string, style: string, tradeSizeUsd: n
       .orderBy(dbDesc(executionQualityTable.id)).limit(20);
     if (rows.length === 0) return { shortfallUsd: 0, attempts: 0, blockReason: null };
     const fills = rows.filter(r => r.filled);
-    if (rows.length >= 3 && fills.length / rows.length < 0.5) {
-      return { shortfallUsd: 0, attempts: rows.length, blockReason: `historical fill rate ${fills.length}/${rows.length} — this route rarely executes; not committing funds` };
+    const lastAttemptAt = rows[0]?.createdAt ? new Date(rows[0].createdAt).getTime() : 0;
+    const recentStreak = Date.now() - lastAttemptAt < GATE_DECAY_MS;
+    if (rows.length >= GATE_MIN_ATTEMPTS && fills.length / rows.length < GATE_MIN_FILL_RATE && recentStreak) {
+      return { shortfallUsd: 0, attempts: rows.length, blockReason: `historical fill rate ${fills.length}/${rows.length} (needs ≥${Math.round(GATE_MIN_FILL_RATE * 100)}% over ≥${GATE_MIN_ATTEMPTS} attempts) — this route rarely executes; not committing funds. Block decays 1h after the last attempt.` };
     }
     const realized = fills.filter(r => r.realizedProfitUsd != null && parseFloat(r.tradeSizeUsd) > 0);
     if (realized.length < 2) return { shortfallUsd: 0, attempts: rows.length, blockReason: null };
