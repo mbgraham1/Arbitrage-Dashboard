@@ -5,6 +5,7 @@
  * CAT Arbitrage Dashboard API
  * OpenAPI spec version: 0.1.0
  */
+import type { KrakenNonceHealth } from './krakenNonceHealth';
 
 export interface ExecutionStatusResult {
   active: boolean;
@@ -26,4 +27,5 @@ export interface ExecutionStatusResult {
   reprices?: number | null;
   elapsedMs: number | null;
   updatedAtMs: number;
+  nonceHealth?: KrakenNonceHealth;
 }

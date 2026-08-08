@@ -1363,6 +1363,22 @@ components:
         reprices: { type: integer, nullable: true }
         elapsedMs: { type: number, nullable: true }
         updatedAtMs: { type: number }
+        nonceHealth: { $ref: "#/components/schemas/KrakenNonceHealth" }
+    KrakenNonceHealth:
+      type: object
+      description: >
+        Kraken API-key nonce health for THIS server process. Repeated
+        "EAPI:Invalid nonce" errors mean another process (e.g. the published
+        app and the dev workspace) is using the same Kraken API key — the two
+        interleave nonces and share one rate budget. Run the bot from one
+        environment at a time or use a separate key per environment.
+      required: [concurrentUseSuspected, recentNonceErrors, totalNonceErrors, lastNonceErrorAtMs, hint]
+      properties:
+        concurrentUseSuspected: { type: boolean }
+        recentNonceErrors: { type: integer }
+        totalNonceErrors: { type: integer }
+        lastNonceErrorAtMs: { type: number, nullable: true }
+        hint: { type: string, nullable: true }
     FeeTierResult:
       type: object
       required: [takerFeePct, makerFeePct, source]

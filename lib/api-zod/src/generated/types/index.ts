@@ -51,6 +51,7 @@ export * from './inventoryRebalanceAlert';
 export * from './inventoryRebalanceAlertAlertLevel';
 export * from './inventoryScanResult';
 export * from './krakenCredentials';
+export * from './krakenNonceHealth';
 export * from './listTradesParams';
 export * from './obCycleEntry';
 export * from './obCycleEntryStatus';

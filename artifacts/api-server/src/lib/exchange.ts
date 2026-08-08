@@ -114,6 +114,95 @@ function isRateLimitError(e: unknown): boolean {
   return e instanceof Error && /EAPI:Rate limit/i.test(e.message);
 }
 
+// ── Nonce monotonicity + concurrent-use detection ────────────────────────────
+// The limiter keeps nonces monotonic WITHIN this process, but Kraken nonces
+// are per API KEY, account-wide: if the published (production) app and the
+// dev workspace both run the bot with the SAME key, their nonces interleave
+// and Kraken rejects calls with "EAPI:Invalid nonce" — and both processes
+// also share one rate budget. We can't serialize across processes, so we:
+//   1. Generate strictly-increasing per-key nonces (BigInt, µs-scale) so this
+//      process is never the cause of its own nonce errors.
+//   2. Retry ONCE on a nonce error — Kraken rejects nonce failures before the
+//      request is processed (no order placed), so a single retry is safe for
+//      reads AND orders and papers over a lone collision.
+//   3. Track nonce errors per key; repeated errors within a short window mean
+//      another process is using the same key. That state is surfaced to the
+//      dashboard (execution-status endpoint) as a clear warning instead of a
+//      mysterious stream of failed calls.
+const NONCE_ERROR_WINDOW_MS = 10 * 60_000; // errors within 10min count toward the flag
+const NONCE_CONFLICT_THRESHOLD = 2;        // ≥2 in-window errors ⇒ concurrent use suspected
+
+interface KeyNonceState { lastNonce: bigint; errorTimes: number[]; lastErrorAt: number | null; totalErrors: number; }
+const nonceStates = new Map<string, KeyNonceState>();
+function nonceStateFor(key: string): KeyNonceState {
+  let st = nonceStates.get(key);
+  if (!st) { st = { lastNonce: 0n, errorTimes: [], lastErrorAt: null, totalErrors: 0 }; nonceStates.set(key, st); }
+  return st;
+}
+
+/** Strictly-increasing per-key nonce. Scale is ms×100,000 — the SAME
+ *  magnitude as the legacy format (Date.now() string + 5 random digits), so
+ *  a restart immediately exceeds any nonce a previous run sent to Kraken
+ *  (a smaller scale would leave every call stuck under the key's recorded
+ *  high-water nonce). The +1 fallback guards same-millisecond bursts.
+ *  Exported for tests only. */
+export function nextNonce(key: string): string {
+  const st = nonceStateFor(key);
+  let candidate = BigInt(Date.now()) * 100000n;
+  if (candidate <= st.lastNonce) candidate = st.lastNonce + 1n;
+  st.lastNonce = candidate;
+  return candidate.toString();
+}
+
+function isNonceError(e: unknown): boolean {
+  return e instanceof Error && /EAPI:Invalid nonce/i.test(e.message);
+}
+
+/** Exported for tests only. */
+export function recordNonceError(key: string): void {
+  const st = nonceStateFor(key);
+  const now = Date.now();
+  st.errorTimes = st.errorTimes.filter(t => now - t < NONCE_ERROR_WINDOW_MS);
+  st.errorTimes.push(now);
+  st.lastErrorAt = now;
+  st.totalErrors++;
+}
+
+export interface KrakenNonceHealth {
+  /** True when repeated nonce errors indicate ANOTHER process (e.g. the
+   *  published app AND the workspace) is using the same Kraken API key. */
+  concurrentUseSuspected: boolean;
+  /** Nonce errors within the trailing detection window. */
+  recentNonceErrors: number;
+  totalNonceErrors: number;
+  lastNonceErrorAtMs: number | null;
+  /** Human guidance shown by the dashboard when suspected. */
+  hint: string | null;
+}
+
+/** Aggregated nonce health across every key this process has used. Keys are
+ *  never exposed — only aggregate counts (the dashboard has one key anyway). */
+export function getKrakenNonceHealth(): KrakenNonceHealth {
+  const now = Date.now();
+  let recent = 0, total = 0, lastAt: number | null = null, suspected = false;
+  for (const st of nonceStates.values()) {
+    const inWindow = st.errorTimes.filter(t => now - t < NONCE_ERROR_WINDOW_MS).length;
+    recent += inWindow;
+    total += st.totalErrors;
+    if (st.lastErrorAt != null && (lastAt == null || st.lastErrorAt > lastAt)) lastAt = st.lastErrorAt;
+    if (inWindow >= NONCE_CONFLICT_THRESHOLD) suspected = true;
+  }
+  return {
+    concurrentUseSuspected: suspected,
+    recentNonceErrors: recent,
+    totalNonceErrors: total,
+    lastNonceErrorAtMs: lastAt,
+    hint: suspected
+      ? "Repeated Kraken nonce errors: another app instance (e.g. the published app AND this workspace) appears to be using the same Kraken API key. Run the bot from only ONE of them, or create a separate API key per environment (Kraken → Settings → API). Setting a nonce window (~5000 ms) on the key reduces — but does not eliminate — these errors."
+      : null,
+  };
+}
+
 /**
  * Pace + backoff-gate a private call. The per-key chain holds ONLY the paced
  * HTTP call (min gap + ≤10s HTTP timeout) — backoff sleeps happen OUTSIDE the
@@ -160,14 +249,29 @@ async function withPrivateLimiter<T>(key: string, fn: () => Promise<T>, retryOnR
   }
 }
 
-async function krakenPrivateRequest<T>(path: string, data: Record<string, string>, creds: KrakenCreds): Promise<T> {
+export async function krakenPrivateRequest<T>(path: string, data: Record<string, string>, creds: KrakenCreds): Promise<T> {
   // Reads are safe to retry after a rate-limit backoff; order mutations are not.
   const isRead = !/AddOrder|CancelOrder/.test(path);
-  return withPrivateLimiter(creds.krakenKey, () => krakenPrivateRequestRaw<T>(path, data, creds), isRead);
+  const call = () => withPrivateLimiter(creds.krakenKey, () => krakenPrivateRequestRaw<T>(path, data, creds), isRead);
+  try {
+    return await call();
+  } catch (e) {
+    if (!isNonceError(e)) throw e;
+    // Nonce failures are rejected BEFORE Kraken processes the request (no
+    // order was placed), so one retry is safe for reads AND orders. Record
+    // the error first — repeated ones flag concurrent use of this key.
+    recordNonceError(creds.krakenKey);
+    try {
+      return await call();
+    } catch (e2) {
+      if (isNonceError(e2)) recordNonceError(creds.krakenKey);
+      throw e2;
+    }
+  }
 }
 
 async function krakenPrivateRequestRaw<T>(path: string, data: Record<string, string>, creds: KrakenCreds): Promise<T> {
-  const nonce = Date.now().toString() + Math.random().toString().slice(2, 7);
+  const nonce = nextNonce(creds.krakenKey);
   const payload: Record<string, string> = { nonce, ...data };
   const postData = new URLSearchParams(payload).toString();
   const sign = krakenSign(path, nonce, postData, creds.krakenSecret);

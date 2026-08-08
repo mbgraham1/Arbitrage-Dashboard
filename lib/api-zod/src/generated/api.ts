@@ -454,7 +454,14 @@ export const GetExecutionStatusResponse = zod.object({
   "queueAheadVol": zod.number().nullish(),
   "reprices": zod.number().nullish(),
   "elapsedMs": zod.number().nullable(),
-  "updatedAtMs": zod.number()
+  "updatedAtMs": zod.number(),
+  "nonceHealth": zod.object({
+  "concurrentUseSuspected": zod.boolean(),
+  "recentNonceErrors": zod.number(),
+  "totalNonceErrors": zod.number(),
+  "lastNonceErrorAtMs": zod.number().nullable(),
+  "hint": zod.string().nullable()
+}).optional().describe('Kraken API-key nonce health for THIS server process. Repeated \"EAPI:Invalid nonce\" errors mean another process (e.g. the published app and the dev workspace) is using the same Kraken API key — the two interleave nonces and share one rate budget. Run the bot from one environment at a time or use a separate key per environment.\n')
 })
 
 

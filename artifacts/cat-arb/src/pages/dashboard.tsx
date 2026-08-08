@@ -72,6 +72,42 @@ function PriceTile({
   );
 }
 
+/** Amber warning shown when the server detects repeated Kraken
+ *  "EAPI:Invalid nonce" errors — the signature that ANOTHER process (e.g. the
+ *  published app AND this workspace) is trading with the same Kraken API key.
+ *  Polls the lightweight in-memory execution-status endpoint every 15s. */
+function NonceConflictBanner() {
+  const { data } = useGetExecutionStatus({
+    query: { queryKey: getGetExecutionStatusQueryKey(), refetchInterval: 15_000, staleTime: 10_000 },
+  });
+  const health = data?.nonceHealth;
+  if (!health?.concurrentUseSuspected) return null;
+  const lastAgoMin = health.lastNonceErrorAtMs != null
+    ? Math.max(0, Math.round((Date.now() - health.lastNonceErrorAtMs) / 60_000))
+    : null;
+  return (
+    <div
+      className="px-4 py-3 border-2 border-amber-500 bg-amber-500/10 flex items-start gap-3"
+      data-testid="banner-nonce-conflict"
+    >
+      <AlertTriangle className="h-5 w-5 text-amber-500 shrink-0 mt-0.5" />
+      <div className="flex flex-col gap-1">
+        <span className="text-sm font-bold uppercase text-amber-600">
+          Kraken API key used by another app instance
+        </span>
+        <span className="text-xs font-mono text-muted-foreground">
+          {health.hint}
+        </span>
+        <span className="text-[10px] font-mono text-muted-foreground">
+          {health.recentNonceErrors} nonce error{health.recentNonceErrors === 1 ? "" : "s"} in the last 10 min
+          {lastAgoMin != null ? ` · last ${lastAgoMin === 0 ? "<1" : lastAgoMin} min ago` : ""}
+          {` · ${health.totalNonceErrors} total since server start`}
+        </span>
+      </div>
+    </div>
+  );
+}
+
 export default function Dashboard() {
   const {
     isRunning, setIsRunning, liveMode,
@@ -153,6 +189,8 @@ export default function Dashboard() {
 
   return (
     <div className="flex flex-col gap-6">
+
+      <NonceConflictBanner />
 
       {/* Top Action Bar */}
       <div className="flex flex-col md:flex-row items-start md:items-center justify-between gap-4 bg-card p-4 border-2 border-border">

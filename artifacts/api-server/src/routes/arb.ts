@@ -49,6 +49,7 @@ import {
   getCoinbaseProductIncrements,
   quantizeDown,
   PAIRS,
+  getKrakenNonceHealth,
   type Pair,
 } from "../lib/exchange";
 import { getBestPairPrices, getTriPrices, getBtcTriPrices, scanAllPairs, getPairPrices, getAllPairSnapshots } from "../lib/price-cache";
@@ -714,6 +715,9 @@ router.get("/arb/execution-status", (_req, res): void => {
   res.json({
     ...s,
     elapsedMs: s.active && s.startedAtMs != null ? Date.now() - s.startedAtMs : null,
+    // Kraken key nonce health — flags when ANOTHER process (published app +
+    // workspace) appears to be sharing this key, causing EAPI:Invalid nonce.
+    nonceHealth: getKrakenNonceHealth(),
   });
 });
 

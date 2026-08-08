@@ -459,6 +459,17 @@ export interface ExecutionQualityResult {
   totalRecords: number;
 }
 
+/**
+ * Kraken API-key nonce health for THIS server process. Repeated "EAPI:Invalid nonce" errors mean another process (e.g. the published app and the dev workspace) is using the same Kraken API key — the two interleave nonces and share one rate budget. Run the bot from one environment at a time or use a separate key per environment.
+ */
+export interface KrakenNonceHealth {
+  concurrentUseSuspected: boolean;
+  recentNonceErrors: number;
+  totalNonceErrors: number;
+  lastNonceErrorAtMs: number | null;
+  hint: string | null;
+}
+
 export interface ExecutionStatusResult {
   active: boolean;
   route: string | null;
@@ -479,6 +490,7 @@ export interface ExecutionStatusResult {
   reprices?: number | null;
   elapsedMs: number | null;
   updatedAtMs: number;
+  nonceHealth?: KrakenNonceHealth;
 }
 
 export type FeeTierResultSource = typeof FeeTierResultSource[keyof typeof FeeTierResultSource];
