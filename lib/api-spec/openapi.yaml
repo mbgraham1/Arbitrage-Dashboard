@@ -222,6 +222,16 @@ paths:
         Coinbase bid/ask fields are null when no fresh data is available (> 30 s
         old), allowing the UI to render a "—" placeholder. Sorted by gross spread
         descending; no-data pairs go last.
+      parameters:
+        - name: enabledPairs
+          in: query
+          required: false
+          style: form
+          explode: false
+          schema:
+            type: array
+            items: { type: string }
+          description: "Optional allow-list of pair symbols to include (comma-separated). Returns all pairs when omitted."
       responses:
         "200":
           description: Snapshot for all 10 pairs (some fields may be null when data is stale)

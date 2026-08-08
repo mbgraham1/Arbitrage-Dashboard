@@ -27,6 +27,7 @@ export * from './executionStatusResult';
 export * from './feeTierRequest';
 export * from './feeTierResult';
 export * from './feeTierResultSource';
+export * from './getAllPairSnapshotsParams';
 export * from './getGraphScanExecutionStyle';
 export * from './getGraphScanParams';
 export * from './getInventoryScanParams';

@@ -728,12 +728,17 @@ const SNAPSHOT_STALE_MS = 30_000; // 30 s — generous enough for 2 s Coinbase p
  * no REST fallbacks. Stale / missing sides are returned as null so the UI
  * can show "—" per-exchange placeholders instead of silently skipping rows.
  * Sorted by grossSpreadPct descending; pairs with missing data go last.
+ *
+ * @param enabledPairs - optional allow-list of pair symbols; returns all when omitted or empty
  */
-export function getAllPairSnapshots(): PairSnapshot[] {
+export function getAllPairSnapshots(enabledPairs?: string[]): PairSnapshot[] {
   const now = Date.now();
   const snapshots: PairSnapshot[] = [];
+  const pairsToInclude: Pair[] = enabledPairs && enabledPairs.length > 0
+    ? PAIRS.filter(p => enabledPairs.includes(p))
+    : [...PAIRS];
 
-  for (const pair of PAIRS) {
+  for (const pair of pairsToInclude) {
     const entry = pairCache.get(pair)!;
 
     const krakenFresh   = entry.kraken   != null && now - entry.kraken.updatedAt   < SNAPSHOT_STALE_MS;

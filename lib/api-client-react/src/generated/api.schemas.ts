@@ -796,6 +796,13 @@ limit?: number;
 offset?: number;
 };
 
+export type GetAllPairSnapshotsParams = {
+/**
+ * Optional allow-list of pair symbols to include (comma-separated). Returns all pairs when omitted.
+ */
+enabledPairs?: string[];
+};
+
 export type ScanAllPairsParams = {
 /**
  * Optional allow-list of pair symbols to scan (comma-separated). Scans all pairs when omitted.

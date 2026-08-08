@@ -187,9 +187,17 @@ function computeBtcTriLoops(
 const router: IRouter = Router();
 
 // ── GET /prices/all-pairs — cache snapshot, no REST fallbacks ─────────────────
-router.get("/prices/all-pairs", (_req, res): void => {
+router.get("/prices/all-pairs", (req, res): void => {
   try {
-    res.json(getAllPairSnapshots());
+    // Accept enabledPairs as a comma-separated string or repeated query params
+    const raw = req.query["enabledPairs"];
+    let enabledPairs: string[] | undefined;
+    if (raw != null) {
+      const vals = Array.isArray(raw) ? raw.map(String) : String(raw).split(",");
+      const filtered = vals.map(v => v.trim()).filter(Boolean);
+      if (filtered.length > 0) enabledPairs = filtered;
+    }
+    res.json(getAllPairSnapshots(enabledPairs));
   } catch (err) {
     res.status(500).json({ error: (err as Error).message });
   }

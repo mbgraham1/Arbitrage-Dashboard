@@ -201,6 +201,10 @@ export const ListTradesResponse = zod.array(ListTradesResponseItem)
  * Reads the in-memory price cache for all 10 configured pairs and returns every pair — including those with stale or missing data. Kraken and Coinbase bid/ask fields are null when no fresh data is available (> 30 s old), allowing the UI to render a "—" placeholder. Sorted by gross spread descending; no-data pairs go last.
  * @summary Return cached bid/ask for all 10 pairs without REST fallbacks
  */
+export const GetAllPairSnapshotsQueryParams = zod.object({
+  "enabledPairs": zod.array(zod.coerce.string()).optional().describe('Optional allow-list of pair symbols to include (comma-separated). Returns all pairs when omitted.')
+})
+
 export const GetAllPairSnapshotsResponseItem = zod.object({
   "pair": zod.string().describe('Canonical pair, e.g. BTC\/USD'),
   "coin": zod.string().describe('Short coin symbol, e.g. BTC'),

@@ -583,7 +583,7 @@ export default function Dashboard() {
       </div>
 
       {/* All-Pairs Breakdown */}
-      <AllPairsCard activePair={latestPriceData?.pair ?? null} feesAndSlipPct={settings.totalFees + settings.slippage} />
+      <AllPairsCard activePair={latestPriceData?.pair ?? null} feesAndSlipPct={settings.totalFees + settings.slippage} enabledPairs={enabledPairsForScan} />
 
       {/* Multi-Coin Opportunity Ranker */}
       <MultiCoinRankerCard settings={settings} />
@@ -606,10 +606,10 @@ export default function Dashboard() {
 
 // ── All-Pairs Breakdown Card ───────────────────────────────────────────────────
 
-function AllPairsCard({ activePair, feesAndSlipPct }: { activePair: string | null; feesAndSlipPct: number }) {
-  const query = useGetAllPairSnapshots({
+function AllPairsCard({ activePair, feesAndSlipPct, enabledPairs }: { activePair: string | null; feesAndSlipPct: number; enabledPairs?: string[] }) {
+  const query = useGetAllPairSnapshots({ enabledPairs }, {
     query: {
-      queryKey: getGetAllPairSnapshotsQueryKey(),
+      queryKey: getGetAllPairSnapshotsQueryKey({ enabledPairs }),
       refetchInterval: 5_000,
       staleTime: 4_000,
     },

@@ -35,6 +35,7 @@ import type {
   ExecutionStatusResult,
   FeeTierRequest,
   FeeTierResult,
+  GetAllPairSnapshotsParams,
   GetGraphScanParams,
   GetInventoryScanParams,
   GetObScanParams,
@@ -685,21 +686,28 @@ export function useListTrades<TData = Awaited<ReturnType<typeof listTrades>>, TE
 
 
 
-export const getGetAllPairSnapshotsUrl = () => {
+export const getGetAllPairSnapshotsUrl = (params?: GetAllPairSnapshotsParams,) => {
+  const normalizedParams = new URLSearchParams();
 
+  Object.entries(params || {}).forEach(([key, value]) => {
 
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
 
+  const stringifiedParams = normalizedParams.toString();
 
-  return `/api/prices/all-pairs`
+  return stringifiedParams.length > 0 ? `/api/prices/all-pairs?${stringifiedParams}` : `/api/prices/all-pairs`
 }
 
 /**
  * Reads the in-memory price cache for all 10 configured pairs and returns every pair — including those with stale or missing data. Kraken and Coinbase bid/ask fields are null when no fresh data is available (> 30 s old), allowing the UI to render a "—" placeholder. Sorted by gross spread descending; no-data pairs go last.
  * @summary Return cached bid/ask for all 10 pairs without REST fallbacks
  */
-export const getAllPairSnapshots = async ( options?: RequestInit): Promise<AllPairSnapshot[]> => {
+export const getAllPairSnapshots = async (params?: GetAllPairSnapshotsParams, options?: RequestInit): Promise<AllPairSnapshot[]> => {
 
-  return customFetch<AllPairSnapshot[]>(getGetAllPairSnapshotsUrl(),
+  return customFetch<AllPairSnapshot[]>(getGetAllPairSnapshotsUrl(params),
   {
     ...options,
     method: 'GET'
@@ -712,23 +720,23 @@ export const getAllPairSnapshots = async ( options?: RequestInit): Promise<AllPa
 
 
 
-export const getGetAllPairSnapshotsQueryKey = () => {
+export const getGetAllPairSnapshotsQueryKey = (params?: GetAllPairSnapshotsParams,) => {
     return [
-    `/api/prices/all-pairs`
+    `/api/prices/all-pairs`, ...(params ? [params] : [])
     ] as const;
     }
 
 
-export const getGetAllPairSnapshotsQueryOptions = <TData = Awaited<ReturnType<typeof getAllPairSnapshots>>, TError = ErrorType<unknown>>( options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getAllPairSnapshots>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+export const getGetAllPairSnapshotsQueryOptions = <TData = Awaited<ReturnType<typeof getAllPairSnapshots>>, TError = ErrorType<unknown>>(params?: GetAllPairSnapshotsParams, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getAllPairSnapshots>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
 ) => {
 
 const {query: queryOptions, request: requestOptions} = options ?? {};
 
-  const queryKey =  queryOptions?.queryKey ?? getGetAllPairSnapshotsQueryKey();
+  const queryKey =  queryOptions?.queryKey ?? getGetAllPairSnapshotsQueryKey(params);
 
 
 
-    const queryFn: QueryFunction<Awaited<ReturnType<typeof getAllPairSnapshots>>> = ({ signal }) => getAllPairSnapshots({ signal, ...requestOptions });
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof getAllPairSnapshots>>> = ({ signal }) => getAllPairSnapshots(params, { signal, ...requestOptions });
 
 
 
@@ -746,11 +754,11 @@ export type GetAllPairSnapshotsQueryError = ErrorType<unknown>
  */
 
 export function useGetAllPairSnapshots<TData = Awaited<ReturnType<typeof getAllPairSnapshots>>, TError = ErrorType<unknown>>(
-  options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getAllPairSnapshots>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+ params?: GetAllPairSnapshotsParams, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getAllPairSnapshots>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
 
  ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
 
-  const queryOptions = getGetAllPairSnapshotsQueryOptions(options)
+  const queryOptions = getGetAllPairSnapshotsQueryOptions(params,options)
 
   const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
 
