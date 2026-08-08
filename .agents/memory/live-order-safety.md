@@ -64,3 +64,7 @@ Ledger rows carry status: verified | failed | simulated | estimated. Rules that 
 ## Partial-fill tolerance (trader-tuned)
 - Leg completion threshold is trader-tuned (percent, server-clamped 50–100; default 99.9). A tolerance-accepted partial must: proceed sized to the ACTUAL fill, sweep residual inventory back to USD with CONFIRMED fills (proceeds counted in realized P&L), and — if any non-dust residual (>0.5% of held volume) can't be confirmed flat — record the trade as estimated (realized null), never verified.
 - **Why:** ignoring a residual leaves inventory on account and the USD delta stops representing the round trip; counting it as verified P&L misstates profit.
+
+## Leg-conditional risk gating
+- Full-cycle fill rate hides the costly failure mode: leg 1 fills, leg 2 dies, unwind eats ~1.5% of size. Gate live executions on Laplace-smoothed P(leg1)·P(leg2|leg1)·P(leg3|leg1+2): block when risk-adjusted EV (edge×P(all) − P(strand-after-leg1)×unwind cost) ≤ 0, and hard-block routes with <50% leg2|leg1 completion (≥5 conditional samples). Recovery attempts after decay must run as tight-timeout PROBES, never full-window trades, or each decay window buys one full-capital loss.
+- **Why:** confirmed realized losses (−$0.16/−$0.18 on $10) from leg-2 strandings that the aggregate fill-rate gate let through.

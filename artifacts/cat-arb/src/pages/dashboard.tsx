@@ -1130,7 +1130,7 @@ function OrderBookHunterCard() {
       if (r.success && r.executed) {
         const profit = r.preflightProfitUsd ?? 0;
         addLog("success", `[OB·EXEC] ✅ ${r.route} | profit $${profit.toFixed(4)}${r.isDryRun ? " (dry run)" : ` | orders ${[r.leg1OrderId, r.leg2OrderId, r.leg3OrderId].filter(Boolean).join(", ")}`}`);
-        setExecResult(`✅ Executed ${r.route} — $${profit.toFixed(4)}${r.isDryRun ? " (dry run, recorded to ledger)" : ""}`);
+        setExecResult(`✅ Cycle Completed ${r.route} — expected $${profit.toFixed(4)}${r.isDryRun ? " (dry run, recorded to ledger)" : ""}`);
       } else {
         addLog("warning", `[OB·EXEC] ❌ ${r.error ?? "Pre-flight failed."}`);
         setExecResult(`❌ ${r.error ?? "Pre-flight failed — edge disappeared."}`);
@@ -1703,8 +1703,11 @@ function GraphEngineCard() {
         if (r.success && r.executed) {
           const profit = r.realizedProfitUsd ?? r.preflightProfitUsd ?? 0;
           const label = r.realizedProfitUsd != null ? "realized" : "expected";
-          addLog("success", `[GRAPH·EXEC] ✅ ${r.route} | ${label} $${profit.toFixed(4)}${r.isDryRun ? " (dry run)" : ` | orders ${(r.orderIds ?? []).join(", ")}`}`);
-          setExecResult(`✅ Executed ${r.route} — ${label} $${profit.toFixed(4)}${r.isDryRun ? " (dry run, recorded to ledger)" : ""}`);
+          // A completed cycle is NOT automatically a win: green only when the
+          // realized number is positive; red when the cycle completed at a loss.
+          const lost = r.realizedProfitUsd != null && r.realizedProfitUsd < 0;
+          addLog(lost ? "warning" : "success", `[GRAPH·EXEC] ${lost ? "🔻" : "✅"} Cycle Completed ${r.route} | ${label} $${profit.toFixed(4)}${r.isDryRun ? " (dry run)" : ` | orders ${(r.orderIds ?? []).join(", ")}`}`);
+          setExecResult(`${lost ? "🔻" : "✅"} Cycle Completed ${r.route} — ${label} $${profit.toFixed(4)}${lost ? " LOSS" : ""}${r.isDryRun ? " (dry run, recorded to ledger)" : ""}`);
           return;
         }
         const err = r.error ?? "";
@@ -1988,7 +1991,7 @@ function GraphEngineCard() {
       {execResult && (
         <div className={cn("px-3 py-2 text-[11px] font-mono border-b border-border/50", execResult.startsWith("✅") ? "text-success" : "text-destructive")}>
           {execResult}
-          {topRoute && !execResult.startsWith("✅") && ` · Current best: ${topRoute.description} | $${topRoute.netProfitUsd.toFixed(4)}`}
+          {topRoute && execResult.startsWith("❌") && ` · Current best: ${topRoute.description} | $${topRoute.netProfitUsd.toFixed(4)}`}
         </div>
       )}
       {/* AUTO thin-edge warning — non-blocking, shown after the fire completes.

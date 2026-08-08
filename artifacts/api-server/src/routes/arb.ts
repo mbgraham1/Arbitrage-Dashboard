@@ -1498,7 +1498,19 @@ router.get("/arb/execution-quality", async (req, res): Promise<void> => {
       // denominator instead of being counted as leg failures.
       const legRows = live.filter(r => r.legsFilled != null);
       const legRate = (n: number) => legRows.length ? legRows.filter(r => (r.legsFilled ?? 0) >= n).length / legRows.length : null;
+      // Conditional completion rates — the loss pattern is leg 1 filling and
+      // leg 2 dying, which full-cycle rate alone hides.
+      const l1Rows = legRows.filter(r => (r.legsFilled ?? 0) >= 1);
+      const l2Rows = l1Rows.filter(r => (r.legsFilled ?? 0) >= 2);
+      const l3Rows = l2Rows.filter(r => (r.legsFilled ?? 0) >= 3);
+      const unwindLosses = l1Rows.filter(r => !r.filled && r.realizedProfitUsd != null)
+        .map(r => Math.max(0, -parseFloat(r.realizedProfitUsd!)));
+      const allRealized = live.filter(r => r.realizedProfitUsd != null);
       return {
+        leg2GivenLeg1Rate: l1Rows.length ? l2Rows.length / l1Rows.length : null,
+        leg3GivenLeg12Rate: l2Rows.length ? l3Rows.length / l2Rows.length : null,
+        avgUnwindLossUsd: unwindLosses.length ? unwindLosses.reduce((a, b) => a + b, 0) / unwindLosses.length : null,
+        realizedPnlUsd: allRealized.length ? allRealized.reduce((s, r) => s + parseFloat(r.realizedProfitUsd!), 0) : null,
         route, style,
         attempts: rs.length,
         liveAttempts: live.length,
@@ -1638,6 +1650,77 @@ async function routeQualityPenalty(route: string, style: string, tradeSizeUsd: n
       s + (parseFloat(r.expectedProfitUsd) - parseFloat(r.realizedProfitUsd!)) / parseFloat(r.tradeSizeUsd), 0) / realized.length;
     return { shortfallUsd: Math.max(0, avgShortfallPct * tradeSizeUsd), attempts: rows.length, blockReason: null, bigEdgeBypass: false, probe: false };
   } catch { return { shortfallUsd: 0, attempts: 0, blockReason: null, bigEdgeBypass: false, probe: false }; }
+}
+
+// ── Leg-conditional risk model ────────────────────────────────────────────────
+// Full-cycle fill rate alone hides the expensive failure mode: leg 1 fills,
+// leg 2 dies, and the unwind eats fees+spread (observed −$0.16..−$0.18 on $10).
+// This models the cycle leg by leg from recorded live attempts.
+const RISK_MIN_SAMPLES = 5;            // don't risk-gate on fewer live leg-tracked attempts
+const LEG2_COND_BLOCK_RATE = 0.5;      // block when leg2|leg1 completion < 50% (≥5 conditional samples)
+const DEFAULT_UNWIND_LOSS_FRAC = 0.015; // no measured unwind losses yet → assume 1.5% of size (matches observed)
+
+interface RouteLegRisk {
+  samples: number;            // live attempts with leg tracking
+  pLeg1: number;              // smoothed P(leg1 fills)
+  pLeg2Given1: number;        // smoothed P(leg2 | leg1)
+  pLeg3Given12: number;       // smoothed P(leg3 | leg1+2)
+  leg2CondSamples: number;    // raw conditional sample count (attempts that filled leg1)
+  leg2CondRateRaw: number;    // raw leg2|leg1 rate (no smoothing) — used for the hard block
+  avgUnwindLossUsd: number | null; // avg realized loss on failure-after-leg1 rows (measured only)
+  totalRealizedUsd: number;   // sum of realized P&L across live attempts (incl. losses)
+  realizedSamples: number;    // live attempts with a measured realized P&L
+  avgRealizedUsd: number | null; // mean realized P&L across those attempts
+  lastAttemptAtMs: number;
+}
+
+/** Leg-conditional fill stats for one route+style from its newest ≤20 live
+ *  leg-tracked attempts. Laplace-smoothed ((k+1)/(n+2)) so thin samples never
+ *  produce a hard 0 or 1. */
+async function routeLegRisk(route: string, style: string, accountId: string): Promise<RouteLegRisk | null> {
+  try {
+    const rows = await db.select().from(executionQualityTable)
+      .where(dbAnd(dbEq(executionQualityTable.route, route), dbEq(executionQualityTable.style, style), dbEq(executionQualityTable.isDryRun, false),
+        dbInArray(executionQualityTable.accountId, [accountId, "legacy"])))
+      .orderBy(dbDesc(executionQualityTable.id)).limit(20);
+    const legRows = rows.filter(r => r.legsFilled != null);
+    if (legRows.length === 0) return null;
+    const n = legRows.length;
+    const l1 = legRows.filter(r => (r.legsFilled ?? 0) >= 1);
+    const l2 = l1.filter(r => (r.legsFilled ?? 0) >= 2);
+    const l3 = l2.filter(r => (r.legsFilled ?? 0) >= 3);
+    const smooth = (k: number, m: number) => (k + 1) / (m + 2);
+    // Measured unwind cost: realized loss on attempts that filled leg1 but not
+    // the cycle. Most failed rows carry realized null (unreconciled) — only
+    // measured numbers count; caller falls back to a conservative default.
+    const unwindRows = l1.filter(r => !r.filled && r.realizedProfitUsd != null);
+    const unwindLosses = unwindRows.map(r => Math.max(0, -parseFloat(r.realizedProfitUsd!)));
+    const realizedRows = legRows.filter(r => r.realizedProfitUsd != null);
+    return {
+      samples: n,
+      pLeg1: smooth(l1.length, n),
+      pLeg2Given1: smooth(l2.length, l1.length),
+      pLeg3Given12: smooth(l3.length, l2.length),
+      leg2CondSamples: l1.length,
+      leg2CondRateRaw: l1.length > 0 ? l2.length / l1.length : 0,
+      avgUnwindLossUsd: unwindLosses.length > 0 ? unwindLosses.reduce((a, b) => a + b, 0) / unwindLosses.length : null,
+      totalRealizedUsd: realizedRows.reduce((s, r) => s + parseFloat(r.realizedProfitUsd!), 0),
+      realizedSamples: realizedRows.length,
+      avgRealizedUsd: realizedRows.length > 0 ? realizedRows.reduce((s, r) => s + parseFloat(r.realizedProfitUsd!), 0) / realizedRows.length : null,
+      lastAttemptAtMs: legRows[0]?.createdAt ? new Date(legRows[0].createdAt).getTime() : 0,
+    };
+  } catch { return null; }
+}
+
+/** Risk-adjusted expected value for firing leg 1:
+ *  EV = edge × P(all legs) − P(leg1 fills but the rest doesn't) × unwind loss.
+ *  Returns null when there aren't enough leg-tracked live samples to judge. */
+function riskAdjustedEv(risk: RouteLegRisk | null, netProfitUsd: number, tradeSizeUsd: number): { evUsd: number; pAll: number; pStrand: number; unwindLossUsd: number } | null {
+  if (!risk || risk.samples < RISK_MIN_SAMPLES) return null;
+  const pAll = risk.pLeg1 * risk.pLeg2Given1 * risk.pLeg3Given12;
+  const pStrand = risk.pLeg1 * (1 - risk.pLeg2Given1 * risk.pLeg3Given12);
+  const unwindLossUsd = risk.avgUnwindLossUsd ?? DEFAULT_UNWIND_LOSS_FRAC * tradeSizeUsd;
+  return { evUsd: netProfitUsd * pAll - pStrand * unwindLossUsd, pAll, pStrand, unwindLossUsd };
 }
 
 // liveGraphExecInFlight is now an alias for the shared liveExecLockHeld.
@@ -2011,6 +2094,45 @@ router.post("/arb/graph-execute", async (req, res): Promise<void> => {
       if (hist.shortfallUsd > 0 && route.netProfitUsd - slippageBufferUsd - hist.shortfallUsd <= minProfitUsd) {
         res.json({ success: false, isDryRun, executed: false, route: route.description, preflightProfitUsd: route.netProfitUsd, error: `Feedback-loop gate: this route historically realizes $${hist.shortfallUsd.toFixed(4)} less than the scanner expects (${hist.attempts} live attempts); edge after that shortfall ≤ minimum $${minProfitUsd.toFixed(4)}.` });
         return;
+      }
+      // 2a-ter. Leg-conditional risk gate (advisor-directed): full-cycle fill
+      // rate hides the expensive failure — leg 1 fills, leg 2 dies, unwind
+      // eats fees+spread. Gates below run on leg-tracked live history and are
+      // NOT bypassed by the profitable-route override (real losses observed);
+      // only the big-edge bypass (market moved — history isn't the pattern)
+      // and probes skip them.
+      const risk = await routeLegRisk(route.description, executionStyle, accountIdFromKey(krakenKey, coinbaseKey));
+      // Persistent-negative-realized block (trader-directed): a route whose
+      // MEASURED realized P&L averages below zero keeps losing money no matter
+      // what the scanner claims — applies even under the big-edge bypass and
+      // the profitable-route override. Recovery after decay is probe-mode only.
+      if (risk && risk.realizedSamples >= 3 && (risk.avgRealizedUsd ?? 0) < 0) {
+        if (Date.now() - risk.lastAttemptAtMs < GATE_DECAY_MS) {
+          res.json({ success: false, isDryRun, executed: false, route: route.description, preflightProfitUsd: route.netProfitUsd, error: `Risk gate: this route's measured realized P&L averages $${risk.avgRealizedUsd!.toFixed(4)} across ${risk.realizedSamples} live fills (total $${risk.totalRealizedUsd.toFixed(4)}) — it loses real money despite a positive scanner edge. Block decays ${GATE_DECAY_MS / 60_000} min after the last attempt.` });
+          return;
+        }
+        probeAttempt = true;
+        req.log.info({ route: route.description, avgRealizedUsd: risk.avgRealizedUsd, realizedSamples: risk.realizedSamples }, "negative-realized block decayed — recovery attempt runs in probe mode (2s maker window)");
+      }
+      if (!hist.bigEdgeBypass && !hist.probe) {
+        // Hard block: poor leg2|leg1 completion is the exact loss pattern.
+        if (risk && risk.leg2CondSamples >= RISK_MIN_SAMPLES && risk.leg2CondRateRaw < LEG2_COND_BLOCK_RATE) {
+          if (Date.now() - risk.lastAttemptAtMs < GATE_DECAY_MS) {
+            res.json({ success: false, isDryRun, executed: false, route: route.description, preflightProfitUsd: route.netProfitUsd, error: `Risk gate: leg 2 completes only ${Math.round(risk.leg2CondRateRaw * 100)}% of the time after leg 1 fills (${risk.leg2CondSamples} conditional samples) — stranded leg-1 fills are unwound at a loss. Block decays ${GATE_DECAY_MS / 60_000} min after the last attempt.` });
+            return;
+          }
+          // Decay expired: the recovery attempt runs as a PROBE (tight 2s
+          // maker window), never a full-window trade — otherwise each decay
+          // window buys one full-capital failed cycle at ~1.5% loss.
+          probeAttempt = true;
+          req.log.info({ route: route.description, leg2CondRate: risk.leg2CondRateRaw }, "leg2 risk block decayed — recovery attempt runs in probe mode (2s maker window)");
+        }
+        const ev = riskAdjustedEv(risk, route.netProfitUsd, tradeSizeUsd);
+        if (ev && ev.evUsd <= 0) {
+          res.json({ success: false, isDryRun, executed: false, route: route.description, preflightProfitUsd: route.netProfitUsd, error: `Risk gate: risk-adjusted EV $${ev.evUsd.toFixed(4)} ≤ 0 — $${route.netProfitUsd.toFixed(4)} edge × ${(ev.pAll * 100).toFixed(0)}% P(all legs fill) doesn't cover ${(ev.pStrand * 100).toFixed(0)}% chance of a stranded leg 1 costing ~$${ev.unwindLossUsd.toFixed(4)} to unwind (${risk!.samples} leg-tracked live attempts).` });
+          return;
+        }
+        if (ev) req.log.info({ route: route.description, evUsd: ev.evUsd, pAll: ev.pAll, pStrand: ev.pStrand, unwindLossUsd: ev.unwindLossUsd }, "risk-adjusted EV gate passed");
       }
       probeAttempt = hist.probe;
     }
