@@ -594,7 +594,7 @@ export const GraphExecuteBody = zod.object({
   "coinbaseFeesPct": zod.number().default(graphExecuteBodyCoinbaseFeesPctDefault),
   "minProfitUsd": zod.number().default(graphExecuteBodyMinProfitUsdDefault),
   "isDryRun": zod.boolean().default(graphExecuteBodyIsDryRunDefault),
-  "executionStyle": zod.enum(['taker', 'maker']).default(graphExecuteBodyExecutionStyleDefault),
+  "executionStyle": zod.enum(['taker', 'maker', 'adaptive']).default(graphExecuteBodyExecutionStyleDefault).describe('maker = post-only limits with gated taker fallback. taker = market\/IOC on all 3 legs, gated by a fresh taker-priced pre-flight (actual taker fees + depth-walked slippage + safety buffer must leave net > floor). adaptive = choose per fire whichever path has the higher expected realized P&L (maker EV uses per-route historical fill probabilities).\n'),
   "forceMode": zod.boolean().default(graphExecuteBodyForceModeDefault).describe('FORCE MODE — skip the fill-rate feedback gate, historical-shortfall penalty, and consecutive-failure blacklist entirely. Fresh pre-flight profit gates (net profit minus slippage buffer > minProfitUsd) still apply; this never authorizes a trade the live re-quote says is unprofitable.\n'),
   "maxReprices": zod.number().default(graphExecuteBodyMaxRepricesDefault).describe('Max leg-1 maker reprices (cancel + re-place at the freshest aggressive maker price, pre-flight re-run each time) before the route is abandoned so execution falls through to the next-best one.\n'),
   "makerTimeoutMs": zod.number().optional().describe('Per-leg maker fill window in ms (clamped 1000–30000 server-side). Lower = faster taker fallback; default derives from maxReprices.\n'),
@@ -610,7 +610,8 @@ export const GraphExecuteResponse = zod.object({
   "preflightProfitUsd": zod.number().nullish(),
   "realizedProfitUsd": zod.number().nullish().describe('Actual USD profit from confirmed fills (cost\/fee accounting); null when unknown'),
   "orderIds": zod.array(zod.string()).nullish(),
-  "error": zod.string().nullish()
+  "error": zod.string().nullish(),
+  "chosenMode": zod.string().nullish().describe('Execution path actually used for this fire: maker or taker (set when executionStyle=adaptive or taker)')
 })
 
 
@@ -620,6 +621,40 @@ export const GraphExecuteResponse = zod.object({
  */
 export const ClearRouteHistoryResponse = zod.object({
   "clearedRoutes": zod.number().describe('Route streak\/blacklist entries removed')
+})
+
+
+/**
+ * Fresh order-book breakdown of what a taker fire would look like right now — raw top-of-book edge, taker fees at the account's real tier, depth-walked slippage for this size, safety buffer, final executable net edge, and expected dollar profit — plus the maker-priced net and risk-adjusted maker EV, and which path adaptive mode would choose.
+ * @summary Pre-fire execution breakdown for a Kraken triangle route
+ */
+export const execPreviewBodyTradeSizeUsdDefault = 10;
+export const execPreviewBodyMinProfitUsdDefault = 0;
+export const execPreviewBodyExecutionStyleDefault = `adaptive`;
+
+export const ExecPreviewBody = zod.object({
+  "routeDescription": zod.string().describe('Kraken triangle route, e.g. USD[K]→ETH[K]→BCH[K]→USD[K]'),
+  "tradeSizeUsd": zod.number().default(execPreviewBodyTradeSizeUsdDefault),
+  "minProfitUsd": zod.number().default(execPreviewBodyMinProfitUsdDefault).describe('Trader\'s profit floor — adaptiveChoice mirrors the live decision against this floor'),
+  "krakenKey": zod.string().optional().describe('Optional — used only to fetch the account\'s real fee tiers'),
+  "krakenSecret": zod.string().optional(),
+  "executionStyle": zod.enum(['taker', 'maker', 'adaptive']).default(execPreviewBodyExecutionStyleDefault)
+})
+
+export const ExecPreviewResponse = zod.object({
+  "route": zod.string(),
+  "ok": zod.boolean().describe('False when books couldn\'t be fetched or the route isn\'t a Kraken triangle'),
+  "rawEdgeUsd": zod.number().nullish().describe('Gross edge at top-of-book taker prices, before fees and slippage'),
+  "takerFeesUsd": zod.number().nullish().describe('Total taker fees across all 3 legs at the actual (or assumed) tier'),
+  "takerFeePct": zod.number().nullish().describe('Per-leg taker fee percent used'),
+  "slippageUsd": zod.number().nullish().describe('Depth-walk cost: top-of-book edge minus executable VWAP edge for this size'),
+  "safetyBufferUsd": zod.number().nullish().describe('Extra buffer subtracted before the floor comparison'),
+  "netEdgeUsd": zod.number().nullish().describe('Final executable net edge = raw − slippage − fees − buffer'),
+  "expectedProfitUsd": zod.number().nullish().describe('Expected dollar profit if fired as taker (net of fees+slippage, before buffer)'),
+  "makerNetUsd": zod.number().nullish().describe('Maker-priced net edge (post-only joins, maker fees, zero slippage)'),
+  "makerEvUsd": zod.number().nullish().describe('Risk-adjusted maker EV using this route\'s historical per-leg fill rates'),
+  "adaptiveChoice": zod.string().nullish().describe('Which path adaptive mode would fire right now: maker, taker, or abort'),
+  "error": zod.string().nullish()
 })
 
 

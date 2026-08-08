@@ -16,6 +16,7 @@ import {
   ExecuteTriangularBody,
   ObExecuteBody,
   GraphExecuteBody,
+  ExecPreviewBody,
   ListTradesQueryParams,
 } from "@workspace/api-zod";
 import {
@@ -53,7 +54,7 @@ import {
   type Pair,
 } from "../lib/exchange";
 import { getBestPairPrices, getTriPrices, getBtcTriPrices, scanAllPairs, getPairPrices, getAllPairSnapshots } from "../lib/price-cache";
-import { scanOrderBookCycles, preflightObCycle, discoverCrossPairs, freshJoinPrice, makerQuote, OB_ASSETS, OB_USD_PAIRS, CROSS_LOOKUP, type ObAsset } from "../lib/order-book";
+import { scanOrderBookCycles, preflightObCycle, discoverCrossPairs, freshJoinPrice, makerQuote, takerCycleBreakdown, OB_ASSETS, OB_USD_PAIRS, CROSS_LOOKUP, type ObAsset } from "../lib/order-book";
 import { scanGraphOpportunities } from "../lib/graph-engine";
 import { createPairHistory, updatePairHistory, type PairHistory } from "../lib/kalman";
 import { waitForTriLimitFill } from "../lib/tri-fill.js";
@@ -745,9 +746,20 @@ interface TriangleExecInput {
    *  Skip the internal acquire (which would see the caller's own lock and
    *  self-block) — the caller releases it. */
   heldLockGen?: number;
+  /** TAKER mode: no maker attempts at all — market/IOC on all 3 legs, gated
+   *  by a FRESH taker-priced pre-flight (actual taker fee tier + depth-walked
+   *  slippage + safety buffer must leave net > minProfitUsd). Fresh prices are
+   *  re-fetched between legs (IOC caps / join re-quotes). */
+  takerOnly?: boolean;
+  /** Extra USD subtracted from the taker pre-flight net before the floor
+   *  comparison (default max($0.02, 0.05% of size)). Taker mode only. */
+  safetyBufferUsd?: number;
 }
 interface TriangleExecOut { badRequest?: string; body?: Record<string, unknown>; }
 type ReqLog = { info: (o: unknown, m?: string) => void; error: (o: unknown, m?: string) => void };
+
+/** Control-flow marker: taker-only mode skips the maker attempt entirely. */
+class TakerOnlySkip extends Error { constructor() { super("taker-only mode — maker attempt skipped"); } }
 
 /** Sell-leg failure carrying the UNSOLD residual (base units) needing unwind. */
 class ResidualError extends Error {
@@ -793,29 +805,43 @@ async function runKrakenTriangle(input: TriangleExecInput, reqLog: ReqLog): Prom
     // maker mode. Using the taker tier here caused scanner-vs-preflight fee
     // mismatch (e.g. scan at 0.22% approving a route preflight rejected at 0.38%).
     const tiers = await krakenFeeTiers(creds, feePairs);
-    const actualFeePct = tiers?.makerFeePct ?? tiers?.takerFeePct ?? null;
+    const takerOnly = input.takerOnly === true;
+    const actualFeePct = takerOnly
+      ? (tiers?.takerFeePct ?? null)
+      : (tiers?.makerFeePct ?? tiers?.takerFeePct ?? null);
     const effectiveFeesPct = actualFeePct ?? feesPct;
-    const feeStyleNote = tiers?.makerFeePct != null
-      ? "verified maker tier — all 3 legs post-only"
-      : tiers != null
-        ? "verified taker tier — maker tier unavailable from Kraken"
-        : "assumed (fee query failed)";
+    const feeStyleNote = takerOnly
+      ? (tiers?.takerFeePct != null ? "verified taker tier — all 3 legs market/IOC" : "assumed taker (fee query failed)")
+      : tiers?.makerFeePct != null
+        ? "verified maker tier — all 3 legs post-only"
+        : tiers != null
+          ? "verified taker tier — maker tier unavailable from Kraken"
+          : "assumed (fee query failed)";
+    // Taker-mode safety buffer: subtracted from the fresh taker net before
+    // every floor comparison — covers movement between pre-flight and fills.
+    const safetyBufferUsd = takerOnly
+      ? Math.min(tradeSizeUsd * 0.05, Math.max(0.02, input.safetyBufferUsd ?? Math.max(0.02, tradeSizeUsd * 0.0005)))
+      : 0;
 
     // 1. Fresh pre-flight (cache bypassed, depth 10)
     // Price the pre-flight the way the orders actually execute: POST-ONLY
     // limits at join prices (maker), not a taker depth-walk — otherwise the
     // simulation understates the edge by the spread and rejects routes the
     // maker scanner correctly approved.
-    const pf = await preflightObCycle(assetA as ObAsset, assetB as ObAsset, tradeSizeUsd, effectiveFeesPct, "maker");
+    const pf = await preflightObCycle(assetA as ObAsset, assetB as ObAsset, tradeSizeUsd, effectiveFeesPct, takerOnly ? "taker" : "maker");
     if (!pf) {
       return { body: { success: false, isDryRun, executed: false, route, preflightProfitUsd: null, error: "Could not fetch fresh order books (or depth can't absorb the size)." } };
     }
     // Execution gate: fresh profit AFTER FEES must clear the caller's
-    // minProfitUsd floor (flat USD, not scaled by trade size).
+    // minProfitUsd floor (flat USD, not scaled by trade size). Taker mode
+    // additionally subtracts the safety buffer — the depth-walked taker net
+    // minus buffer must still clear the floor.
     const threshold = minProfitUsd;
-    if (pf.profitUsd <= threshold) {
-      reqLog.info({ route, freshProfitUsd: pf.profitUsd, threshold, effectiveFeesPct }, "Pre-flight REJECTED — fresh books below profit floor");
-      return { body: { success: false, isDryRun, executed: false, route, preflightProfitUsd: pf.profitUsd, error: `Pre-flight failed — fresh profit after ${effectiveFeesPct.toFixed(2)}%/leg fees (${feeStyleNote}) is $${pf.profitUsd.toFixed(4)} ≤ minimum $${threshold.toFixed(4)}.` } };
+    if (pf.profitUsd - safetyBufferUsd <= threshold) {
+      reqLog.info({ route, freshProfitUsd: pf.profitUsd, threshold, safetyBufferUsd, effectiveFeesPct, takerOnly }, "Pre-flight REJECTED — fresh books below profit floor");
+      return { body: { success: false, isDryRun, executed: false, route, preflightProfitUsd: pf.profitUsd, error: takerOnly
+        ? `Pre-flight failed — taker-priced net (depth-walked, ${effectiveFeesPct.toFixed(2)}%/leg taker fees, ${feeStyleNote}) $${pf.profitUsd.toFixed(4)} − safety buffer $${safetyBufferUsd.toFixed(4)} ≤ minimum $${threshold.toFixed(4)}.`
+        : `Pre-flight failed — fresh profit after ${effectiveFeesPct.toFixed(2)}%/leg fees (${feeStyleNote}) is $${pf.profitUsd.toFixed(4)} ≤ minimum $${threshold.toFixed(4)}.` } };
     }
 
     // 2. Dry run — record a ledger row, no orders
@@ -1064,6 +1090,12 @@ async function runKrakenTriangle(input: TriangleExecInput, reqLog: ReqLog): Prom
       }
     };
     const marketFill = async (legIndex: number, label: string, side: "buy" | "sell", volume: number, pair: string, priceCap?: number): Promise<AggFill> => {
+      // A revoked run (HARD RESET / KILL) must never place a NEW cycle-
+      // advancing order. Residual sweeps are exempt — they SELL held inventory
+      // back to USD, the same money-safest action a revoked-run unwind takes.
+      if (!label.includes("sweep") && lockGen != null && !liveLockOwned(lockGen)) {
+        throw new LockRevokedError(`leg${legIndex}`, `aborted before ${label} market order — lock revoked, no new orders placed.`);
+      }
       setExecStatus({
         active: true, route, leg: legIndex, legLabel: `${label}: ${priceCap != null ? "IOC" : "MARKET"} ${side} ${pair} (taker fallback)`,
         pair, orderId: null, attempt: 1, maxAttempts: 1,
@@ -1108,6 +1140,7 @@ async function runKrakenTriangle(input: TriangleExecInput, reqLog: ReqLog): Prom
     {
       let f1: AggFill = { volExec: 0, cost: 0, fee: 0, txid: "" };
       try {
+        if (takerOnly) throw new TakerOnlySkip(); // no maker attempt — straight to the gated taker path below
         // Aggressive maker pricing: place at the most aggressive VALID
         // post-only price (one tick inside the spread when possible) — front
         // of the queue instead of the back of the join-price level.
@@ -1156,7 +1189,7 @@ async function runKrakenTriangle(input: TriangleExecInput, reqLog: ReqLog): Prom
           if (v > 0) await tryUnwindMarket(creds, "sell", v, pairA, `sell ${assetA} (unwind leg1 after lock revoked)`, log);
           throw e;
         }
-        log.info(`leg1 maker attempt placed nothing (${(e as Error).message}) — evaluating taker fallback`);
+        if (!(e instanceof TakerOnlySkip)) log.info(`leg1 maker attempt placed nothing (${(e as Error).message}) — evaluating taker fallback`);
       }
       leg1Id = f1.txid;
       aHeld = f1.volExec;
@@ -1174,26 +1207,40 @@ async function runKrakenTriangle(input: TriangleExecInput, reqLog: ReqLog): Prom
         }
         const takerFeePct = tiers?.takerFeePct ?? effectiveFeesPct;
         const freshTaker = await preflightObCycle(assetA as ObAsset, assetB as ObAsset, tradeSizeUsd, takerFeePct, "taker");
+        // Floor for the taker fire: taker mode adds the safety buffer on top
+        // of the trader's minimum — fresh taker net must clear BOTH.
+        const takerFloor = threshold + safetyBufferUsd;
         // Trader-directed "always taker" mode skips the profit-floor gate but
         // STILL requires a fresh taker pre-flight (books must be readable) —
-        // firing blind into an unreadable book is never authorized.
-        const fireAnyway = input.alwaysTakerFallback === true && !!freshTaker;
-        if (freshTaker && (freshTaker.profitUsd > threshold || fireAnyway)) {
-          if (freshTaker.profitUsd > threshold) {
-            log.info(`leg1 taker fallback firing — taker-priced net $${freshTaker.profitUsd.toFixed(4)} > floor $${threshold.toFixed(4)}`);
+        // firing blind into an unreadable book is never authorized. Never
+        // applies in taker-only mode: there the fresh-calculation gate is the
+        // whole point (trader-directed).
+        const fireAnyway = !takerOnly && input.alwaysTakerFallback === true && !!freshTaker;
+        if (freshTaker && (freshTaker.profitUsd > takerFloor || fireAnyway)) {
+          if (freshTaker.profitUsd > takerFloor) {
+            log.info(`leg1 taker ${takerOnly ? "fire" : "fallback"} firing — taker-priced net $${freshTaker.profitUsd.toFixed(4)} > floor $${threshold.toFixed(4)}${safetyBufferUsd > 0 ? ` + buffer $${safetyBufferUsd.toFixed(4)}` : ""}`);
           } else {
             log.info(`leg1 taker fallback firing (ALWAYS-TAKER override) — taker-priced net $${freshTaker.profitUsd.toFixed(4)} is BELOW floor $${threshold.toFixed(4)}; trader accepted fill-over-floor risk`);
           }
-          const m = await marketFill(1, "leg1", l1.side, l1.volume - aHeld, l1.pair);
+          // HARD-BOUND the USD spend: IOC limit capped 0.2% above the fresh
+          // ask — a plain market buy has no spend ceiling if the book moves.
+          const askPx = await freshJoinPrice(l1.pair, "sell"); // best ask
+          const capPx = askPx != null && askPx > 0 ? askPx * 1.002 : undefined;
+          const remVol = l1.volume - aHeld;
+          // Re-size so worst-case spend (vol × cap × (1+fee)) stays ≈ tradeSize.
+          const cappedVol = capPx != null ? Math.min(remVol, tradeSizeUsd / (capPx * (1 + takerFeePct / 100))) : remVol;
+          const m = await marketFill(1, "leg1", l1.side, cappedVol, l1.pair, capPx);
           aHeld += m.volExec; usdSpent += m.cost + m.fee; totalFees += m.fee;
           leg1Id = [leg1Id, m.txid].filter(Boolean).join(",");
         } else {
-          log.info(`leg1 taker fallback declined — taker-priced net ${freshTaker ? `$${freshTaker.profitUsd.toFixed(4)}` : "unavailable"} ≤ floor $${threshold.toFixed(4)}`);
+          log.info(`leg1 taker ${takerOnly ? "fire" : "fallback"} declined — taker-priced net ${freshTaker ? `$${freshTaker.profitUsd.toFixed(4)}` : "unavailable"} ≤ floor $${threshold.toFixed(4)}${safetyBufferUsd > 0 ? ` + buffer $${safetyBufferUsd.toFixed(4)}` : ""}`);
         }
       }
       if (aHeld < l1.volume * FILL_TOLERANCE) {
         if (aHeld > 0) await tryUnwindMarket(creds, "sell", aHeld, pairA, `sell ${assetA} (unwind partial leg1)`, log);
-        throw new Error(`Leg 1 unfilled after ${LEG1_MAX_REPRICES} maker reprices (aggressive pricing, pre-flight each time) and taker fallback ${aHeld > 0 ? "left a shortfall" : "declined (taker-priced net ≤ your floor)"} (${aHeld.toFixed(8)}/${l1.volume.toFixed(8)} ${assetA}); order canceled — trying the next-best route.`);
+        throw new Error(takerOnly
+          ? `Leg 1 taker fire aborted — fresh taker-priced net (after real taker fees, depth slippage${safetyBufferUsd > 0 ? `, $${safetyBufferUsd.toFixed(4)} safety buffer` : ""}) ≤ your $${threshold.toFixed(4)} floor; no orders kept — trying the next-best route.`
+          : `Leg 1 unfilled after ${LEG1_MAX_REPRICES} maker reprices (aggressive pricing, pre-flight each time) and taker fallback ${aHeld > 0 ? "left a shortfall" : "declined (taker-priced net ≤ your floor)"} (${aHeld.toFixed(8)}/${l1.volume.toFixed(8)} ${assetA}); order canceled — trying the next-best route.`);
       }
       legsCompleted = 1;
     }
@@ -1213,6 +1260,7 @@ async function runKrakenTriangle(input: TriangleExecInput, reqLog: ReqLog): Prom
     let bHeld = 0;
     let f2: AggFill = { volExec: 0, cost: 0, fee: 0, txid: "" };
     try {
+      if (takerOnly) throw new TakerOnlySkip(); // straight to the fresh-priced market completion below
       f2 = await fillLeg(2, "leg2", { ...l2, volume: l2Volume }, () => freshJoinPrice(l2.pair, l2.side));
       leg2Id = f2.txid;
     } catch (e) {
@@ -1232,7 +1280,7 @@ async function runKrakenTriangle(input: TriangleExecInput, reqLog: ReqLog): Prom
       }
       // Nothing placed — fall through to the taker fallback below: we hold A,
       // and completing at market beats unwinding at market (same taker cost).
-      log.info(`leg2 maker attempt placed nothing (${(e as Error).message}) — completing at market`);
+      if (!(e instanceof TakerOnlySkip)) log.info(`leg2 maker attempt placed nothing (${(e as Error).message}) — completing at market`);
     }
     {
       // Taker fallback: complete any remainder with a market order. We already
@@ -1324,6 +1372,7 @@ async function runKrakenTriangle(input: TriangleExecInput, reqLog: ReqLog): Prom
     // ── Leg 3: sell B for USD. Post-only limit at best ask → maker fee ───────
     let f3: AggFill = { volExec: 0, cost: 0, fee: 0, txid: "" };
     try {
+      if (takerOnly) throw new TakerOnlySkip(); // straight to the market completion below
       f3 = await fillLeg(3, "leg3", { ...l3, volume: bHeld }, () => freshJoinPrice(l3.pair, l3.side));
       leg3Id = f3.txid;
     } catch (e) {
@@ -1339,7 +1388,7 @@ async function runKrakenTriangle(input: TriangleExecInput, reqLog: ReqLog): Prom
       }
       // Nothing placed — fall through to the taker fallback: selling B at
       // market IS the intended trade here, not an unwind.
-      log.info(`leg3 maker attempt placed nothing (${(e as Error).message}) — completing at market`);
+      if (!(e instanceof TakerOnlySkip)) log.info(`leg3 maker attempt placed nothing (${(e as Error).message}) — completing at market`);
     }
     {
       // Taker fallback: sell any remaining B at market — identical action to
@@ -1965,7 +2014,11 @@ router.post("/arb/graph-execute", async (req, res): Promise<void> => {
   const krakenFeesPct   = Math.max(0, Number.isFinite(parsed.data.krakenFeesPct)   ? parsed.data.krakenFeesPct   : 0.16);
   const coinbaseFeesPct = Math.max(0, Number.isFinite(parsed.data.coinbaseFeesPct) ? parsed.data.coinbaseFeesPct : 0.40);
   const minProfitUsd    = isDryRun ? parsed.data.minProfitUsd : Math.max(0, parsed.data.minProfitUsd);
-  const executionStyle  = parsed.data.executionStyle ?? "taker";
+  const executionStyleReq = parsed.data.executionStyle ?? "taker";
+  // Adaptive resolves to a concrete maker/taker path per fire (decision made
+  // after route selection, using fresh taker breakdown vs. maker EV). Until
+  // then it scans/gates as maker — the superset view of opportunities.
+  let executionStyle: "maker" | "taker" = executionStyleReq === "adaptive" ? "maker" : executionStyleReq;
   const asset = (node: string) => node.split(":")[1] ?? node;
 
   // Global execution lease — shared with all live executors (triangle, OB,
@@ -2039,23 +2092,52 @@ router.post("/arb/graph-execute", async (req, res): Promise<void> => {
         req.log.info({ route: route.description, routeFeePct, effectiveKrakenFeesPct, deltaUsd }, "Route pairs carry a higher fee tier — net profit penalized");
       }
     }
-    // 2. ADAPTIVE gate: fresh net profit (already after real fees + depth
-    //    slippage in taker mode) must also clear a residual slippage buffer —
-    //    edge must exceed fees + slippage + your floor, not just fees.
-    const slippageBufferUsd = (route.slippagePct / 100) * tradeSizeUsd * 0.5; // half again, for movement between scan and fill
-    if (route.netProfitUsd - slippageBufferUsd <= minProfitUsd) {
-      res.json({ success: false, isDryRun, executed: false, route: route.description, preflightProfitUsd: route.netProfitUsd, error: `Pre-flight failed — fresh net profit $${route.netProfitUsd.toFixed(4)} minus slippage buffer $${slippageBufferUsd.toFixed(4)} (${route.slippagePct.toFixed(3)}% depth-walked) ≤ minimum $${minProfitUsd.toFixed(4)}.` });
-      return;
-    }
-    // 2b. FEEDBACK-LOOP gate (live only): this route's own execution history.
-    //     Routes that historically filled short of expectation must clear the
-    //     average shortfall too; routes that rarely fill are blocked outright.
     const realHops = route.hops.filter(h => h.exchange !== "bridge");
     const isKrakenTriangle = route.hops.length === 3 && realHops.length === 3 && realHops.every(h => h.exchange === "kraken");
     const isCrossInventory = realHops.length === 2 && route.hops.length === 3 &&
       realHops[0]!.side === "buy" && realHops[1]!.side === "sell" &&
       asset(realHops[0]!.to) === asset(realHops[1]!.from);
-
+    // 1c. ADAPTIVE mode: resolve to maker or taker for THIS fire — whichever
+    //     path has the higher expected realized P&L. Taker EV = fresh
+    //     depth-walked taker net − safety buffer (fill probability ≈ 1).
+    //     Maker EV = risk-adjusted EV from this route's measured per-leg fill
+    //     history, or a conservative default (55% fill, 1.5% strand cost)
+    //     when history is thin. Taker only wins when it ALSO clears the floor.
+    // Gate inputs must match the RESOLVED style: when adaptive picks taker,
+    // the maker-scanned net/slippage would overstate the edge to the history
+    // gates below — substitute the fresh taker numbers instead.
+    let effNetProfitUsd = route.netProfitUsd;
+    let effSlippagePct = route.slippagePct;
+    if (executionStyleReq === "adaptive" && isKrakenTriangle) {
+      const takerFeePct = tiers?.takerFeePct ?? krakenFeesPct;
+      const bufferUsd = Math.max(0.02, tradeSizeUsd * 0.0005);
+      const bd = await takerCycleBreakdown(asset(route.hops[0]!.to) as ObAsset, asset(route.hops[1]!.to) as ObAsset, tradeSizeUsd, takerFeePct);
+      const takerNet = bd ? bd.netProfitUsd - bufferUsd : null;
+      const riskM = await routeLegRisk(route.description, "maker", accountIdFromKey(krakenKey, coinbaseKey));
+      const evM = riskAdjustedEv(riskM, route.netProfitUsd, tradeSizeUsd);
+      const makerEvUsd = evM ? evM.evUsd : route.netProfitUsd * 0.55 - 0.45 * DEFAULT_UNWIND_LOSS_FRAC * tradeSizeUsd;
+      if (takerNet != null && takerNet > minProfitUsd && takerNet >= makerEvUsd) {
+        executionStyle = "taker";
+        effNetProfitUsd = takerNet; // buffered fresh taker net — what taker execution actually expects
+        effSlippagePct = bd ? (bd.slippageUsd / tradeSizeUsd) * 100 : 0;
+        req.log.info({ route: route.description, takerNetUsd: takerNet, makerEvUsd, bufferUsd, takerFeePct }, "ADAPTIVE → taker (buffered taker net clears floor and beats maker EV)");
+      } else {
+        req.log.info({ route: route.description, takerNetUsd: takerNet, makerEvUsd, historyBacked: !!evM }, "ADAPTIVE → maker (taker net below floor or maker EV higher)");
+      }
+    } else if (executionStyleReq === "adaptive") {
+      executionStyle = "taker"; // cross/inventory shapes execute at market regardless
+    }
+    // 2. ADAPTIVE gate: fresh net profit (already after real fees + depth
+    //    slippage in taker mode) must also clear a residual slippage buffer —
+    //    edge must exceed fees + slippage + your floor, not just fees.
+    const slippageBufferUsd = (effSlippagePct / 100) * tradeSizeUsd * 0.5; // half again, for movement between scan and fill
+    if (effNetProfitUsd - slippageBufferUsd <= minProfitUsd) {
+      res.json({ success: false, isDryRun, executed: false, route: route.description, preflightProfitUsd: effNetProfitUsd, error: `Pre-flight failed — fresh net profit $${effNetProfitUsd.toFixed(4)} minus slippage buffer $${slippageBufferUsd.toFixed(4)} (${effSlippagePct.toFixed(3)}% depth-walked) ≤ minimum $${minProfitUsd.toFixed(4)}.` });
+      return;
+    }
+    // 2b. FEEDBACK-LOOP gate (live only): this route's own execution history.
+    //     Routes that historically filled short of expectation must clear the
+    //     average shortfall too; routes that rarely fill are blocked outright.
     let probeAttempt = false;
     if (!isDryRun && forceMode && isKrakenTriangle) {
       // FORCE MODE: trader explicitly disabled all history-based gates.
@@ -2073,7 +2155,7 @@ router.post("/arb/graph-execute", async (req, res): Promise<void> => {
       // any order is placed, so a stale scanner edge can't authorize a trade.
       // Cross/inventory shapes have no equivalent final re-quote — for them
       // history gates stay fully in force.
-      const hist = await routeQualityPenalty(route.description, executionStyle, tradeSizeUsd, accountIdFromKey(krakenKey, coinbaseKey), isKrakenTriangle ? route.netProfitUsd : 0, isKrakenTriangle);
+      const hist = await routeQualityPenalty(route.description, executionStyle, tradeSizeUsd, accountIdFromKey(krakenKey, coinbaseKey), isKrakenTriangle ? effNetProfitUsd : 0, isKrakenTriangle);
       // Big-edge bypass overrides the blacklist too: an edge > 2× this
       // route's historical average is a NEW opportunity, not the old pattern.
       const banMs = routeBlacklistRemainingMs(accountIdFromKey(krakenKey, coinbaseKey), executionStyle, route.description);
@@ -2087,7 +2169,7 @@ router.post("/arb/graph-execute", async (req, res): Promise<void> => {
       const failStreak = routeFailStreakCount(accountIdFromKey(krakenKey, coinbaseKey), executionStyle, route.description);
       // Kraken triangles only — the override rides on that path's fresh
       // order-book re-quote; cross shapes have no equivalent final check.
-      const profitableOverride = isKrakenTriangle && route.netProfitUsd > 0.01 && failStreak < ROUTE_BLACKLIST_AFTER;
+      const profitableOverride = isKrakenTriangle && effNetProfitUsd > 0.01 && failStreak < ROUTE_BLACKLIST_AFTER;
       if (hist.blockReason && !profitableOverride) {
         res.json({ success: false, isDryRun, executed: false, route: route.description, preflightProfitUsd: route.netProfitUsd, error: `Feedback-loop gate: ${hist.blockReason} (${hist.attempts} recorded live attempts).` });
         return;
@@ -2095,7 +2177,7 @@ router.post("/arb/graph-execute", async (req, res): Promise<void> => {
       if (hist.blockReason && profitableOverride) {
         req.log.info({ route: route.description, netProfitUsd: route.netProfitUsd, failStreak }, "Fill-rate block overridden — profitable edge with a short failure streak");
       }
-      if (hist.shortfallUsd > 0 && route.netProfitUsd - slippageBufferUsd - hist.shortfallUsd <= minProfitUsd) {
+      if (hist.shortfallUsd > 0 && effNetProfitUsd - slippageBufferUsd - hist.shortfallUsd <= minProfitUsd) {
         res.json({ success: false, isDryRun, executed: false, route: route.description, preflightProfitUsd: route.netProfitUsd, error: `Feedback-loop gate: this route historically realizes $${hist.shortfallUsd.toFixed(4)} less than the scanner expects (${hist.attempts} live attempts); edge after that shortfall ≤ minimum $${minProfitUsd.toFixed(4)}.` });
         return;
       }
@@ -2131,9 +2213,9 @@ router.post("/arb/graph-execute", async (req, res): Promise<void> => {
           probeAttempt = true;
           req.log.info({ route: route.description, leg2CondRate: risk.leg2CondRateRaw }, "leg2 risk block decayed — recovery attempt runs in probe mode (2s maker window)");
         }
-        const ev = riskAdjustedEv(risk, route.netProfitUsd, tradeSizeUsd);
+        const ev = riskAdjustedEv(risk, effNetProfitUsd, tradeSizeUsd);
         if (ev && ev.evUsd <= 0) {
-          res.json({ success: false, isDryRun, executed: false, route: route.description, preflightProfitUsd: route.netProfitUsd, error: `Risk gate: risk-adjusted EV $${ev.evUsd.toFixed(4)} ≤ 0 — $${route.netProfitUsd.toFixed(4)} edge × ${(ev.pAll * 100).toFixed(0)}% P(all legs fill) doesn't cover ${(ev.pStrand * 100).toFixed(0)}% chance of a stranded leg 1 costing ~$${ev.unwindLossUsd.toFixed(4)} to unwind (${risk!.samples} leg-tracked live attempts).` });
+          res.json({ success: false, isDryRun, executed: false, route: route.description, preflightProfitUsd: effNetProfitUsd, error: `Risk gate: risk-adjusted EV $${ev.evUsd.toFixed(4)} ≤ 0 — $${effNetProfitUsd.toFixed(4)} edge × ${(ev.pAll * 100).toFixed(0)}% P(all legs fill) doesn't cover ${(ev.pStrand * 100).toFixed(0)}% chance of a stranded leg 1 costing ~$${ev.unwindLossUsd.toFixed(4)} to unwind (${risk!.samples} leg-tracked live attempts).` });
           return;
         }
         if (ev) req.log.info({ route: route.description, evUsd: ev.evUsd, pAll: ev.pAll, pStrand: ev.pStrand, unwindLossUsd: ev.unwindLossUsd }, "risk-adjusted EV gate passed");
@@ -2157,6 +2239,9 @@ router.post("/arb/graph-execute", async (req, res): Promise<void> => {
         maxReprices: Math.min(10, Math.max(1, Math.round(parsed.data.maxReprices ?? 4))),
         alwaysTakerFallback: parsed.data.alwaysTakerFallback === true,
         partialFillTolerancePct: parsed.data.partialFillTolerancePct,
+        // TAKER path (requested or adaptive-chosen): market/IOC all 3 legs,
+        // gated by the fresh taker pre-flight + safety buffer inside.
+        takerOnly: executionStyle === "taker",
         heldLockGen: lockGen ?? undefined, // graph-execute already holds the live lock
       }, req.log);
       if (out.badRequest) { res.status(400).json({ error: out.badRequest }); return; }
@@ -2176,9 +2261,9 @@ router.post("/arb/graph-execute", async (req, res): Promise<void> => {
           accountId: accountIdFromKey(parsed.data.krakenKey, parsed.data.coinbaseKey && parsed.data.coinbaseSecret ? parsed.data.coinbaseKey : undefined),
           route: route.description, style: executionStyle, isDryRun: !!b["isDryRun"],
           filled: b["success"] === true, tradeSizeUsd,
-          expectedProfitUsd: route.netProfitUsd,
+          expectedProfitUsd: effNetProfitUsd,
           realizedProfitUsd: realizedTri,
-          slippagePct: route.slippagePct,
+          slippagePct: effSlippagePct,
           legsFilled: typeof b["legsFilled"] === "number" ? b["legsFilled"] as number : null,
           note: errText || undefined,
         }, req.log);
@@ -2188,7 +2273,7 @@ router.post("/arb/graph-execute", async (req, res): Promise<void> => {
       if (isLiveTri && !wasPreflightReject) {
         await snapshotAccountValue({ krakenKey: parsed.data.krakenKey, krakenSecret: parsed.data.krakenSecret, coinbaseKey: parsed.data.coinbaseKey, coinbaseSecret: parsed.data.coinbaseSecret }, "post_trade", req.log);
       }
-      res.json({ success: b["success"], isDryRun: b["isDryRun"], executed: b["executed"], route: route.description, preflightProfitUsd: b["preflightProfitUsd"], realizedProfitUsd: realizedTri, orderIds: [b["leg1OrderId"], b["leg2OrderId"], b["leg3OrderId"]].filter(Boolean), error: b["error"] ?? null });
+      res.json({ success: b["success"], isDryRun: b["isDryRun"], executed: b["executed"], route: route.description, preflightProfitUsd: b["preflightProfitUsd"], realizedProfitUsd: realizedTri, orderIds: [b["leg1OrderId"], b["leg2OrderId"], b["leg3OrderId"]].filter(Boolean), error: b["error"] ?? null, chosenMode: executionStyle });
       return;
     }
 
@@ -3463,6 +3548,60 @@ router.post("/balances", async (req, res): Promise<void> => {
   } catch (err) {
     req.log.error({ err }, "Failed to fetch balances");
     res.status(500).json({ error: (err as Error).message });
+  }
+});
+
+// ── POST /exec-preview ───────────────────────────────────────────────────────
+// Pre-fire breakdown for a Kraken triangle: raw top-of-book edge, taker fees
+// (account's real tier when keys given), depth-walked slippage for this size,
+// safety buffer, final executable net edge — plus maker net + risk-adjusted
+// maker EV and which path ADAPTIVE would choose right now.
+router.post("/arb/exec-preview", async (req, res): Promise<void> => {
+  const parsed = ExecPreviewBody.safeParse(req.body);
+  if (!parsed.success) { res.status(400).json({ error: parsed.error.message }); return; }
+  const { routeDescription, krakenKey, krakenSecret } = parsed.data;
+  const tradeSizeUsd = Math.min(100_000, Math.max(1, parsed.data.tradeSizeUsd));
+  const m = /^USD\[K\]→([A-Z0-9]+)\[K\]→([A-Z0-9]+)\[K\]→USD\[K\]$/.exec(routeDescription);
+  const fail = (error: string) => { res.json({ route: routeDescription, ok: false, error }); };
+  if (!m) { fail("Preview is only available for Kraken-only triangles (USD[K]→A[K]→B[K]→USD[K])."); return; }
+  const [, assetA, assetB] = m;
+  if (!(OB_ASSETS as readonly string[]).includes(assetA!) || !(OB_ASSETS as readonly string[]).includes(assetB!)) {
+    fail(`Unknown asset(s): ${assetA}/${assetB}`); return;
+  }
+  try {
+    const creds = krakenKey && krakenSecret ? { krakenKey, krakenSecret } : null;
+    const pairs = [OB_USD_PAIRS[assetA as ObAsset], OB_USD_PAIRS[assetB as ObAsset]].filter(Boolean);
+    const tiers = creds ? await krakenFeeTiers(creds, pairs) : null;
+    const takerFeePct = tiers?.takerFeePct ?? 0.40; // conservative public assumption
+    const makerFeePct = tiers?.makerFeePct ?? 0.25;
+    const safetyBufferUsd = Math.max(0.02, tradeSizeUsd * 0.0005);
+    const [bd, makerPf] = await Promise.all([
+      takerCycleBreakdown(assetA as ObAsset, assetB as ObAsset, tradeSizeUsd, takerFeePct),
+      preflightObCycle(assetA as ObAsset, assetB as ObAsset, tradeSizeUsd, makerFeePct, "maker"),
+    ]);
+    if (!bd) { fail("Could not fetch fresh order books (or depth can't absorb the size)."); return; }
+    const netEdgeUsd = bd.netProfitUsd - safetyBufferUsd;
+    const makerNetUsd = makerPf?.profitUsd ?? null;
+    // Maker EV mirrors the adaptive decision in graph-execute: measured
+    // per-leg fill history when ≥5 samples, conservative default otherwise.
+    const accountId = creds ? accountIdFromKey(krakenKey!, undefined) : "anon";
+    const risk = await routeLegRisk(routeDescription, "maker", accountId);
+    const evM = makerNetUsd != null ? riskAdjustedEv(risk, makerNetUsd, tradeSizeUsd) : null;
+    const makerEvUsd = evM ? evM.evUsd : makerNetUsd != null ? makerNetUsd * 0.55 - 0.45 * DEFAULT_UNWIND_LOSS_FRAC * tradeSizeUsd : null;
+    // Mirror the live adaptive decision against the trader's actual floor.
+    const minFloor = Math.max(0, parsed.data.minProfitUsd ?? 0);
+    const takerFires = netEdgeUsd > minFloor;
+    const adaptiveChoice = takerFires && (makerEvUsd == null || netEdgeUsd >= makerEvUsd)
+      ? "taker" : (makerEvUsd != null && makerEvUsd > 0) || (makerNetUsd != null && makerNetUsd > 0) ? "maker" : "abort";
+    res.json({
+      route: routeDescription, ok: true,
+      rawEdgeUsd: bd.rawEdgeUsd, takerFeesUsd: bd.feesUsd, takerFeePct,
+      slippageUsd: bd.slippageUsd, safetyBufferUsd, netEdgeUsd,
+      expectedProfitUsd: bd.netProfitUsd, makerNetUsd, makerEvUsd, adaptiveChoice,
+      error: null,
+    });
+  } catch (e) {
+    fail((e as Error).message);
   }
 });
 

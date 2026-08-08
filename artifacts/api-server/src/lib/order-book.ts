@@ -711,6 +711,54 @@ export async function preflightObCycle(
   return { profitUsd: sim.profitUsd, slippagePct: sim.slippagePct, confidencePct: sim.confidencePct, legs, volumeA, volumeB };
 }
 
+/** Pre-fire taker breakdown: raw top-of-book edge, depth-walk slippage cost,
+ *  total taker fees, and the executable net — all from FRESH books. */
+export interface TakerCycleBreakdown {
+  /** Gross edge at top-of-book crossing prices (buy at ask, sell at bid), before fees. */
+  rawEdgeUsd: number;
+  /** Depth-walk cost for this size: rawEdgeUsd − VWAP gross (≥ 0). */
+  slippageUsd: number;
+  /** Total taker fees across all 3 legs (per-leg, on notional). */
+  feesUsd: number;
+  /** Executable net = VWAP gross − fees (before any safety buffer). */
+  netProfitUsd: number;
+  volumeA: number;
+}
+
+/** Fresh-book taker breakdown for USD→A→B→USD at the given size and taker fee.
+ *  Returns null when books can't be fetched or depth can't absorb the size. */
+export async function takerCycleBreakdown(
+  assetA: ObAsset,
+  assetB: ObAsset,
+  sizeUsd: number,
+  takerFeePct: number,
+): Promise<TakerCycleBreakdown | null> {
+  const { lookup: activeLookup } = await discoverCrossPairs();
+  const cross = activeLookup.get(`${assetA}-${assetB}`);
+  if (!cross) return null;
+  const pairA = OB_USD_PAIRS[assetA];
+  const pairB = OB_USD_PAIRS[assetB];
+  for (const p of [pairA, cross.pair, pairB]) obCache.delete(p);
+  const [obA, obX, obB] = await Promise.all([
+    fetchOrderBook(pairA, 10), fetchOrderBook(cross.pair, 10), fetchOrderBook(pairB, 10),
+  ]);
+  if (!obA || !obX || !obB) return null;
+  const books = new Map<string, OrderBook>([[pairA, obA], [cross.pair, obX], [pairB, obB]]);
+  const sim = simulateCycle(assetA, assetB, sizeUsd, books, takerFeePct, activeLookup);
+  if (!sim) return null;
+
+  // Top-of-book CROSSING prices (what a zero-slippage taker would pay):
+  // buy A at best ask, cross at the crossing side, sell B at best bid.
+  const askA = obA.asks[0]?.[0]; const bidB = obB.bids[0]?.[0];
+  const crossPx = cross.aIsQuote ? obX.asks[0]?.[0] : obX.bids[0]?.[0];
+  if (!askA || !bidB || !crossPx) return null;
+  const volA = sizeUsd / askA;
+  const volB = cross.aIsQuote ? volA / crossPx : volA * crossPx;
+  const rawEdgeUsd = volB * bidB - sizeUsd;
+  const slippageUsd = Math.max(0, rawEdgeUsd - sim.grossProfitUsd);
+  return { rawEdgeUsd, slippageUsd, feesUsd: sim.feeUsd, netProfitUsd: sim.profitUsd, volumeA: sim.volA };
+}
+
 /**
  * Fresh post-only join price for one pair (cache bypassed): buys rest at the
  * best bid, sells at the best ask. Used to re-price a maker leg after a

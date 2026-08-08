@@ -68,3 +68,9 @@ Ledger rows carry status: verified | failed | simulated | estimated. Rules that 
 ## Leg-conditional risk gating
 - Full-cycle fill rate hides the costly failure mode: leg 1 fills, leg 2 dies, unwind eats ~1.5% of size. Gate live executions on Laplace-smoothed P(leg1)·P(leg2|leg1)·P(leg3|leg1+2): block when risk-adjusted EV (edge×P(all) − P(strand-after-leg1)×unwind cost) ≤ 0, and hard-block routes with <50% leg2|leg1 completion (≥5 conditional samples). Recovery attempts after decay must run as tight-timeout PROBES, never full-window trades, or each decay window buys one full-capital loss.
 - **Why:** confirmed realized losses (−$0.16/−$0.18 on $10) from leg-2 strandings that the aggregate fill-rate gate let through.
+
+## Taker-only / adaptive execution mode
+- Every NEW cycle-advancing market/IOC order must re-verify the live lock immediately before placement (put the check inside the shared market-fill helper). Residual sweeps back to USD are exempt — they equal the money-safe unwind action.
+- Market BUYS have no spend ceiling; always convert to an IOC limit capped ~0.2% above the fresh ask and re-size volume so worst-case spend ≈ trade size incl. fees.
+- When a mode decision (adaptive) resolves scan style ≠ execution style, all downstream profit/history gates must be fed the RESOLVED style's fresh numbers — a maker-priced net overstates a taker fire's edge (fees ~3× maker).
+- Any pre-fire preview shown to the trader must apply the same floor and decision logic as the live path, or it will advertise fires that the server would refuse.

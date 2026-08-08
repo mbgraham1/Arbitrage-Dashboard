@@ -31,6 +31,8 @@ import type {
   ExchangeCredentials,
   ExecLockClearRequest,
   ExecLockClearResult,
+  ExecPreviewRequest,
+  ExecPreviewResult,
   ExecutionQualityResult,
   ExecutionStatusResult,
   FeeTierRequest,
@@ -1786,6 +1788,78 @@ export const useClearRouteHistory = <TError = ErrorType<unknown>,
         TContext
       > => {
       return useMutation(getClearRouteHistoryMutationOptions(options));
+    }
+
+export const getExecPreviewUrl = () => {
+
+
+
+
+  return `/api/arb/exec-preview`
+}
+
+/**
+ * Fresh order-book breakdown of what a taker fire would look like right now — raw top-of-book edge, taker fees at the account's real tier, depth-walked slippage for this size, safety buffer, final executable net edge, and expected dollar profit — plus the maker-priced net and risk-adjusted maker EV, and which path adaptive mode would choose.
+ * @summary Pre-fire execution breakdown for a Kraken triangle route
+ */
+export const execPreview = async (execPreviewRequest: ExecPreviewRequest, options?: RequestInit): Promise<ExecPreviewResult> => {
+
+  return customFetch<ExecPreviewResult>(getExecPreviewUrl(),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(execPreviewRequest)
+  }
+);}
+
+
+
+
+
+export const getExecPreviewMutationOptions = <TError = ErrorType<unknown>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof execPreview>>, TError,{data: BodyType<ExecPreviewRequest>}, TContext>, request?: SecondParameter<typeof customFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof execPreview>>, TError,{data: BodyType<ExecPreviewRequest>}, TContext> => {
+
+const mutationKey = ['execPreview'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof execPreview>>, {data: BodyType<ExecPreviewRequest>}> = (props) => {
+          const {data} = props ?? {};
+
+          return  execPreview(data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type ExecPreviewMutationResult = NonNullable<Awaited<ReturnType<typeof execPreview>>>
+    export type ExecPreviewMutationBody = BodyType<ExecPreviewRequest>
+    export type ExecPreviewMutationError = ErrorType<unknown>
+
+    /**
+ * @summary Pre-fire execution breakdown for a Kraken triangle route
+ */
+export const useExecPreview = <TError = ErrorType<unknown>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof execPreview>>, TError,{data: BodyType<ExecPreviewRequest>}, TContext>, request?: SecondParameter<typeof customFetch>}
+ ): UseMutationResult<
+        Awaited<ReturnType<typeof execPreview>>,
+        TError,
+        {data: BodyType<ExecPreviewRequest>},
+        TContext
+      > => {
+      return useMutation(getExecPreviewMutationOptions(options));
     }
 
 export const getClearExecLockUrl = () => {

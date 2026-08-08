@@ -12,7 +12,8 @@ import { format } from "date-fns";
 import { cn } from "@/lib/utils";
 import { useToast } from "@/hooks/use-toast";
 import { useLocalStorage } from "@/hooks/use-local-storage";
-import { useGetTradeSummary, useListTrades, useScanAllPairs, useGetObScan, getGetObScanQueryKey, useObExecute, useGetAllPairSnapshots, getGetAllPairSnapshotsQueryKey, useGetGraphScan, getGetGraphScanQueryKey, useGraphExecute, useGetFeeTier, getGetFeeTierQueryKey, useGetExecutionQuality, getGetExecutionQualityQueryKey, useGetExecutionStatus, getGetExecutionStatusQueryKey, useGetAccountPnl, getGetAccountPnlQueryKey, useGetInventoryScan, getGetInventoryScanQueryKey, useInventoryExecute, TradeRecord, PairScanEntry, ObCycleEntry, AllPairSnapshot, GraphRoute, GraphRouteHop, InventoryOpportunity, InventoryRebalanceAlert } from "@workspace/api-client-react";
+import { useQuery } from "@tanstack/react-query";
+import { execPreview, useGetTradeSummary, useListTrades, useScanAllPairs, useGetObScan, getGetObScanQueryKey, useObExecute, useGetAllPairSnapshots, getGetAllPairSnapshotsQueryKey, useGetGraphScan, getGetGraphScanQueryKey, useGraphExecute, useGetFeeTier, getGetFeeTierQueryKey, useGetExecutionQuality, getGetExecutionQualityQueryKey, useGetExecutionStatus, getGetExecutionStatusQueryKey, useGetAccountPnl, getGetAccountPnlQueryKey, useGetInventoryScan, getGetInventoryScanQueryKey, useInventoryExecute, TradeRecord, PairScanEntry, ObCycleEntry, AllPairSnapshot, GraphRoute, GraphRouteHop, InventoryOpportunity, InventoryRebalanceAlert } from "@workspace/api-client-react";
 
 // ── Small helpers ──────────────────────────────────────────────────────────────
 
@@ -1672,19 +1673,25 @@ function GraphEngineCard() {
   // Use the account's real Kraken fee tier when available (shared lookup).
   // Maker style: post-only limit orders — better prices + maker fee, but no
   // fill guarantee. Taker style: market orders priced by depth-walked VWAP.
-  const [style, setStyle] = useState<"taker" | "maker">("taker");
+  // ADAPTIVE (default): per fire, the server picks whichever path has the
+  // higher expected realized P&L — maker EV from this route's measured
+  // per-leg fill history vs. buffered fresh taker net (must also clear floor).
+  const [style, setStyle] = useLocalStorage<"taker" | "maker" | "adaptive">("graph-exec-style", "adaptive");
   // Fast-fill mode (trader-directed): 3s maker window, a single reprice, then
   // an UNGATED taker fallback — fills small edges instead of cancelling them,
   // at the cost of occasionally eating a decayed edge at taker prices.
   const [fastTakerFallback, setFastTakerFallback] = useLocalStorage<boolean>("graph-fast-taker-fallback", true);
   const fees = useActualKrakenFees();
-  const actualFee = style === "maker" ? (fees.maker ?? fees.taker) : fees.taker;
+  // Adaptive scans as maker — the superset view; the server re-decides
+  // maker vs taker per fire with fresh books.
+  const scanStyle = style === "taker" ? "taker" as const : "maker" as const;
+  const actualFee = scanStyle === "maker" ? (fees.maker ?? fees.taker) : fees.taker;
   const params = {
     tradeSizeUsd:    tradeSize,
     krakenFeesPct:   actualFee ?? settings.obFeesPct,
     coinbaseFeesPct: 0.40,
     maxHops:         4,
-    executionStyle:  style,
+    executionStyle:  scanStyle,
   };
   const { data, isLoading, dataUpdatedAt } = useGetGraphScan(params, {
     query: { queryKey: getGetGraphScanQueryKey(params), refetchInterval: 8_000, staleTime: 7_000 },
@@ -1699,6 +1706,25 @@ function GraphEngineCard() {
     ? ((topRoute.feeUsd / tradeSize) * 100).toFixed(3)
     : "—";
   const canExecute = !!topRoute && !executeMutation.isPending;
+
+  // Pre-fire breakdown (Kraken triangles): fresh raw edge, taker fees at the
+  // real tier, depth-walked slippage for THIS size, safety buffer, and the
+  // final executable net — shown before the trader fires.
+  const previewRoute = topRoute && /^USD\[K\]→[A-Z0-9]+\[K\]→[A-Z0-9]+\[K\]→USD\[K\]$/.test(topRoute.description) ? topRoute.description : null;
+  const { data: preview } = useQuery({
+    queryKey: ["exec-preview", previewRoute, tradeSize, minProfit],
+    enabled: !!previewRoute,
+    refetchInterval: 8_000,
+    staleTime: 7_000,
+    queryFn: () => execPreview({
+      routeDescription: previewRoute!,
+      tradeSizeUsd: tradeSize,
+      minProfitUsd: minProfit,
+      krakenKey: credentials.krakenKey || undefined,
+      krakenSecret: credentials.krakenSecret || undefined,
+      executionStyle: style,
+    }),
+  });
 
   // Synchronous in-flight guard: React Query's isPending only updates on the
   // next render, so a rapid auto-fire + manual click could otherwise both
@@ -1744,8 +1770,9 @@ function GraphEngineCard() {
           // A completed cycle is NOT automatically a win: green only when the
           // realized number is positive; red when the cycle completed at a loss.
           const lost = r.realizedProfitUsd != null && r.realizedProfitUsd < 0;
-          addLog(lost ? "warning" : "success", `[GRAPH·EXEC] ${lost ? "🔻" : "✅"} Cycle Completed ${r.route} | ${label} $${profit.toFixed(4)}${r.isDryRun ? " (dry run)" : ` | orders ${(r.orderIds ?? []).join(", ")}`}`);
-          setExecResult(`${lost ? "🔻" : "✅"} Cycle Completed ${r.route} — ${label} $${profit.toFixed(4)}${lost ? " LOSS" : ""}${r.isDryRun ? " (dry run, recorded to ledger)" : ""}`);
+          const modeTag = r.chosenMode ? ` [${r.chosenMode.toUpperCase()}]` : "";
+          addLog(lost ? "warning" : "success", `[GRAPH·EXEC] ${lost ? "🔻" : "✅"} Cycle Completed${modeTag} ${r.route} | ${label} $${profit.toFixed(4)}${r.isDryRun ? " (dry run)" : ` | orders ${(r.orderIds ?? []).join(", ")}`}`);
+          setExecResult(`${lost ? "🔻" : "✅"} Cycle Completed${modeTag} ${r.route} — ${label} $${profit.toFixed(4)}${lost ? " LOSS" : ""}${r.isDryRun ? " (dry run, recorded to ledger)" : ""}`);
           return;
         }
         const err = r.error ?? "";
@@ -1891,14 +1918,19 @@ function GraphEngineCard() {
             /> profit
           </span>
           <button
-            onClick={() => setStyle(s => s === "taker" ? "maker" : "taker")}
+            onClick={() => setStyle(s => s === "adaptive" ? "maker" : s === "maker" ? "taker" : "adaptive")}
+            data-testid="button-exec-style"
             className={cn(
               "text-[10px] font-mono font-bold px-1.5 py-0.5 border",
-              style === "maker" ? "border-success text-success" : "border-border text-muted-foreground",
+              style === "maker" ? "border-success text-success"
+                : style === "adaptive" ? "border-primary text-primary"
+                : "border-border text-muted-foreground",
             )}
             title={style === "maker"
               ? "MAKER: post-only limit orders — lower fee + better price, fills not guaranteed. LIVE maker execution: Kraken triangles only."
-              : "TAKER: market orders — guaranteed fill, priced by depth-walked VWAP incl. slippage"}
+              : style === "taker"
+                ? "TAKER: market/IOC on all 3 legs — fires only if a FRESH taker-priced pre-flight (real taker fees + depth slippage + safety buffer) still clears your floor; aborts otherwise. Prices re-checked between legs."
+                : "ADAPTIVE: per fire, picks whichever path has the higher expected realized P&L — maker EV (from this route's measured fill history) vs. fresh buffered taker net. Taker only wins when it also clears your floor."}
           >
             {style.toUpperCase()}
           </button>
@@ -1954,6 +1986,20 @@ function GraphEngineCard() {
         </div>
       </CardHeader>
 
+      {preview?.ok && topRoute && (
+        <div data-testid="panel-exec-preview" className="px-3 py-1.5 border-b border-border/50 text-[10px] font-mono flex flex-wrap items-center gap-x-3 gap-y-0.5">
+          <span className="text-muted-foreground font-bold">PRE-FIRE ({style.toUpperCase()})</span>
+          <span title="Gross edge at top-of-book taker prices, before fees and slippage">raw <span className="text-foreground">${(preview.rawEdgeUsd ?? 0).toFixed(4)}</span></span>
+          <span title={`Total taker fees, 3 legs at ${preview.takerFeePct?.toFixed(2) ?? "?"}%/leg (your real tier when keys are set)`}>fees <span className="text-foreground">−${(preview.takerFeesUsd ?? 0).toFixed(4)}</span></span>
+          <span title="Depth-walk cost at your size: top-of-book edge minus executable VWAP edge">slip <span className="text-foreground">−${(preview.slippageUsd ?? 0).toFixed(4)}</span></span>
+          <span title="Safety buffer for movement between pre-flight and fills">buffer <span className="text-foreground">−${(preview.safetyBufferUsd ?? 0).toFixed(4)}</span></span>
+          <span title="Final executable net edge = raw − fees − slippage − buffer; a taker fire only happens when this clears your floor" className={cn("font-bold", (preview.netEdgeUsd ?? 0) > minProfit ? "text-success" : "text-destructive")}>net ${(preview.netEdgeUsd ?? 0).toFixed(4)}</span>
+          <span title="Expected dollar profit if fired as taker right now (net of fees + slippage, before buffer)">exp <span className={cn((preview.expectedProfitUsd ?? 0) > 0 ? "text-success" : "text-destructive")}>${(preview.expectedProfitUsd ?? 0).toFixed(4)}</span></span>
+          {style === "adaptive" && (
+            <span title={`Adaptive decision right now — maker EV ${preview.makerEvUsd != null ? `$${preview.makerEvUsd.toFixed(4)}` : "n/a"} vs buffered taker net`} className="font-bold text-primary">→ {(preview.adaptiveChoice ?? "—").toUpperCase()}</span>
+          )}
+        </div>
+      )}
       {legStatus && (
         <div className="px-3 py-2 border-b border-primary/50 bg-primary/5 text-[10px] font-mono flex flex-wrap items-center gap-x-4 gap-y-1">
           <span className="font-bold text-primary animate-pulse">⚡ LIVE EXECUTION</span>

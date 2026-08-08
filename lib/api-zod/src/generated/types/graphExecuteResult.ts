@@ -16,4 +16,6 @@ export interface GraphExecuteResult {
   realizedProfitUsd?: number | null;
   orderIds?: string[] | null;
   error?: string | null;
+  /** Execution path actually used for this fire: maker or taker (set when executionStyle=adaptive or taker) */
+  chosenMode?: string | null;
 }

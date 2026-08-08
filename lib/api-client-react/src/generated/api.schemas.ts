@@ -670,12 +670,16 @@ export interface InventoryExecuteResult {
   error?: string | null;
 }
 
+/**
+ * maker = post-only limits with gated taker fallback. taker = market/IOC on all 3 legs, gated by a fresh taker-priced pre-flight (actual taker fees + depth-walked slippage + safety buffer must leave net > floor). adaptive = choose per fire whichever path has the higher expected realized P&L (maker EV uses per-route historical fill probabilities).
+ */
 export type GraphExecuteRequestExecutionStyle = typeof GraphExecuteRequestExecutionStyle[keyof typeof GraphExecuteRequestExecutionStyle];
 
 
 export const GraphExecuteRequestExecutionStyle = {
   taker: 'taker',
   maker: 'maker',
+  adaptive: 'adaptive',
 } as const;
 
 export interface GraphExecuteRequest {
@@ -690,6 +694,7 @@ export interface GraphExecuteRequest {
   coinbaseFeesPct?: number;
   minProfitUsd?: number;
   isDryRun?: boolean;
+  /** maker = post-only limits with gated taker fallback. taker = market/IOC on all 3 legs, gated by a fresh taker-priced pre-flight (actual taker fees + depth-walked slippage + safety buffer must leave net > floor). adaptive = choose per fire whichever path has the higher expected realized P&L (maker EV uses per-route historical fill probabilities). */
   executionStyle?: GraphExecuteRequestExecutionStyle;
   /** FORCE MODE — skip the fill-rate feedback gate, historical-shortfall penalty, and consecutive-failure blacklist entirely. Fresh pre-flight profit gates (net profit minus slippage buffer > minProfitUsd) still apply; this never authorizes a trade the live re-quote says is unprofitable. */
   forceMode?: boolean;
@@ -732,6 +737,56 @@ export interface GraphExecuteResult {
   /** Actual USD profit from confirmed fills (cost/fee accounting); null when unknown */
   realizedProfitUsd?: number | null;
   orderIds?: string[] | null;
+  error?: string | null;
+  /** Execution path actually used for this fire: maker or taker (set when executionStyle=adaptive or taker) */
+  chosenMode?: string | null;
+}
+
+export type ExecPreviewRequestExecutionStyle = typeof ExecPreviewRequestExecutionStyle[keyof typeof ExecPreviewRequestExecutionStyle];
+
+
+export const ExecPreviewRequestExecutionStyle = {
+  taker: 'taker',
+  maker: 'maker',
+  adaptive: 'adaptive',
+} as const;
+
+export interface ExecPreviewRequest {
+  /** Kraken triangle route, e.g. USD[K]→ETH[K]→BCH[K]→USD[K] */
+  routeDescription: string;
+  tradeSizeUsd?: number;
+  /** Trader's profit floor — adaptiveChoice mirrors the live decision against this floor */
+  minProfitUsd?: number;
+  /** Optional — used only to fetch the account's real fee tiers */
+  krakenKey?: string;
+  krakenSecret?: string;
+  executionStyle?: ExecPreviewRequestExecutionStyle;
+}
+
+export interface ExecPreviewResult {
+  route: string;
+  /** False when books couldn't be fetched or the route isn't a Kraken triangle */
+  ok: boolean;
+  /** Gross edge at top-of-book taker prices, before fees and slippage */
+  rawEdgeUsd?: number | null;
+  /** Total taker fees across all 3 legs at the actual (or assumed) tier */
+  takerFeesUsd?: number | null;
+  /** Per-leg taker fee percent used */
+  takerFeePct?: number | null;
+  /** Depth-walk cost: top-of-book edge minus executable VWAP edge for this size */
+  slippageUsd?: number | null;
+  /** Extra buffer subtracted before the floor comparison */
+  safetyBufferUsd?: number | null;
+  /** Final executable net edge = raw − slippage − fees − buffer */
+  netEdgeUsd?: number | null;
+  /** Expected dollar profit if fired as taker (net of fees+slippage, before buffer) */
+  expectedProfitUsd?: number | null;
+  /** Maker-priced net edge (post-only joins, maker fees, zero slippage) */
+  makerNetUsd?: number | null;
+  /** Risk-adjusted maker EV using this route's historical per-leg fill rates */
+  makerEvUsd?: number | null;
+  /** Which path adaptive mode would fire right now: maker, taker, or abort */
+  adaptiveChoice?: string | null;
   error?: string | null;
 }
 

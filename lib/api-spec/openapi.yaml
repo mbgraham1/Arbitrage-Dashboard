@@ -611,6 +611,31 @@ paths:
               schema:
                 $ref: "#/components/schemas/RouteHistoryClearResult"
 
+  /arb/exec-preview:
+    post:
+      operationId: execPreview
+      tags: [trades]
+      summary: Pre-fire execution breakdown for a Kraken triangle route
+      description: >
+        Fresh order-book breakdown of what a taker fire would look like right
+        now — raw top-of-book edge, taker fees at the account's real tier,
+        depth-walked slippage for this size, safety buffer, final executable
+        net edge, and expected dollar profit — plus the maker-priced net and
+        risk-adjusted maker EV, and which path adaptive mode would choose.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ExecPreviewRequest"
+      responses:
+        "200":
+          description: Breakdown (ok=false when books unavailable or route unsupported)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ExecPreviewResult"
+
   /arb/exec-lock/clear:
     post:
       operationId: clearExecLock
@@ -1543,7 +1568,16 @@ components:
         coinbaseFeesPct: { type: number, default: 0.4 }
         minProfitUsd: { type: number, default: 0.02 }
         isDryRun: { type: boolean, default: true }
-        executionStyle: { type: string, enum: [taker, maker], default: taker }
+        executionStyle:
+          type: string
+          enum: [taker, maker, adaptive]
+          default: taker
+          description: >
+            maker = post-only limits with gated taker fallback. taker = market/IOC
+            on all 3 legs, gated by a fresh taker-priced pre-flight (actual taker
+            fees + depth-walked slippage + safety buffer must leave net > floor).
+            adaptive = choose per fire whichever path has the higher expected
+            realized P&L (maker EV uses per-route historical fill probabilities).
         forceMode:
           type: boolean
           default: false
@@ -1629,6 +1663,39 @@ components:
           type: array
           items: { type: string }
           nullable: true
+        error: { type: string, nullable: true }
+        chosenMode:
+          type: string
+          nullable: true
+          description: "Execution path actually used for this fire: maker or taker (set when executionStyle=adaptive or taker)"
+
+    ExecPreviewRequest:
+      type: object
+      required: [routeDescription]
+      properties:
+        routeDescription: { type: string, description: "Kraken triangle route, e.g. USD[K]→ETH[K]→BCH[K]→USD[K]" }
+        tradeSizeUsd: { type: number, default: 10 }
+        minProfitUsd: { type: number, default: 0, description: "Trader's profit floor — adaptiveChoice mirrors the live decision against this floor" }
+        krakenKey: { type: string, description: "Optional — used only to fetch the account's real fee tiers" }
+        krakenSecret: { type: string }
+        executionStyle: { type: string, enum: [taker, maker, adaptive], default: adaptive }
+
+    ExecPreviewResult:
+      type: object
+      required: [route, ok]
+      properties:
+        route: { type: string }
+        ok: { type: boolean, description: "False when books couldn't be fetched or the route isn't a Kraken triangle" }
+        rawEdgeUsd: { type: number, nullable: true, description: "Gross edge at top-of-book taker prices, before fees and slippage" }
+        takerFeesUsd: { type: number, nullable: true, description: "Total taker fees across all 3 legs at the actual (or assumed) tier" }
+        takerFeePct: { type: number, nullable: true, description: "Per-leg taker fee percent used" }
+        slippageUsd: { type: number, nullable: true, description: "Depth-walk cost: top-of-book edge minus executable VWAP edge for this size" }
+        safetyBufferUsd: { type: number, nullable: true, description: "Extra buffer subtracted before the floor comparison" }
+        netEdgeUsd: { type: number, nullable: true, description: "Final executable net edge = raw − slippage − fees − buffer" }
+        expectedProfitUsd: { type: number, nullable: true, description: "Expected dollar profit if fired as taker (net of fees+slippage, before buffer)" }
+        makerNetUsd: { type: number, nullable: true, description: "Maker-priced net edge (post-only joins, maker fees, zero slippage)" }
+        makerEvUsd: { type: number, nullable: true, description: "Risk-adjusted maker EV using this route's historical per-leg fill rates" }
+        adaptiveChoice: { type: string, nullable: true, description: "Which path adaptive mode would fire right now: maker, taker, or abort" }
         error: { type: string, nullable: true }
 
     ObExecuteResult:

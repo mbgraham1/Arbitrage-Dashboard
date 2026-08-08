@@ -6,10 +6,14 @@
  * OpenAPI spec version: 0.1.0
  */
 
+/**
+ * maker = post-only limits with gated taker fallback. taker = market/IOC on all 3 legs, gated by a fresh taker-priced pre-flight (actual taker fees + depth-walked slippage + safety buffer must leave net > floor). adaptive = choose per fire whichever path has the higher expected realized P&L (maker EV uses per-route historical fill probabilities).
+ */
 export type GraphExecuteRequestExecutionStyle = typeof GraphExecuteRequestExecutionStyle[keyof typeof GraphExecuteRequestExecutionStyle];
 
 
 export const GraphExecuteRequestExecutionStyle = {
   taker: 'taker',
   maker: 'maker',
+  adaptive: 'adaptive',
 } as const;
