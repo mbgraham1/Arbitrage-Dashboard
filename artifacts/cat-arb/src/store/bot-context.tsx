@@ -54,6 +54,7 @@ export interface BotSettings {
   // Order Book Hunter parameters
   obTradeSize: number;  // v8: trade size in USD for OB scans (default $10)
   obFeesPct: number;    // v8: estimated fee per leg in % for OB scans (default 0.40%)
+  obMinProfitUsd: number; // OB auto-execute profit floor in USD (default $0.02, matches server-side scan floor)
   // Thin-edge warning threshold — live executes with profit below this % of
   // trade size trigger a confirm dialog (default 0.1%)
   thinEdgeWarnPct: number;
@@ -144,6 +145,7 @@ const DEFAULT_SETTINGS: BotSettings = {
   enabledPairs: [...ALL_PAIRS], // all 10 pairs enabled by default
   obTradeSize: 10,      // v8: OB Hunter default $10 trade size
   obFeesPct: 0.16,      // v8: OB Hunter default 0.16% fee per leg (Kraken post-only maker rate)
+  obMinProfitUsd: 0.02, // OB auto-execute floor — matches the server-side scan's $0.02 default
   thinEdgeWarnPct: 0.1, // warn on live executes when profit < 0.1% of trade size
   // Inventory Mode (v10)
   inventoryModeEnabled: false,
@@ -394,10 +396,12 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
   // ── Order Book Hunter scan — auto-execute the top READY cycle ────────────────
   // Polls /arb/ob-scan while the bot is running (same interval as cross-exchange
   // scan). Mirrors the Python v14 auto-execute loop: when the top cycle is READY
-  // and its net profit exceeds settings.minProfitUsd and the cooldown has elapsed,
+  // and its net profit exceeds settings.obMinProfitUsd and the cooldown has elapsed,
   // fires the three Kraken market orders automatically. Dry-run mode records to
   // the trade ledger without placing real orders.
-  const obScanParams = { tradeSizeUsd: settingsRef.current.obTradeSize, feesPct: settingsRef.current.obFeesPct, minProfitUsd: 0.02, maxSlippagePct: 0.5, volatilityFilter: true };
+  // minProfitUsd comes from settings (not settingsRef) so the query key changes
+  // and the scan refetches when the trader tunes the OB floor in Config.
+  const obScanParams = { tradeSizeUsd: settings.obTradeSize, feesPct: settings.obFeesPct, minProfitUsd: settings.obMinProfitUsd, maxSlippagePct: 0.5, volatilityFilter: true };
   const obScan = useGetObScan(obScanParams, {
     query: {
       queryKey: getGetObScanQueryKey(obScanParams),
@@ -436,7 +440,7 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
     // Only 3-leg routes are executable — the OB executor places exactly three
     // orders from (assetA, assetB); a 4-leg route would skip the middle hop.
     const top = cycles
-      .filter(c => (c.legs ?? 3) === 3 && c.status === "READY" && c.estimatedProfitUsd > s.minProfitUsd)
+      .filter(c => (c.legs ?? 3) === 3 && c.status === "READY" && c.estimatedProfitUsd > s.obMinProfitUsd)
       .sort((a, b) => b.estimatedProfitUsd - a.estimatedProfitUsd)[0];
     if (!top) return;
 
@@ -459,7 +463,7 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
           assetB: top.assetB,
           tradeSizeUsd: s.obTradeSize,
           feesPct: s.obFeesPct,
-          minProfitUsd: s.minProfitUsd,
+          minProfitUsd: s.obMinProfitUsd,
           isDryRun,
         },
       },

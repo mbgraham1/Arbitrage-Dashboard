@@ -477,7 +477,7 @@ export default function Settings() {
               <BookOpen className="h-5 w-5" /> Order Book Hunter
             </CardTitle>
             <CardDescription>
-              Parameters for the OB triangular scanner and auto-execute loop. Trade size controls how deep into the book each simulation walks and is the dollar amount the auto-executor fires. Fees estimate Kraken's per-leg taker rate; the auto-executor uses the Min Net Profit (USD) from Strategy Parameters as its profit floor.
+              Parameters for the OB triangular scanner and auto-execute loop. Trade size controls how deep into the book each simulation walks and is the dollar amount the auto-executor fires. Fees estimate Kraken's per-leg taker rate; the auto-executor uses its own OB Min Profit (USD) floor below — separate from the cross-exchange bot's minimum.
             </CardDescription>
           </CardHeader>
           <CardContent className="flex flex-col gap-6">
@@ -510,6 +510,21 @@ export default function Settings() {
                 data-testid="input-ob-fees-pct"
                 value={localSettings.obFeesPct}
                 onChange={(e) => setLocalSettings({ ...localSettings, obFeesPct: parseFloat(e.target.value) || 0.16 })}
+              />
+            </div>
+
+            <div className="space-y-3">
+              <div className="flex flex-col gap-1">
+                <Label>OB Min Profit (USD)</Label>
+                <span className="text-xs text-muted-foreground font-mono">OB auto-executor fires only when estimated net profit &gt;= this value (default $0.02) — separate from the cross-exchange bot's Min Net Profit</span>
+              </div>
+              <Input
+                type="number"
+                step="0.01"
+                min="0"
+                data-testid="input-ob-min-profit-usd"
+                value={localSettings.obMinProfitUsd}
+                onChange={(e) => setLocalSettings({ ...localSettings, obMinProfitUsd: Math.max(0, parseFloat(e.target.value) || 0) })}
               />
             </div>
 

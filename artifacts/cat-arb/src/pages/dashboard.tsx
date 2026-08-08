@@ -1118,10 +1118,15 @@ function OrderBookHunterCard() {
     setTradeSizeInput(String(settings.obTradeSize));
     setDebouncedSize(String(settings.obTradeSize));
   }, [settings.obTradeSize, settings.obFeesPct]);
+  // Re-seed the min-profit input when the configured OB floor changes in
+  // Config, so the card's scan threshold follows the setting.
+  useEffect(() => {
+    setMinProfitInput(String(settings.obMinProfitUsd));
+  }, [settings.obMinProfitUsd]);
   const tradeSize = Math.max(1, parseFloat(debouncedSize) || settings.obTradeSize);
-  // Min-profit floor: seeded from settings.minProfitUsd so it matches the
-  // auto-execute threshold that the bot loop uses.
-  const [minProfitInput, setMinProfitInput] = useState(String(settings.minProfitUsd));
+  // Min-profit floor: seeded from settings.obMinProfitUsd so it matches the
+  // OB auto-execute threshold that the bot loop uses.
+  const [minProfitInput, setMinProfitInput] = useState(String(settings.obMinProfitUsd));
   const minProfit = Math.max(0, parseFloat(minProfitInput) || 0);
   // Fee per leg: prefer the account's ACTUAL Kraken taker fee tier (fetched
   // once, shared across cards) over the configured assumption. A 0.40%
@@ -1132,7 +1137,10 @@ function OrderBookHunterCard() {
   // reads localStorage synchronously in its initializer, so the saved value
   // is applied before the first scan query fires.
   const [volatilityFilter, setVolatilityFilter] = useLocalStorage<boolean>("ob-volatility-filter", true);
-  const obParams = { tradeSizeUsd: tradeSize, feesPct: effectiveFeePct, minProfitUsd: 0.02, maxSlippagePct: 0.5, volatilityFilter };
+  // Scan threshold follows the card's min-profit input, which is seeded from
+  // the configured settings.obMinProfitUsd — so Config changes drive the scan
+  // and inline tweaks still apply for manual execution.
+  const obParams = { tradeSizeUsd: tradeSize, feesPct: effectiveFeePct, minProfitUsd: minProfit, maxSlippagePct: 0.5, volatilityFilter };
   const { data, isLoading } = useGetObScan(obParams, {
     query: { queryKey: getGetObScanQueryKey(obParams), refetchInterval: 5_000, staleTime: 4_000 },
   });
