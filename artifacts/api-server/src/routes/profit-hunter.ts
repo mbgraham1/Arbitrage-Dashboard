@@ -42,7 +42,12 @@ const ASSETS = [
   "ADA", "DOT", "UNI", "AAVE", "ATOM", "BCH", "FIL",
 ] as const satisfies readonly ObAsset[];
 const PERP_ASSETS = ["BTC", "ETH", "SOL"] as const;
-const SIZES = [10, 50, 100] as const;
+// Full sweep parity with discovery: bounded by depth, evidence-only above the
+// $10 live cap. netAt() looks nets up BY SIZE — never by array index (the old
+// index-vs-size coupling was a real bug class).
+const SIZES = [5, 10, 25, 50, 100, 250] as const;
+const netAt = (nets: ReadonlyArray<number | null>, size: number): number | null =>
+  nets[(SIZES as readonly number[]).indexOf(size)] ?? null;
 const TICK_MS = 30_000;
 const BUFFER_PER_10 = 0.02;
 const MAX_TRACKED = 600;               // bound the stats map
@@ -62,7 +67,10 @@ type OppStat = {
   executableKnown: boolean;          // false = no keys, so "executable now" was unverifiable
   appearances: number;               // ticks with net10 > 0
   sampledTicks: number;              // ticks this opp was priceable
-  streak: number; longestStreakTicks: number;
+  streak: number;
+  lastBestSizeUsd?: number; lastBestNetUsd?: number;   // best size in the LAST tick's sweep
+  bestEverSizeUsd?: number; bestEverNetUsd?: number;   // best sweep point ever observed
+  longestStreakTicks: number;
   best10: number; worst10: number; sum10: number;
   last10: number | null; last50: number | null; last100: number | null;
   firstSeenAt: string; lastSeenAt: string;
@@ -122,6 +130,7 @@ function record(o: {
   key: string; strategy: OppStat["strategy"]; asset: string; venues: string; description: string;
   requirement: string; net10: number; net50: number | null; net100: number | null;
   executableNow: boolean | null; // null = unknown (no keys)
+  sweep?: Array<{ sizeUsd: number; netUsd: number | null }>; // full feasible-size sweep (evidence)
 }): void {
   // Only the huge spot-cross space gets the near-miss filter; the other
   // strategies have a small bounded key space and are ALWAYS recorded so
@@ -150,6 +159,13 @@ function record(o: {
   s.sampledTicks++;
   s.lastSeenAt = now;
   s.last10 = o.net10; s.last50 = o.net50; s.last100 = o.net100;
+  if (o.sweep) {
+    const best = o.sweep.filter(x => x.netUsd != null).sort((a, b) => b.netUsd! - a.netUsd!)[0];
+    if (best) {
+      s.lastBestSizeUsd = best.sizeUsd; s.lastBestNetUsd = best.netUsd!;
+      if (s.bestEverNetUsd == null || best.netUsd! > s.bestEverNetUsd) { s.bestEverNetUsd = best.netUsd!; s.bestEverSizeUsd = best.sizeUsd; }
+    }
+  }
   s.best10 = Math.max(s.best10, o.net10);
   s.worst10 = Math.min(s.worst10, o.net10);
   s.sum10 += o.net10;
@@ -230,7 +246,8 @@ async function sampleTick(): Promise<void> {
       if (cB && cB.ageMs < 5000 && cB.bids.length) legs.push({ id: "coinbase", name: "Coinbase", takerPct: fees.cbTakerPct, basisPct: 0, bids: cB.bids, asks: cB.asks });
       for (const buy of legs) for (const sell of legs) {
         if (buy.id === sell.id) continue;
-        const [n10, n50, n100] = crossNets(buy, sell);
+        const nets = crossNets(buy, sell);
+        const n10 = netAt(nets, 10), n50 = netAt(nets, 50), n100 = netAt(nets, 100);
         if (n10 == null) continue;
         const liveOnly = ["kraken", "coinbase"].includes(buy.id) && ["kraken", "coinbase"].includes(sell.id);
         const regionBlocked = buy.regionOk === false || sell.regionOk === false;
@@ -246,6 +263,7 @@ async function sampleTick(): Promise<void> {
               ? `$10.20 USD on ${buy.name} + ${(qty10 * 1.02).toFixed(6)} ${asset} on ${sell.name}`
               : `funded account on ${[buy, sell].filter(l => !["kraken", "coinbase"].includes(l.id)).map(l => `${l.name}${l.candidate ? " (PR-accessible candidate — public data only until API access verified)" : ""}`).join(" + ")}`,
           net10: n10, net50: n50, net100: n100, executableNow: execNow,
+          sweep: SIZES.map((sz, i) => ({ sizeUsd: sz, netUsd: nets[i] ?? null })),
         });
       }
     }
@@ -263,6 +281,7 @@ async function sampleTick(): Promise<void> {
             description: `post-only ${direction} on Coinbase, hedge on Kraken after fill`,
             requirement: direction === "buy" ? `$10.20 USD on Coinbase + ${(cb.makerQty * 1.02).toFixed(6)} ${asset} on Kraken` : `${(cb.makerQty * 1.02).toFixed(6)} tradable ${asset} on Coinbase + $10.20 on Kraken`,
             net10: cb.projectedNetUsd - BUFFER_PER_10, net50: n(50), net100: n(100), executableNow: execNow,
+            sweep: SIZES.map(sz => ({ sizeUsd: sz, netUsd: sz === 10 ? cb.projectedNetUsd - BUFFER_PER_10 : n(sz) })),
           });
         }
         if (fees.kMakerPct != null) {
@@ -276,6 +295,7 @@ async function sampleTick(): Promise<void> {
               description: `post-only ${direction} on Kraken, hedge on Coinbase after fill`,
               requirement: direction === "buy" ? `$10.20 USD on Kraken + ${(km.makerQty * 1.02).toFixed(6)} ${asset} on Coinbase` : `${(km.makerQty * 1.02).toFixed(6)} ${asset} on Kraken + $10.20 on Coinbase`,
               net10: km.projectedNetUsd - BUFFER_PER_10, net50: n(50), net100: n(100), executableNow: execNow,
+              sweep: SIZES.map(sz => ({ sizeUsd: sz, netUsd: sz === 10 ? km.projectedNetUsd - BUFFER_PER_10 : n(sz) })),
             });
           }
         }
@@ -291,7 +311,8 @@ async function sampleTick(): Promise<void> {
           { id: buy.venue, name: buy.venueName, takerPct: buy.takerPct, basisPct: 0, bids: buy.bids, asks: buy.asks },
           { id: sell.venue, name: sell.venueName, takerPct: sell.takerPct, basisPct: 0, bids: sell.bids, asks: sell.asks },
         ];
-        const [n10, n50, n100] = crossNets(legs[0], legs[1]);
+        const nets = crossNets(legs[0], legs[1]);
+        const n10 = netAt(nets, 10), n50 = netAt(nets, 50), n100 = netAt(nets, 100);
         if (n10 == null) continue;
         record({
           key: `s:${stable}:${buy.venue}>${sell.venue}`, strategy: "stablecoin", asset: stable,
@@ -301,6 +322,7 @@ async function sampleTick(): Promise<void> {
             ? "venue UNAVAILABLE in your region — market context only"
             : `$10.20 USD on ${buy.venueName} + ~10.2 ${stable} on ${sell.venueName}${["kraken", "coinbase"].includes(buy.venue) && ["kraken", "coinbase"].includes(sell.venue) ? "" : " (needs account — public data only until API access verified)"}`,
           net10: n10, net50: n50, net100: n100,
+          sweep: SIZES.map((sz, i) => ({ sizeUsd: sz, netUsd: nets[i] ?? null })),
           executableNow: false, // stables aren't wired to any live executor — evidence only
         });
       }
@@ -318,8 +340,9 @@ async function sampleTick(): Promise<void> {
         venues: `${b.venue} perp+spot`,
         description: `${b.carrySide} carry: funding ${b.fundingRate8hPct.toFixed(4)}%/8h, basis ${b.basisPct.toFixed(3)}% — 24h carry net of ~${roundTripFeePct}% entry+exit fees`,
         requirement: `derivatives-enabled ${b.venue} account (USDT-margined) — NOT executable from this app`,
-        net10: nets[0], net50: nets[1], net100: nets[2],
+        net10: netAt(nets, 10) ?? 0, net50: netAt(nets, 50), net100: netAt(nets, 100),
         executableNow: false,
+        sweep: SIZES.map((sz, i) => ({ sizeUsd: sz, netUsd: nets[i] ?? null })),
       });
     }
 

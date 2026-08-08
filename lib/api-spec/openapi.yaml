@@ -890,6 +890,78 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/DiscoveryResult"
+  /arb/xv-scan:
+    post:
+      operationId: xvScan
+      tags: [trades]
+      summary: Cross-venue scanner across Kraken · Coinbase · Gemini (never trades)
+      description: >
+        Prices every ordered venue pair × mutually supported USD asset from
+        LIVE stream books (depth-walked VWAP, per-venue fees on notional,
+        slippage vs top-of-book, per-leg quote ages) and runs a FEASIBLE size
+        sweep bounded by real balances and exchange minimums when credentials
+        are provided. Fees are DETECTED per-venue when that venue's keys are in
+        the request; assumed (labeled) otherwise. A route can only be marked
+        FIRE when BOTH legs' fees are DETECTED and balances cover the legs —
+        assumptions never gate live decisions. NEVER trades.
+      parameters:
+        - { name: minNetUsd,      in: query, schema: { type: number },  description: "net-after-buffer floor a route must clear to FIRE (default 0.01)" }
+        - { name: maxQuoteAgeMs,  in: query, schema: { type: number },  description: "max staleness of the oldest leg for a live decision (default 200)" }
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/XvScanRequest"
+      responses:
+        "200":
+          description: Ranked cross-venue routes with per-leg fee sources, feasibility, and near-miss breakdowns
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/XvScanResult"
+  /arb/xv-execute:
+    post:
+      operationId: xvExecute
+      tags: [trades]
+      summary: Execute ONE cross-venue cycle ($10 hard cap, detected fees only)
+      description: >
+        Re-projects the requested route on CURRENT books with DETECTED fees,
+        200ms freshness, and a shared live lock; the first leg is confirmed by
+        ACTUAL fill quantity and the second leg placed for exactly the confirmed
+        quantity. "completed" only on a full terminal second-leg fill; any
+        ambiguity latches live runs off pending manual reconciliation.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/XvExecuteRequest"
+      responses:
+        "200":
+          description: Execution outcome (or a skip) with confirmed leg fills and realized P&L
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/XvExecuteResult"
+        "400":
+          description: Bad request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /arb/xv-stats:
+    get:
+      operationId: xvStats
+      tags: [trades]
+      summary: "Cross-venue executor ledger stats (XV: prefix, live runs only)"
+      responses:
+        "200":
+          description: Trade counts and cumulative realized P&L from confirmed fills
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/XvStats"
   /arb/hunter/start:
     post:
       operationId: hunterStart
@@ -2348,6 +2420,187 @@ components:
         notProfitable:
           type: array
           items: { $ref: "#/components/schemas/DiscoveryRow" }
+    XvScanRequest:
+      type: object
+      description: >
+        Optional per-venue credentials. Providing a venue's keys upgrades its
+        fees from ASSUMED (labeled) to DETECTED and verifies its balances.
+        A route only ever FIREs when both legs' fees are DETECTED.
+      properties:
+        krakenKey: { type: string }
+        krakenSecret: { type: string }
+        coinbaseKey: { type: string }
+        coinbaseSecret: { type: string }
+        geminiKey: { type: string }
+        geminiSecret: { type: string }
+    XvProjection:
+      type: object
+      description: One priced size candidate for a route (buffer is shown separately, not folded into netProfitUsd).
+      required:
+        - sizeUsd
+        - grossSpreadUsd
+        - feesUsd
+        - slippageUsd
+        - bufferUsd
+        - netProfitUsd
+        - netAfterBufferUsd
+        - baseQty
+        - quoteAgeMs
+        - buyAgeMs
+        - sellAgeMs
+        - feasible
+      properties:
+        sizeUsd: { type: number }
+        grossSpreadUsd: { type: number, description: "raw edge at top-of-book for this size" }
+        feesUsd: { type: number }
+        slippageUsd: { type: number }
+        bufferUsd: { type: number }
+        netProfitUsd: { type: number, description: "after fees + slippage (buffer NOT subtracted)" }
+        netAfterBufferUsd: { type: number, description: "the number that must clear the floor" }
+        baseQty: { type: number }
+        quoteAgeMs: { type: number, description: "age of the oldest leg" }
+        buyAgeMs: { type: number }
+        sellAgeMs: { type: number, description: "for a Gemini leg this is measured from local arrival (no exchange timestamp)" }
+        feasible: { type: boolean, description: "balances + exchange minimums allow this size" }
+        infeasibleWhy: { type: string, nullable: true, description: "verbatim reason this size is not feasible (null when feasible)" }
+    XvVenueStatus:
+      type: object
+      required: [id, feeSource, takerPct, streaming]
+      properties:
+        id: { type: string, description: "kraken | coinbase | gemini" }
+        feeSource: { type: string, description: "detected | assumed" }
+        takerPct: { type: number, description: "per-leg taker fee percent (DETECTED tier, or a labeled ASSUMED default)" }
+        usd: { type: number, nullable: true, description: "spendable USD balance (null = unknown, keys not provided)" }
+        error: { type: string, nullable: true, description: "fee/balance detection failure — never silently downgraded for live decisions" }
+        streaming: { type: boolean, description: "live book stream connected (Gemini reflects its own WS state)" }
+    XvRoute:
+      type: object
+      required:
+        - asset
+        - buyVenue
+        - sellVenue
+        - usdRoute
+        - stable
+        - decision
+        - reason
+        - feeSourceBuy
+        - feeSourceSell
+        - buyTakerPct
+        - sellTakerPct
+        - projections
+      properties:
+        asset: { type: string }
+        buyVenue: { type: string, description: "kraken | coinbase | gemini" }
+        sellVenue: { type: string, description: "kraken | coinbase | gemini" }
+        usdRoute: { type: boolean, description: "all-USD quotes — no basis haircut" }
+        stable: { type: boolean, description: "USDC stablecoin rotation route" }
+        decision: { type: string, description: "FIRE | SKIP — FIRE requires detected fees on both legs, fresh books, positive net, and verified feasible balances" }
+        reason: { type: string, description: "verbatim decision reason — SKIP reasons must be shown as-is" }
+        feeSourceBuy: { type: string, description: "detected | assumed" }
+        feeSourceSell: { type: string, description: "detected | assumed" }
+        buyTakerPct: { type: number }
+        sellTakerPct: { type: number }
+        best:
+          nullable: true
+          description: best net across all candidate sizes (may be infeasible)
+          allOf: [{ $ref: "#/components/schemas/XvProjection" }]
+        bestFeasible:
+          nullable: true
+          description: best net across only the sizes balances/minimums allow (null when none feasible)
+          allOf: [{ $ref: "#/components/schemas/XvProjection" }]
+        projections:
+          type: array
+          items: { $ref: "#/components/schemas/XvProjection" }
+        requiredBalances:
+          type: object
+          nullable: true
+          properties:
+            buyUsd: { type: number }
+            sellAssetQty: { type: number }
+        balancesOk: { type: boolean, nullable: true, description: "null = unknown (keys missing)" }
+        minNotionalUsd: { type: number, nullable: true, description: "exchange-minimum notional for this pair when known (Gemini legs)" }
+    XvScanResult:
+      type: object
+      required: [scannedAt, params, venues, fireCount, routes, note]
+      properties:
+        scannedAt: { type: string }
+        params:
+          type: object
+          properties:
+            minNetUsd: { type: number }
+            maxQuoteAgeMs: { type: number }
+            execCapUsd: { type: number }
+            candidateSizes:
+              type: array
+              items: { type: number }
+        venues:
+          type: array
+          items: { $ref: "#/components/schemas/XvVenueStatus" }
+        fireCount: { type: integer }
+        routes:
+          type: array
+          items: { $ref: "#/components/schemas/XvRoute" }
+        note: { type: string }
+    XvExecuteRequest:
+      type: object
+      required: [asset, buyVenue, sellVenue]
+      description: Route to execute plus the credentials for BOTH venues (detected fees are mandatory for a live run).
+      properties:
+        krakenKey: { type: string }
+        krakenSecret: { type: string }
+        coinbaseKey: { type: string }
+        coinbaseSecret: { type: string }
+        geminiKey: { type: string }
+        geminiSecret: { type: string }
+        asset: { type: string }
+        buyVenue: { type: string, enum: [kraken, coinbase, gemini] }
+        sellVenue: { type: string, enum: [kraken, coinbase, gemini] }
+        sizeUsd: { type: number, description: "clamped to [1, 10] — the $10 hard cap is enforced server-side" }
+        minNetUsd: { type: number }
+        maxQuoteAgeMs: { type: number }
+    XvLegResult:
+      type: object
+      required: [venue, status, filledQty, latencyMs]
+      properties:
+        venue: { type: string, description: "kraken | coinbase | gemini" }
+        orderId: { type: string, nullable: true }
+        status: { type: string }
+        filledQty: { type: number, description: "CONFIRMED fill quantity — the only source of truth" }
+        avgPrice: { type: number, nullable: true }
+        notionalUsd: { type: number, nullable: true }
+        feeUsd: { type: number, nullable: true }
+        latencyMs: { type: number }
+    XvExecuteResult:
+      type: object
+      required: [executed, outcome, reason, asset, buyVenue, sellVenue, startedAt, finishedAt]
+      properties:
+        executed: { type: boolean }
+        outcome: { type: string, description: "completed | partial_sell | sell_failed | indeterminate | unhedged | skipped" }
+        reason: { type: string, description: "verbatim outcome/skip reason — shown as-is" }
+        asset: { type: string }
+        buyVenue: { type: string }
+        sellVenue: { type: string }
+        startedAt: { type: string }
+        finishedAt: { type: string }
+        buyLeg:
+          nullable: true
+          allOf: [{ $ref: "#/components/schemas/XvLegResult" }]
+        sellLeg:
+          nullable: true
+          allOf: [{ $ref: "#/components/schemas/XvLegResult" }]
+        realizedProfitUsd: { type: number, nullable: true, description: "ONLY from confirmed fills; null when not fully hedged / indeterminate" }
+        projection:
+          nullable: true
+          allOf: [{ $ref: "#/components/schemas/XvProjection" }]
+        geminiFeeNote: { type: string, nullable: true, description: "present when a Gemini leg ran — its fee is computed from the verified taker tier on the confirmed notional" }
+    XvStats:
+      type: object
+      required: [trades, completed, incomplete, cumulativeRealizedUsd]
+      properties:
+        trades: { type: integer }
+        completed: { type: integer }
+        incomplete: { type: integer }
+        cumulativeRealizedUsd: { type: number, description: "sum of realized P&L from confirmed fills only" }
     HunterOpp:
       type: object
       properties:

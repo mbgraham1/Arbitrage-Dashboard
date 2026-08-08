@@ -94,7 +94,13 @@ import type {
   TwoXFeesRequest,
   TwoXFeesResult,
   TwoXScanResult,
-  TwoXStats
+  TwoXStats,
+  XvExecuteRequest,
+  XvExecuteResult,
+  XvScanParams,
+  XvScanRequest,
+  XvScanResult,
+  XvStats
 } from './api.schemas';
 
 import { customFetch } from '../custom-fetch';
@@ -2700,6 +2706,235 @@ export const useDiscoveryScan = <TError = ErrorType<unknown>,
       > => {
       return useMutation(getDiscoveryScanMutationOptions(options));
     }
+
+export const getXvScanUrl = (params?: XvScanParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/arb/xv-scan?${stringifiedParams}` : `/api/arb/xv-scan`
+}
+
+/**
+ * Prices every ordered venue pair × mutually supported USD asset from LIVE stream books (depth-walked VWAP, per-venue fees on notional, slippage vs top-of-book, per-leg quote ages) and runs a FEASIBLE size sweep bounded by real balances and exchange minimums when credentials are provided. Fees are DETECTED per-venue when that venue's keys are in the request; assumed (labeled) otherwise. A route can only be marked FIRE when BOTH legs' fees are DETECTED and balances cover the legs — assumptions never gate live decisions. NEVER trades.
+ * @summary Cross-venue scanner across Kraken · Coinbase · Gemini (never trades)
+ */
+export const xvScan = async (xvScanRequest?: XvScanRequest,
+    params?: XvScanParams, options?: RequestInit): Promise<XvScanResult> => {
+
+  return customFetch<XvScanResult>(getXvScanUrl(params),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(xvScanRequest)
+  }
+);}
+
+
+
+
+
+export const getXvScanMutationOptions = <TError = ErrorType<unknown>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof xvScan>>, TError,{data?: BodyType<XvScanRequest>;params?: XvScanParams}, TContext>, request?: SecondParameter<typeof customFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof xvScan>>, TError,{data?: BodyType<XvScanRequest>;params?: XvScanParams}, TContext> => {
+
+const mutationKey = ['xvScan'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof xvScan>>, {data?: BodyType<XvScanRequest>;params?: XvScanParams}> = (props) => {
+          const {data,params} = props ?? {};
+
+          return  xvScan(data,params,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type XvScanMutationResult = NonNullable<Awaited<ReturnType<typeof xvScan>>>
+    export type XvScanMutationBody = BodyType<XvScanRequest> | undefined
+    export type XvScanMutationError = ErrorType<unknown>
+
+    /**
+ * @summary Cross-venue scanner across Kraken · Coinbase · Gemini (never trades)
+ */
+export const useXvScan = <TError = ErrorType<unknown>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof xvScan>>, TError,{data?: BodyType<XvScanRequest>;params?: XvScanParams}, TContext>, request?: SecondParameter<typeof customFetch>}
+ ): UseMutationResult<
+        Awaited<ReturnType<typeof xvScan>>,
+        TError,
+        {data?: BodyType<XvScanRequest>;params?: XvScanParams},
+        TContext
+      > => {
+      return useMutation(getXvScanMutationOptions(options));
+    }
+
+export const getXvExecuteUrl = () => {
+
+
+
+
+  return `/api/arb/xv-execute`
+}
+
+/**
+ * Re-projects the requested route on CURRENT books with DETECTED fees, 200ms freshness, and a shared live lock; the first leg is confirmed by ACTUAL fill quantity and the second leg placed for exactly the confirmed quantity. "completed" only on a full terminal second-leg fill; any ambiguity latches live runs off pending manual reconciliation.
+ * @summary Execute ONE cross-venue cycle ($10 hard cap, detected fees only)
+ */
+export const xvExecute = async (xvExecuteRequest: XvExecuteRequest, options?: RequestInit): Promise<XvExecuteResult> => {
+
+  return customFetch<XvExecuteResult>(getXvExecuteUrl(),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(xvExecuteRequest)
+  }
+);}
+
+
+
+
+
+export const getXvExecuteMutationOptions = <TError = ErrorType<ErrorResponse>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof xvExecute>>, TError,{data: BodyType<XvExecuteRequest>}, TContext>, request?: SecondParameter<typeof customFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof xvExecute>>, TError,{data: BodyType<XvExecuteRequest>}, TContext> => {
+
+const mutationKey = ['xvExecute'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof xvExecute>>, {data: BodyType<XvExecuteRequest>}> = (props) => {
+          const {data} = props ?? {};
+
+          return  xvExecute(data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type XvExecuteMutationResult = NonNullable<Awaited<ReturnType<typeof xvExecute>>>
+    export type XvExecuteMutationBody = BodyType<XvExecuteRequest>
+    export type XvExecuteMutationError = ErrorType<ErrorResponse>
+
+    /**
+ * @summary Execute ONE cross-venue cycle ($10 hard cap, detected fees only)
+ */
+export const useXvExecute = <TError = ErrorType<ErrorResponse>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof xvExecute>>, TError,{data: BodyType<XvExecuteRequest>}, TContext>, request?: SecondParameter<typeof customFetch>}
+ ): UseMutationResult<
+        Awaited<ReturnType<typeof xvExecute>>,
+        TError,
+        {data: BodyType<XvExecuteRequest>},
+        TContext
+      > => {
+      return useMutation(getXvExecuteMutationOptions(options));
+    }
+
+export const getXvStatsUrl = () => {
+
+
+
+
+  return `/api/arb/xv-stats`
+}
+
+/**
+ * @summary Cross-venue executor ledger stats (XV: prefix, live runs only)
+ */
+export const xvStats = async ( options?: RequestInit): Promise<XvStats> => {
+
+  return customFetch<XvStats>(getXvStatsUrl(),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getXvStatsQueryKey = () => {
+    return [
+    `/api/arb/xv-stats`
+    ] as const;
+    }
+
+
+export const getXvStatsQueryOptions = <TData = Awaited<ReturnType<typeof xvStats>>, TError = ErrorType<unknown>>( options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof xvStats>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getXvStatsQueryKey();
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof xvStats>>> = ({ signal }) => xvStats({ signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof xvStats>>, TError, TData> & { queryKey: QueryKey }
+}
+
+export type XvStatsQueryResult = NonNullable<Awaited<ReturnType<typeof xvStats>>>
+export type XvStatsQueryError = ErrorType<unknown>
+
+
+/**
+ * @summary Cross-venue executor ledger stats (XV: prefix, live runs only)
+ */
+
+export function useXvStats<TData = Awaited<ReturnType<typeof xvStats>>, TError = ErrorType<unknown>>(
+  options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof xvStats>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+
+ ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+
+  const queryOptions = getXvStatsQueryOptions(options)
+
+  const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
 
 export const getHunterStartUrl = () => {
 

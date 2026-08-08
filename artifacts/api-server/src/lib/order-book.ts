@@ -278,6 +278,142 @@ export function startCrossPairsAutoRefresh(): void {
   console.log(`[OB] Cross-pair auto-refresh started (every ${CROSS_REFRESH_INTERVAL_MS / 3_600_000}h)`);
 }
 
+// ── Dynamic scan universe via Kraken /0/public/AssetPairs ────────────────────
+//
+// The static OB_ASSETS / OB_USD_PAIRS above are the hand-verified set that the
+// WS book stream subscribes to (see startBookStreamLayer). For DISCOVERY we
+// scan a much broader, dynamically-derived universe: EVERY online USD-quoted
+// pair on Kraken, plus every online crypto cross pair between two assets that
+// both have a USD pair (so a triangle can round-trip to USD).
+//
+// Money-safety: dynamic-only pairs are NOT subscribed on the WS feed (that
+// would mean hundreds of book channels). They are priced from the REST depth
+// fallback in fetchOrderBook, and the graph engine marks any route touching a
+// non-stream pair as research-only. When AssetPairs is unreachable we fall
+// back to the static set and never crash.
+
+/** One dynamically-discovered USD-quoted pair. `asset` is our cleaned symbol
+ *  (wsname base), `pair` the REST altname used for Depth fetches. */
+export interface DynUsdPair { asset: string; pair: string; wsBase: string; }
+
+/** One dynamically-discovered crypto cross pair between two USD-quoted assets.
+ *  Orientation matches CrossRoute: buying `base` costs `quote`. */
+export interface DynCrossPair { base: string; quote: string; pair: string; }
+
+export interface DynamicUniverse {
+  /** All online USD-quoted pairs (asset → REST altname). */
+  usdPairs: Map<string, string>;
+  /** All online crypto cross pairs among USD-quoted assets. */
+  crossPairs: DynCrossPair[];
+  /** Cross lookup (same orientation convention as CROSS_LOOKUP), keyed by
+   *  cleaned asset symbols "A-B". */
+  crossLookup: Map<string, CrossRoute>;
+  /** 0 when this is the static fallback; epoch-ms of the successful fetch otherwise. */
+  cachedAt: number;
+  /** true when derived live from AssetPairs; false when the static fallback. */
+  fromDiscovery: boolean;
+}
+
+const DYN_UNIVERSE_TTL_MS = 6 * 60 * 60 * 1_000; // refresh every 6 hours
+let dynUniverseCache: DynamicUniverse | null = null;
+
+/** Exposed for tests only — clears the dynamic-universe cache. */
+export function _testOnly_clearDynUniverse(): void { dynUniverseCache = null; }
+
+/** Build the static-set fallback universe from OB_ASSETS / OB_USD_PAIRS /
+ *  OB_CROSS_MAP so the scanner keeps working when AssetPairs is unreachable. */
+function staticUniverse(): DynamicUniverse {
+  const usdPairs = new Map<string, string>();
+  for (const a of OB_ASSETS) usdPairs.set(a, OB_USD_PAIRS[a]);
+  const crossPairs: DynCrossPair[] = OB_CROSS_MAP.map(([quote, base, pair]) => ({ base, quote, pair }));
+  const crossLookup = new Map(CROSS_LOOKUP);
+  return { usdPairs, crossPairs, crossLookup, cachedAt: 0, fromDiscovery: false };
+}
+
+/**
+ * Returns the dynamic scan universe (cached 6h). Queries Kraken AssetPairs for
+ * every online USD-quoted pair and every online crypto cross pair among those
+ * USD-quoted assets. Falls back to the static set on any error (logged, never
+ * throws). `asset` symbols are the wsname base (e.g. "XBT", "RENDER") so they
+ * are stable identifiers — they are NOT mapped to OB_ASSETS names.
+ */
+export async function getDynamicUniverse(forceRefresh = false): Promise<DynamicUniverse> {
+  if (!forceRefresh && dynUniverseCache && Date.now() - dynUniverseCache.cachedAt < DYN_UNIVERSE_TTL_MS && dynUniverseCache.fromDiscovery) {
+    return dynUniverseCache;
+  }
+  try {
+    const r = await fetch("https://api.kraken.com/0/public/AssetPairs", { signal: AbortSignal.timeout(6_000) });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const data = await r.json() as {
+      error?: string[];
+      result?: Record<string, { altname: string; wsname?: string; base: string; quote: string; status: string }>;
+    };
+    if (data.error?.length || !data.result) throw new Error("API error");
+
+    const usdPairs   = new Map<string, string>();
+    const crossPairs: DynCrossPair[] = [];
+    const crossLookup = new Map<string, CrossRoute>();
+    // First pass: collect every online USD-quoted pair.
+    const usdQuoteNames = new Set(["USD", "ZUSD"]);
+    const pairs: Array<{ wBase: string; wQuote: string; altname: string }> = [];
+    for (const info of Object.values(data.result)) {
+      if (info.status !== "online" || !info.wsname) continue;
+      const slash = info.wsname.indexOf("/");
+      if (slash < 0) continue;
+      const wBase  = info.wsname.slice(0, slash);
+      const wQuote = info.wsname.slice(slash + 1);
+      pairs.push({ wBase, wQuote, altname: info.altname });
+      if (usdQuoteNames.has(wQuote) && !FIAT_WSNAMES.has(wBase)) {
+        // Keep the first altname seen for an asset (Kraken lists e.g. XBTUSD once).
+        if (!usdPairs.has(wBase)) usdPairs.set(wBase, info.altname);
+      }
+    }
+    if (usdPairs.size === 0) throw new Error("discovery returned 0 USD pairs");
+
+    // Second pass: crypto cross pairs where BOTH legs have a USD pair.
+    for (const { wBase, wQuote, altname } of pairs) {
+      if (FIAT_WSNAMES.has(wBase) || FIAT_WSNAMES.has(wQuote)) continue;
+      if (!usdPairs.has(wBase) || !usdPairs.has(wQuote)) continue;
+      crossPairs.push({ base: wBase, quote: wQuote, pair: altname });
+      crossLookup.set(`${wQuote}-${wBase}`, { pair: altname, aIsQuote: true });  // hold quote, buy base
+      crossLookup.set(`${wBase}-${wQuote}`, { pair: altname, aIsQuote: false }); // hold base, sell base
+    }
+
+    const universe: DynamicUniverse = { usdPairs, crossPairs, crossLookup, cachedAt: Date.now(), fromDiscovery: true };
+    dynUniverseCache = universe;
+    console.log(`[OB] Dynamic universe: ${usdPairs.size} USD pairs, ${crossPairs.length} crypto cross pairs`);
+    return universe;
+  } catch (err) {
+    if (dynUniverseCache) {
+      console.warn("[OB] Dynamic-universe refresh failed — keeping previous set:", err);
+      return dynUniverseCache;
+    }
+    console.warn("[OB] Dynamic-universe discovery failed — using static fallback:", err);
+    return staticUniverse();
+  }
+}
+
+// ── Background dynamic-universe auto-refresh (every 6h) ───────────────────────
+
+const DYN_UNIVERSE_RETRY_MS = 10 * 60 * 1_000;
+let dynUniverseTimer: NodeJS.Timeout | null = null;
+
+/** Starts a background loop that force-refreshes the dynamic scan universe
+ *  every 6 hours (retry after 10 min on failure). Idempotent. */
+export function startDynamicUniverseAutoRefresh(): void {
+  if (dynUniverseTimer) return;
+  const tick = async (): Promise<void> => {
+    let ok = false;
+    try { ok = (await getDynamicUniverse(true)).fromDiscovery; } catch { /* never throws */ }
+    const delay = ok ? DYN_UNIVERSE_TTL_MS : DYN_UNIVERSE_RETRY_MS;
+    dynUniverseTimer = setTimeout(() => { void tick(); }, delay);
+    dynUniverseTimer.unref?.();
+  };
+  dynUniverseTimer = setTimeout(() => { void tick(); }, DYN_UNIVERSE_TTL_MS);
+  dynUniverseTimer.unref?.();
+  console.log(`[OB] Dynamic-universe auto-refresh started (every ${DYN_UNIVERSE_TTL_MS / 3_600_000}h)`);
+}
+
 // ── Live stream layer + event-driven scanning ─────────────────────────────────
 
 /** Latest event-driven scan result — recomputed from in-memory stream books

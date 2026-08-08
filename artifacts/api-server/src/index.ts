@@ -1,7 +1,7 @@
 import app from "./app";
 import { logger } from "./lib/logger";
 import { initPriceFeeds } from "./lib/price-cache";
-import { startCrossPairsAutoRefresh, startBookStreamLayer, OB_USD_PAIRS, CROSS_LOOKUP } from "./lib/order-book";
+import { startCrossPairsAutoRefresh, startBookStreamLayer, startDynamicUniverseAutoRefresh, OB_USD_PAIRS, CROSS_LOOKUP } from "./lib/order-book";
 import { validateKrakenPrecision } from "./lib/exchange";
 
 const rawPort = process.env["PORT"];
@@ -52,6 +52,7 @@ app.listen(port, (err) => {
   startCrossPairsAutoRefresh();
   // Live WebSocket book streams + event-driven route recalculation. REST
   // remains a fallback; the execution hot path reads in-memory snapshots.
+  startDynamicUniverseAutoRefresh();
   startBookStreamLayer()
     .then(() => logger.info("Book stream layer started (Kraken WS books + Coinbase ticker WS + event-driven scan)"))
     .catch(err => logger.error({ err }, "Book stream layer failed to start — falling back to REST books"));

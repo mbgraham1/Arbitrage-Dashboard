@@ -379,12 +379,26 @@ router.get("/arb/graph-scan", async (req, res): Promise<void> => {
   // history-based ranking is skipped: every route gets the neutral prior.
   const accountId = String(req.query["accountId"] ?? "").trim() || null;
   try {
-    const result = await scanGraphOpportunities(tradeSizeUsd, krakenFeesPct, coinbaseFeesPct, maxHops, executionStyle);
+    // Display endpoint: no Kraken keys here, so fee inputs are ASSUMED tiers,
+    // not detected — every route stays research-only ("fees assumed") until the
+    // executor path (which passes detected tiers) prices it.
+    const result = await scanGraphOpportunities(tradeSizeUsd, krakenFeesPct, coinbaseFeesPct, maxHops, executionStyle, false);
     // Taker/adaptive display: Kraken triangles priced by the executor's own
     // simulator on the streamed snapshot — table number == pre-fire number.
     if (executionStyle === "taker") {
       await repriceKrakenTriangles(result.routes, tradeSizeUsd, krakenFeesPct, req.log);
       repriceCrossRoutes(result.routes, tradeSizeUsd, krakenFeesPct, coinbaseFeesPct, req.log);
+    }
+    // Repricing overwrote netProfitUsd on stream-priced routes — keep the
+    // ranked, buffered net (netAfterBufferUsd) in lockstep so ranking stays on
+    // the pessimistic post-buffer number. The buffer mirrors the execution
+    // preflight: max(0.02, size×0.0005). (Fallback derive when a route object
+    // predates the field.)
+    const graphSafetyBufferUsd = Math.max(0.02, tradeSizeUsd * 0.0005);
+    for (const r of result.routes) {
+      if (r.safetyBufferUsd == null) r.safetyBufferUsd = graphSafetyBufferUsd;
+      r.netAfterBufferUsd = r.netProfitUsd - r.safetyBufferUsd;
+      r.status = r.netAfterBufferUsd > 0 ? "VIABLE" : "REJECTED";
     }
     // Fill-rate-weighted ranking (advisor-reviewed): rank executable routes by
     // expected REALIZED profit — net profit × historical live fill rate — not
@@ -400,7 +414,9 @@ router.get("/arb/graph-scan", async (req, res): Promise<void> => {
       r.histLiveAttempts = s?.liveAttempts ?? 0;
       r.histFillRate = enough ? s!.fillRate : null;
       // Multiplier only discounts POSITIVE edges — scaling a negative net
-      // toward zero would perversely rank chronic non-fillers higher.
+      // toward zero would perversely rank chronic non-fillers higher. (The
+      // safety buffer already ranked routes inside the graph engine's own
+      // sort; this fill-rate layer weights the display net.)
       r.effectiveScoreUsd = r.netProfitUsd > 0 ? r.netProfitUsd * (enough ? s!.fillRate : 0.7) : r.netProfitUsd;
     }
     result.routes.sort((a, b) =>
@@ -2227,7 +2243,7 @@ router.post("/arb/graph-execute", async (req, res): Promise<void> => {
       (executionStyle === "maker" ? tiers?.makerFeePct : tiers?.takerFeePct) ?? krakenFeesPct;
 
     // 1. Fresh pre-flight scan (depth-walked VWAP prices in taker mode)
-    const scan = await scanGraphOpportunities(tradeSizeUsd, effectiveKrakenFeesPct, coinbaseFeesPct, 4, executionStyle);
+    const scan = await scanGraphOpportunities(tradeSizeUsd, effectiveKrakenFeesPct, coinbaseFeesPct, 4, executionStyle, tiers != null);
     // Same stream repricing as /arb/graph-scan (taker fee tier), so the route
     // net the gates see is the executable number, not the graph estimate.
     const scanTakerFeePct = tiers?.takerFeePct ?? krakenFeesPct;

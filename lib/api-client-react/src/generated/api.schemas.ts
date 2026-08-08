@@ -1018,6 +1018,190 @@ export interface DiscoveryResult {
   notProfitable?: DiscoveryRow[];
 }
 
+/**
+ * Optional per-venue credentials. Providing a venue's keys upgrades its fees from ASSUMED (labeled) to DETECTED and verifies its balances. A route only ever FIREs when both legs' fees are DETECTED.
+ */
+export interface XvScanRequest {
+  krakenKey?: string;
+  krakenSecret?: string;
+  coinbaseKey?: string;
+  coinbaseSecret?: string;
+  geminiKey?: string;
+  geminiSecret?: string;
+}
+
+/**
+ * One priced size candidate for a route (buffer is shown separately, not folded into netProfitUsd).
+ */
+export interface XvProjection {
+  sizeUsd: number;
+  /** raw edge at top-of-book for this size */
+  grossSpreadUsd: number;
+  feesUsd: number;
+  slippageUsd: number;
+  bufferUsd: number;
+  /** after fees + slippage (buffer NOT subtracted) */
+  netProfitUsd: number;
+  /** the number that must clear the floor */
+  netAfterBufferUsd: number;
+  baseQty: number;
+  /** age of the oldest leg */
+  quoteAgeMs: number;
+  buyAgeMs: number;
+  /** for a Gemini leg this is measured from local arrival (no exchange timestamp) */
+  sellAgeMs: number;
+  /** balances + exchange minimums allow this size */
+  feasible: boolean;
+  /** verbatim reason this size is not feasible (null when feasible) */
+  infeasibleWhy?: string | null;
+}
+
+export interface XvVenueStatus {
+  /** kraken | coinbase | gemini */
+  id: string;
+  /** detected | assumed */
+  feeSource: string;
+  /** per-leg taker fee percent (DETECTED tier, or a labeled ASSUMED default) */
+  takerPct: number;
+  /** spendable USD balance (null = unknown, keys not provided) */
+  usd?: number | null;
+  /** fee/balance detection failure — never silently downgraded for live decisions */
+  error?: string | null;
+  /** live book stream connected (Gemini reflects its own WS state) */
+  streaming: boolean;
+}
+
+export type XvRouteRequiredBalances = {
+  buyUsd?: number;
+  sellAssetQty?: number;
+} | null;
+
+export interface XvRoute {
+  asset: string;
+  /** kraken | coinbase | gemini */
+  buyVenue: string;
+  /** kraken | coinbase | gemini */
+  sellVenue: string;
+  /** all-USD quotes — no basis haircut */
+  usdRoute: boolean;
+  /** USDC stablecoin rotation route */
+  stable: boolean;
+  /** FIRE | SKIP — FIRE requires detected fees on both legs, fresh books, positive net, and verified feasible balances */
+  decision: string;
+  /** verbatim decision reason — SKIP reasons must be shown as-is */
+  reason: string;
+  /** detected | assumed */
+  feeSourceBuy: string;
+  /** detected | assumed */
+  feeSourceSell: string;
+  buyTakerPct: number;
+  sellTakerPct: number;
+  /** best net across all candidate sizes (may be infeasible) */
+  best?: XvProjection | null;
+  /** best net across only the sizes balances/minimums allow (null when none feasible) */
+  bestFeasible?: XvProjection | null;
+  projections: XvProjection[];
+  requiredBalances?: XvRouteRequiredBalances;
+  /** null = unknown (keys missing) */
+  balancesOk?: boolean | null;
+  /** exchange-minimum notional for this pair when known (Gemini legs) */
+  minNotionalUsd?: number | null;
+}
+
+export type XvScanResultParams = {
+  minNetUsd?: number;
+  maxQuoteAgeMs?: number;
+  execCapUsd?: number;
+  candidateSizes?: number[];
+};
+
+export interface XvScanResult {
+  scannedAt: string;
+  params: XvScanResultParams;
+  venues: XvVenueStatus[];
+  fireCount: number;
+  routes: XvRoute[];
+  note: string;
+}
+
+export type XvExecuteRequestBuyVenue = typeof XvExecuteRequestBuyVenue[keyof typeof XvExecuteRequestBuyVenue];
+
+
+export const XvExecuteRequestBuyVenue = {
+  kraken: 'kraken',
+  coinbase: 'coinbase',
+  gemini: 'gemini',
+} as const;
+
+export type XvExecuteRequestSellVenue = typeof XvExecuteRequestSellVenue[keyof typeof XvExecuteRequestSellVenue];
+
+
+export const XvExecuteRequestSellVenue = {
+  kraken: 'kraken',
+  coinbase: 'coinbase',
+  gemini: 'gemini',
+} as const;
+
+/**
+ * Route to execute plus the credentials for BOTH venues (detected fees are mandatory for a live run).
+ */
+export interface XvExecuteRequest {
+  krakenKey?: string;
+  krakenSecret?: string;
+  coinbaseKey?: string;
+  coinbaseSecret?: string;
+  geminiKey?: string;
+  geminiSecret?: string;
+  asset: string;
+  buyVenue: XvExecuteRequestBuyVenue;
+  sellVenue: XvExecuteRequestSellVenue;
+  /** clamped to [1, 10] — the $10 hard cap is enforced server-side */
+  sizeUsd?: number;
+  minNetUsd?: number;
+  maxQuoteAgeMs?: number;
+}
+
+export interface XvLegResult {
+  /** kraken | coinbase | gemini */
+  venue: string;
+  orderId?: string | null;
+  status: string;
+  /** CONFIRMED fill quantity — the only source of truth */
+  filledQty: number;
+  avgPrice?: number | null;
+  notionalUsd?: number | null;
+  feeUsd?: number | null;
+  latencyMs: number;
+}
+
+export interface XvExecuteResult {
+  executed: boolean;
+  /** completed | partial_sell | sell_failed | indeterminate | unhedged | skipped */
+  outcome: string;
+  /** verbatim outcome/skip reason — shown as-is */
+  reason: string;
+  asset: string;
+  buyVenue: string;
+  sellVenue: string;
+  startedAt: string;
+  finishedAt: string;
+  buyLeg?: XvLegResult | null;
+  sellLeg?: XvLegResult | null;
+  /** ONLY from confirmed fills; null when not fully hedged / indeterminate */
+  realizedProfitUsd?: number | null;
+  projection?: XvProjection | null;
+  /** present when a Gemini leg ran — its fee is computed from the verified taker tier on the confirmed notional */
+  geminiFeeNote?: string | null;
+}
+
+export interface XvStats {
+  trades: number;
+  completed: number;
+  incomplete: number;
+  /** sum of realized P&L from confirmed fills only */
+  cumulativeRealizedUsd: number;
+}
+
 export interface HunterOpp {
   key?: string;
   /** spot-cross | maker-hedge | stablecoin | perp-funding */
@@ -1723,6 +1907,17 @@ maxQuoteAgeMs?: number;
 export type MmAutoStart200 = { [key: string]: unknown };
 
 export type MmAutoStop200 = { [key: string]: unknown };
+
+export type XvScanParams = {
+/**
+ * net-after-buffer floor a route must clear to FIRE (default 0.01)
+ */
+minNetUsd?: number;
+/**
+ * max staleness of the oldest leg for a live decision (default 200)
+ */
+maxQuoteAgeMs?: number;
+};
 
 export type HunterStart200 = { [key: string]: unknown };
 

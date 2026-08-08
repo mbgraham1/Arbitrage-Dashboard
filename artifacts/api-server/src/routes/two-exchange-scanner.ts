@@ -39,13 +39,14 @@ import {
   coinbaseOrderDetails,
   getCoinbaseProductIncrements,
   getCoinbaseBidAsk,
-  quantizeDown,
-} from "../lib/exchange";
+  quantizeDown, type Pair } from "../lib/exchange";
 import { tryAcquireSharedLiveLock, releaseLiveLock, touchLiveLock, liveLockOwned } from "./arb";
 
 const router: IRouter = Router();
 
-const SCAN_ASSETS: ObAsset[] = ["ETH", "BTC", "SOL"];
+// Full shared Kraken∩Coinbase liquid universe (same list the hunter tracks) —
+// every asset here has verified order routing on both venues via PAIRS.
+const SCAN_ASSETS: ObAsset[] = ["ETH", "BTC", "SOL", "XRP", "LINK", "DOGE", "AVAX", "LTC", "ADA", "DOT", "UNI", "AAVE", "ATOM", "BCH", "FIL"];
 const POLL_MS = 600;
 const TERMINAL_WAIT_MS = 25_000;
 const DEFAULT_MIN_NET_USD = 0.01;     // profit floor AFTER all costs
@@ -229,7 +230,7 @@ router.post("/arb/2x-execute", async (req, res): Promise<void> => {
   const kCreds = { krakenKey: b.krakenKey, krakenSecret: b.krakenSecret };
   const cbCreds = { coinbaseKey: b.coinbaseKey, coinbaseSecret: b.coinbaseSecret };
   const kPairRaw = OB_USD_PAIRS[asset];
-  const cbPair = `${asset}/USD` as "ETH/USD" | "BTC/USD" | "SOL/USD"; // SCAN_ASSETS-checked above
+  const cbPair = `${asset}/USD` as Pair; // every SCAN_ASSETS entry is in PAIRS
 
   const skip = (reason: string, extra?: object) => {
     req.log.info({ asset, buyVenue, reason }, "[2X] SKIP");

@@ -2,22 +2,33 @@
  * CAT_ARB Graph Opportunity Engine
  *
  * Builds a directed graph where every node is (exchange, asset) and every edge
- * is a tradeable pair weighted by the top-of-book exchange rate (net of fees).
- * DFS cycle search finds all USD→…→USD paths up to `maxHops` deep, covering:
- *   • Kraken-only triangular routes (34 assets, all verified cross pairs)
- *   • Coinbase-only routes (10 shared assets, USD legs only)
+ * is a tradeable pair. Edges carry the LIVE order book so route simulation can
+ * depth-walk the ACTUAL propagated amount of each leg into the next — no
+ * USD-mid approximations. DFS cycle search finds all USD→…→USD paths up to
+ * `maxHops` deep, covering:
+ *   • Kraken-only triangular routes (dynamic USD-quoted + cross universe)
+ *   • Coinbase-only routes (shared assets, USD legs only)
  *   • Cross-exchange routes via inventory bridge (kraken:A ↔ coinbase:A, no fee)
  *
- * This replaces the hardcoded 15-cycle OB Hunter with a full search that scales
- * automatically as more assets / exchanges are added.
+ * Money-safety honesty rules baked in here:
+ *   • Insufficient depth for the actual propagated amount → the route is
+ *     UNPRICEABLE and dropped (never partially approximated).
+ *   • A safety buffer identical to the execution preflight
+ *     (max(0.02, size×0.0005)) is subtracted into `netAfterBufferUsd` and the
+ *     scan ranks on that.
+ *   • Every route is labelled executable/researchReason. Executable requires:
+ *     a live-executor-supported 3-hop shape, EVERY leg priced from a LIVE
+ *     stream book, and caller-supplied detected fee tiers. Otherwise the route
+ *     is research-only with an honest reason. 4-leg/mixed → always research.
+ *   • Maker-mode routes are always research-only (fills are not guaranteed and
+ *     there is no confirmed-fill integration).
  */
 
 import {
   fetchOrderBook,
   discoverCrossPairs,
-  OB_ASSETS,
-  OB_USD_PAIRS,
-  CROSS_LOOKUP,
+  getDynamicUniverse,
+  getStreamBook,
   type ObAsset,
 } from "./order-book";
 import { getCoinbaseOrderBook, type Pair } from "./exchange";
@@ -50,19 +61,26 @@ export type GraphNode = string;
 
 export type ExchangeLabel = "kraken" | "coinbase" | "bridge";
 
+export type EdgePricingSide = "buyBaseWithQuote" | "sellBaseForQuote" | "bridge";
+
 export interface GraphEdge {
   to: GraphNode;
   exchange: ExchangeLabel;
   pair: string;         // raw pair/product name used for execution
   side: "buy" | "sell" | "bridge";
-  /** Rate BEFORE fee: units of to-asset per unit of from-asset */
-  grossRate: number;
-  /** Rate AFTER fee: grossRate × (1 − feePct/100) */
-  netRate: number;
   feePct: number;
-  slippagePct: number;
   /** Best bid (for post-only sells) or ask (for post-only buys) */
   limitPrice: number;
+  /** How to interpret the book when walking this edge for the actual amount. */
+  pricingSide: EdgePricingSide;
+  /** Live order book carried on the edge — walked with the ACTUAL propagated
+   *  amount during DFS (empty for bridge edges). */
+  asks: BookLevels;
+  bids: BookLevels;
+  /** True when this edge's book came from the LIVE WS stream (not REST). A
+   *  route is only executable when EVERY real leg is stream-priced. Bridge
+   *  edges are neutral (true). */
+  streamed: boolean;
 }
 
 export interface GraphRouteHop {
@@ -75,6 +93,8 @@ export interface GraphRouteHop {
   amountOut: number;
   feePct: number;
   limitPrice: number;
+  /** Whether this leg was priced from a LIVE stream book (false = REST fallback). */
+  streamed: boolean;
 }
 
 export interface GraphRoute {
@@ -86,16 +106,21 @@ export interface GraphRoute {
   grossProfitUsd: number;
   /** Total USD fee drag across all legs */
   feeUsd: number;
-  /** Net USD profit after fees (what you actually keep) */
+  /** Net USD profit after fees (what you actually keep) — for display. */
   netProfitUsd: number;
+  /** Safety buffer applied (mirrors execution preflight: max(0.02, size×0.0005)). */
+  safetyBufferUsd: number;
+  /** Net after subtracting the safety buffer — the value routes are RANKED on. */
+  netAfterBufferUsd: number;
   profitPct: number;
   slippagePct: number;
   /** Whether the net profit exceeds a positive threshold */
   status: "VIABLE" | "REJECTED";
-  /** True when the LIVE executor supports this route shape (Kraken triangle
-   * or 2-leg cross-exchange inventory route). Unsupported shapes can still
-   * be dry-run recorded but never traded live. */
+  /** True ONLY when the route is safe to fire live: an executor-supported shape,
+   *  every leg priced from a LIVE stream book, and caller-supplied detected fees. */
   executable: boolean;
+  /** Non-null when NOT executable — an honest reason the route is research-only. */
+  researchReason: string | null;
   /** Recent live execution attempts recorded for this route+style (max 20 considered). */
   histLiveAttempts?: number;
   /** Historical live fill rate 0..1; null until ≥10 live attempts (insufficient history). */
@@ -133,10 +158,15 @@ export interface GraphScanResult {
   coinbaseFeesPct: number;
   /** Fee model applied to Kraken legs: taker (market, depth-walked) or maker (post-only join) */
   executionStyle: ExecutionStyle;
+  /** Whether the fee inputs came from detected Kraken tiers (true) or assumed
+   *  defaults (false). When false EVERY route is research-only. */
+  feesDetected: boolean;
   assetsScanned: number;
   routesEvaluated: number;
   /** Number of crypto cross pairs discovered dynamically via Kraken AssetPairs (0 = hardcoded fallback) */
   crossPairsDiscovered: number;
+  /** Size of the dynamic scan universe (USD pairs) actually used. */
+  universeUsdPairs: number;
   scannedAt: string;
 }
 
@@ -226,6 +256,40 @@ export function makerSellQuote(bestAsk: number, feePct: number): EdgeQuote | nul
   return { grossRate: bestAsk, netRate: bestAsk * (1 - feePct / 100), slippagePct: 0, effPrice: bestAsk };
 }
 
+/**
+ * Price ONE leg with the ACTUAL amount of from-asset it will carry.
+ * This is the money-safety core: no USD-mid sizing, no first-asset
+ * approximation — the exact output of the previous leg is what we walk here.
+ *
+ * Returns { amountOut, slippagePct } or null when the visible book cannot
+ * absorb `amountIn` (→ the route is UNPRICEABLE and must be dropped).
+ */
+export function priceLeg(edge: GraphEdge, amountIn: number, maker: boolean): { amountOut: number; slippagePct: number } | null {
+  if (edge.pricingSide === "bridge") return { amountOut: amountIn, slippagePct: 0 };
+  const fee = 1 - edge.feePct / 100;
+  if (edge.pricingSide === "buyBaseWithQuote") {
+    // amountIn is QUOTE currency; buy base.
+    if (maker) {
+      const bestBid = edge.bids[0]?.[0] ?? 0;
+      if (!bestBid) return null;
+      return { amountOut: (amountIn / bestBid) * fee, slippagePct: 0 };
+    }
+    const q = takerBuyQuote(edge.asks, amountIn, edge.feePct);
+    if (!q) return null;
+    // grossRate = 1/vwap = base per quote; amountOut = amountIn × netRate.
+    return { amountOut: amountIn * q.netRate, slippagePct: q.slippagePct };
+  }
+  // sellBaseForQuote: amountIn is BASE currency; sell for quote.
+  if (maker) {
+    const bestAsk = edge.asks[0]?.[0] ?? 0;
+    if (!bestAsk) return null;
+    return { amountOut: amountIn * bestAsk * fee, slippagePct: 0 };
+  }
+  const q = takerSellQuote(edge.bids, amountIn, edge.feePct);
+  if (!q) return null;
+  return { amountOut: amountIn * q.netRate, slippagePct: q.slippagePct };
+}
+
 // ── Node label helper ─────────────────────────────────────────────────────────
 
 function nodeLabel(node: GraphNode): string {
@@ -236,13 +300,21 @@ function nodeLabel(node: GraphNode): string {
 
 // ── Graph builder ─────────────────────────────────────────────────────────────
 
+interface BuildResult {
+  graph: Map<GraphNode, GraphEdge[]>;
+  crossPairsDiscovered: number;
+  universeUsdPairs: number;
+}
+
+/** Which Kraken REST pair keys have a fresh LIVE stream book right now. */
+function isStreamedPair(pair: string): boolean {
+  return getStreamBook(pair) != null;
+}
+
 async function buildGraph(
   krakenFeesPct: number,
   coinbaseFeesPct: number,
-  tradeSizeUsd: number,
-  executionStyle: ExecutionStyle,
-): Promise<{ graph: Map<GraphNode, GraphEdge[]>; crossPairsDiscovered: number }> {
-  const maker = executionStyle === "maker";
+): Promise<BuildResult> {
   const graph = new Map<GraphNode, GraphEdge[]>();
 
   const add = (from: GraphNode, edge: GraphEdge) => {
@@ -250,30 +322,29 @@ async function buildGraph(
     graph.get(from)!.push(edge);
   };
 
-  // ── Discover cross pairs dynamically (same as OB scanner) ────────────────
-  // Falls back to the hardcoded CROSS_LOOKUP if AssetPairs is unreachable.
-  const { lookup: activeCrossLookup, crossMap } = await discoverCrossPairs();
-  const crossPairsDiscovered = crossMap.length; // 0 when using hardcoded fallback
+  // ── Dynamic scan universe (USD pairs + crypto crosses) with static fallback ──
+  const universe = await getDynamicUniverse();
+  // Cross lookup for the discovery-count diagnostic (unchanged semantics).
+  const { crossMap } = await discoverCrossPairs();
+  const crossPairsDiscovered = universe.fromDiscovery ? universe.crossPairs.length : crossMap.length;
 
-  // ── Fetch all data in parallel ────────────────────────────────────────────
-
-  const krakenBooks = new Map<string, { asks: [number,number][]; bids: [number,number][] }>();
-  const cbBooks     = new Map<string, { asks: [number,number][]; bids: [number,number][] }>();
-  const crossBooks  = new Map<string, { asks: [number,number][]; bids: [number,number][] }>();
+  // ── Fetch all Kraken books in parallel (stream-first via fetchOrderBook) ────
+  const krakenUsdBooks = new Map<string, { asks: BookLevels; bids: BookLevels }>(); // asset → book
+  const crossBooks     = new Map<string, { asks: BookLevels; bids: BookLevels }>(); // pair → book
+  const cbBooks        = new Map<string, { asks: BookLevels; bids: BookLevels }>(); // asset → book
 
   await Promise.all([
-    // Kraken USD order books for all 34 assets
-    ...OB_ASSETS.map(async (asset) => {
-      const book = await fetchOrderBook(OB_USD_PAIRS[asset], 20);
-      if (book) krakenBooks.set(asset, book as { asks: [number,number][]; bids: [number,number][] });
+    // Kraken USD order books for every dynamic USD-quoted asset.
+    ...Array.from(universe.usdPairs.entries()).map(async ([asset, pair]) => {
+      const book = await fetchOrderBook(pair, 20);
+      if (book) krakenUsdBooks.set(asset, book as { asks: BookLevels; bids: BookLevels });
     }),
-    // Kraken cross-pair books — use dynamically discovered set
-    ...Array.from(new Set(Array.from(activeCrossLookup.values()).map(c => c.pair))).map(async (pair) => {
-      const book = await fetchOrderBook(pair, 10);
-      if (book) crossBooks.set(pair, book as { asks: [number,number][]; bids: [number,number][] });
+    // Kraken cross-pair books — dynamic cross set.
+    ...Array.from(new Set(universe.crossPairs.map(c => c.pair))).map(async (pair) => {
+      const book = await fetchOrderBook(pair, 20);
+      if (book) crossBooks.set(pair, book as { asks: BookLevels; bids: BookLevels });
     }),
-    // Coinbase level-2 order books for the 9 shared assets — full depth so
-    // Coinbase legs are VWAP-priced like Kraken legs, not top-of-book quotes.
+    // Coinbase level-2 order books for the shared assets.
     ...Object.entries(CB_ASSET_MAP).map(async ([asset, cbPair]) => {
       try {
         const book = await getCoinbaseOrderBook(cbPair as Pair);
@@ -284,153 +355,112 @@ async function buildGraph(
 
   // ── Kraken USD edges ──────────────────────────────────────────────────────
 
-  for (const asset of OB_ASSETS) {
-    const book = krakenBooks.get(asset);
+  for (const [asset, pair] of universe.usdPairs.entries()) {
+    const book = krakenUsdBooks.get(asset);
     if (!book) continue;
-
     const bestAsk = book.asks[0]?.[0] ?? 0;
     const bestBid = book.bids[0]?.[0] ?? 0;
     if (!bestAsk || !bestBid) continue;
+    const streamed = isStreamedPair(pair);
 
-    // Maker: post-only join — buy at best BID, sell at best ASK. Better
-    // prices + maker fee, but fills are not guaranteed. No depth slippage.
-    // Taker: DEPTH-WALKED effective prices for the actual trade size, with
-    // per-edge slippage = drift of the VWAP vs top-of-book. If the visible
-    // book can't absorb the size, the edge is DROPPED (not approximated).
-    const buyQ = maker
-      ? makerBuyQuote(bestBid, krakenFeesPct)
-      : takerBuyQuote(book.asks, tradeSizeUsd, krakenFeesPct);
-    const sellQ = maker
-      ? makerSellQuote(bestAsk, krakenFeesPct)
-      : takerSellQuote(book.bids, tradeSizeUsd / bestBid, krakenFeesPct);
-
-    if (buyQ != null) {
-      add("kraken:USD", {
-        to: `kraken:${asset}`, exchange: "kraken",
-        pair: OB_USD_PAIRS[asset], side: "buy",
-        grossRate: buyQ.grossRate, netRate: buyQ.netRate,
-        feePct: krakenFeesPct, slippagePct: buyQ.slippagePct, limitPrice: bestBid,
-      });
-    }
-    if (sellQ != null) {
-      add(`kraken:${asset}`, {
-        to: "kraken:USD", exchange: "kraken",
-        pair: OB_USD_PAIRS[asset], side: "sell",
-        grossRate: sellQ.grossRate, netRate: sellQ.netRate,
-        feePct: krakenFeesPct, slippagePct: sellQ.slippagePct, limitPrice: bestAsk,
-      });
-    }
+    // USD → asset (buy base with USD)
+    add("kraken:USD", {
+      to: `kraken:${asset}`, exchange: "kraken", pair, side: "buy",
+      feePct: krakenFeesPct, limitPrice: bestBid,
+      pricingSide: "buyBaseWithQuote", asks: book.asks, bids: book.bids, streamed,
+    });
+    // asset → USD (sell base for USD)
+    add(`kraken:${asset}`, {
+      to: "kraken:USD", exchange: "kraken", pair, side: "sell",
+      feePct: krakenFeesPct, limitPrice: bestAsk,
+      pricingSide: "sellBaseForQuote", asks: book.asks, bids: book.bids, streamed,
+    });
   }
 
   // ── Kraken cross-pair edges ───────────────────────────────────────────────
 
-  for (const [key, cross] of activeCrossLookup.entries()) {
-    const [fromAsset, toAsset] = key.split("-") as [ObAsset, ObAsset];
+  for (const [key, cross] of universe.crossLookup.entries()) {
+    const [fromAsset, toAsset] = key.split("-");
+    if (!fromAsset || !toAsset) continue;
     const book = crossBooks.get(cross.pair);
     if (!book) continue;
-
     const bestAsk = book.asks[0]?.[0] ?? 0;
     const bestBid = book.bids[0]?.[0] ?? 0;
     if (!bestAsk || !bestBid) continue;
-
-    // Approximate the from-asset amount this leg will carry (≈ tradeSizeUsd
-    // worth) so the depth walk uses realistic size.
-    const fromUsdBook = krakenBooks.get(fromAsset);
-    const fromUsdMid  = fromUsdBook ? ((fromUsdBook.asks[0]?.[0] ?? 0) + (fromUsdBook.bids[0]?.[0] ?? 0)) / 2 : 0;
-    const fromAmount  = fromUsdMid > 0 ? tradeSizeUsd / fromUsdMid : 0;
+    const streamed = isStreamedPair(cross.pair);
 
     if (cross.aIsQuote) {
-      // fromAsset is quote, toAsset is base. Going from→to BUYs the base.
-      const q = maker ? makerBuyQuote(bestBid, krakenFeesPct)
-        : (fromAmount > 0 ? takerBuyQuote(book.asks, fromAmount, krakenFeesPct) : null);
-      if (q == null) continue; // book too thin for this size — drop edge
+      // fromAsset is quote, toAsset is base → BUY the base (walk asks).
       add(`kraken:${fromAsset}`, {
-        to: `kraken:${toAsset}`, exchange: "kraken",
-        pair: cross.pair, side: "buy",
-        grossRate: q.grossRate, netRate: q.netRate,
-        feePct: krakenFeesPct, slippagePct: q.slippagePct, limitPrice: bestBid,
+        to: `kraken:${toAsset}`, exchange: "kraken", pair: cross.pair, side: "buy",
+        feePct: krakenFeesPct, limitPrice: bestBid,
+        pricingSide: "buyBaseWithQuote", asks: book.asks, bids: book.bids, streamed,
       });
     } else {
-      // fromAsset is base, toAsset is quote. Going from→to SELLs the base.
-      const q = maker ? makerSellQuote(bestAsk, krakenFeesPct)
-        : (fromAmount > 0 ? takerSellQuote(book.bids, fromAmount, krakenFeesPct) : null);
-      if (q == null) continue; // book too thin for this size — drop edge
+      // fromAsset is base, toAsset is quote → SELL the base (walk bids).
       add(`kraken:${fromAsset}`, {
-        to: `kraken:${toAsset}`, exchange: "kraken",
-        pair: cross.pair, side: "sell",
-        grossRate: q.grossRate, netRate: q.netRate,
-        feePct: krakenFeesPct, slippagePct: q.slippagePct, limitPrice: bestAsk,
+        to: `kraken:${toAsset}`, exchange: "kraken", pair: cross.pair, side: "sell",
+        feePct: krakenFeesPct, limitPrice: bestAsk,
+        pricingSide: "sellBaseForQuote", asks: book.asks, bids: book.bids, streamed,
       });
     }
   }
 
   // ── Coinbase USD edges ────────────────────────────────────────────────────
+  // Coinbase books are always REST/L2 pulls here (not the Kraken WS stream), so
+  // they are never `streamed` — cross-exchange routes are research-only.
 
   for (const [asset, book] of cbBooks.entries()) {
     const bestAsk = book.asks[0]?.[0] ?? 0;
     const bestBid = book.bids[0]?.[0] ?? 0;
     if (!bestAsk || !bestBid) continue;
 
-    // Maker: post-only join — buy at best BID, sell at best ASK (mirrors the
-    // Kraken maker path). Taker: depth-walked VWAP for the actual trade size —
-    // same rules as Kraken legs; if the book can't absorb the size, DROP the edge.
-    const buyQ = maker
-      ? makerBuyQuote(bestBid, coinbaseFeesPct)
-      : takerBuyQuote(book.asks, tradeSizeUsd, coinbaseFeesPct);
-    const sellQ = maker
-      ? makerSellQuote(bestAsk, coinbaseFeesPct)
-      : takerSellQuote(book.bids, tradeSizeUsd / bestBid, coinbaseFeesPct);
-
-    if (buyQ != null) {
-      add("coinbase:USD", {
-        to: `coinbase:${asset}`, exchange: "coinbase",
-        pair: `${asset}-USD`, side: "buy",
-        grossRate: buyQ.grossRate, netRate: buyQ.netRate,
-        feePct: coinbaseFeesPct, slippagePct: buyQ.slippagePct,
-        limitPrice: maker ? bestBid : bestAsk,
-      });
-    }
-    if (sellQ != null) {
-      add(`coinbase:${asset}`, {
-        to: "coinbase:USD", exchange: "coinbase",
-        pair: `${asset}-USD`, side: "sell",
-        grossRate: sellQ.grossRate, netRate: sellQ.netRate,
-        feePct: coinbaseFeesPct, slippagePct: sellQ.slippagePct,
-        limitPrice: maker ? bestAsk : bestBid,
-      });
-    }
+    add("coinbase:USD", {
+      to: `coinbase:${asset}`, exchange: "coinbase", pair: `${asset}-USD`, side: "buy",
+      feePct: coinbaseFeesPct, limitPrice: bestAsk,
+      pricingSide: "buyBaseWithQuote", asks: book.asks, bids: book.bids, streamed: false,
+    });
+    add(`coinbase:${asset}`, {
+      to: "coinbase:USD", exchange: "coinbase", pair: `${asset}-USD`, side: "sell",
+      feePct: coinbaseFeesPct, limitPrice: bestBid,
+      pricingSide: "sellBaseForQuote", asks: book.asks, bids: book.bids, streamed: false,
+    });
   }
 
   // ── Inventory bridge edges ────────────────────────────────────────────────
-  // Representing simultaneous holdings on both exchanges. No fee or transfer
-  // delay — you buy on one side and sell on the other from existing inventory.
+  // Simultaneous holdings on both exchanges. No fee or transfer delay.
 
   for (const asset of Object.keys(CB_ASSET_MAP) as ObAsset[]) {
-    if (krakenBooks.has(asset) && cbBooks.has(asset)) {
+    if (krakenUsdBooks.has(asset) && cbBooks.has(asset)) {
       const bridgeEdge = (to: GraphNode): GraphEdge => ({
         to, exchange: "bridge", pair: asset, side: "bridge",
-        grossRate: 1, netRate: 1, feePct: 0, slippagePct: 0, limitPrice: 0,
+        feePct: 0, limitPrice: 0,
+        pricingSide: "bridge", asks: [], bids: [], streamed: true,
       });
       add(`kraken:${asset}`,   bridgeEdge(`coinbase:${asset}`));
       add(`coinbase:${asset}`, bridgeEdge(`kraken:${asset}`));
     }
   }
 
-  // No USD↔USD bridge edge: adding it creates spurious "start at CB-USD,
-  // immediately hop to K-USD, do Kraken-only triangle" routes that are just
-  // noisy duplicates of Kraken-start routes.  Cross-exchange routes naturally
-  // end at the other venue's USD (e.g. USD[K]→BTC[K]→BTC[CB]→USD[CB]).
+  // No USD↔USD bridge edge (avoids spurious duplicate Kraken-only cycles).
 
-  return { graph, crossPairsDiscovered };
+  return { graph, crossPairsDiscovered, universeUsdPairs: universe.usdPairs.size };
 }
 
 // ── DFS cycle finder ──────────────────────────────────────────────────────────
+
+interface CycleContext {
+  maker: boolean;
+  feesDetected: boolean;
+  safetyBufferUsd: number;
+}
 
 function findCycles(
   graph: Map<GraphNode, GraphEdge[]>,
   startNode: GraphNode,
   startUsd: number,
   maxHops: number,
+  ctx: CycleContext,
 ): GraphRoute[] {
   const routes: GraphRoute[] = [];
 
@@ -438,33 +468,37 @@ function findCycles(
     current: GraphNode,
     path: GraphNode[],
     edges: GraphEdge[],
-    netAmt: number,     // amount of current asset (net of fees so far)
-    grossAmt: number,   // same, without fees
+    netAmt: number,     // ACTUAL amount of current asset (net of fees so far)
     slippage: number,
     visited: Set<GraphNode>,
     hopNets: number[],
-    hopGross: number[],
+    unpriceable: boolean,
   ) {
     if (edges.length > maxHops) return;
 
     for (const edge of graph.get(current) ?? []) {
-      const { to, netRate, grossRate, slippagePct, exchange } = edge;
-      const newNet   = netAmt   * netRate;
-      const newGross = grossAmt * grossRate;
-      const newSlip  = slippage + slippagePct;
+      const { to, exchange } = edge;
+
+      // Depth-walk this leg with the ACTUAL propagated amount. If the visible
+      // book can't absorb it, the route through this edge is unpriceable.
+      const priced = unpriceable ? null : priceLeg(edge, netAmt, ctx.maker);
+      const legUnpriceable = unpriceable || priced == null;
+      const newNet  = priced ? priced.amountOut : 0;
+      const newSlip = slippage + (priced ? priced.slippagePct : 0);
 
       // ── Terminal: returned to any USD node with ≥2 real (non-bridge) hops ──
       if (to.endsWith(":USD") && edges.length >= 2) {
         const realHops = edges.filter(e => e.exchange !== "bridge").length + (exchange !== "bridge" ? 1 : 0);
         if (realHops < 2) continue;
-        // Reject pure 2-leg round-trips (buy+sell same asset — always loses
-        // money to spread). Require ≥3 real hops OR land at a different USD node.
+        // Reject pure 2-leg round-trips (buy+sell same asset — always loses to
+        // spread). Require ≥3 real hops OR land at a different USD node.
         if (realHops === 2 && to === path[0]) continue;
+        // Route the book couldn't absorb → UNPRICEABLE, never approximated: drop.
+        if (legUnpriceable) continue;
 
-        const allNodes  = [...path, to];
-        const allNets   = [...hopNets, newNet];
-        const allGross  = [...hopGross, newGross];
-        const allEdges  = [...edges, edge];
+        const allNodes = [...path, to];
+        const allNets  = [...hopNets, newNet];
+        const allEdges = [...edges, edge];
 
         const hops: GraphRouteHop[] = allEdges.map((e, i) => ({
           from: allNodes[i],
@@ -476,12 +510,18 @@ function findCycles(
           amountOut: allNets[i],
           feePct:    e.feePct,
           limitPrice: e.limitPrice,
+          streamed:  e.streamed,
         }));
 
-        const netProfitUsd   = newNet   - startUsd;
-        const grossProfitUsd = newGross - startUsd;
-        const feeUsd         = grossProfitUsd - netProfitUsd;
-        const desc           = allNodes.map(nodeLabel).join("→");
+        const netProfitUsd = newNet - startUsd;
+        // Gross (fee-free) profit: re-walk each leg at zero fee for an honest
+        // fee-drag figure. Uses the same actual-amount propagation.
+        const grossProfitUsd = computeGrossProfit(allEdges, startUsd, ctx.maker);
+        const feeUsd = grossProfitUsd - netProfitUsd;
+        const desc = allNodes.map(nodeLabel).join("→");
+
+        const netAfterBufferUsd = netProfitUsd - ctx.safetyBufferUsd;
+        const { executable, researchReason } = classifyRoute(hops, ctx);
 
         routes.push({
           hops,
@@ -490,10 +530,13 @@ function findCycles(
           grossProfitUsd,
           feeUsd,
           netProfitUsd,
+          safetyBufferUsd: ctx.safetyBufferUsd,
+          netAfterBufferUsd,
           profitPct: (netProfitUsd / startUsd) * 100,
           slippagePct: newSlip,
-          status: netProfitUsd > 0 ? "VIABLE" : "REJECTED",
-          executable: isRouteExecutable(hops),
+          status: netAfterBufferUsd > 0 ? "VIABLE" : "REJECTED",
+          executable,
+          researchReason,
         });
         continue;
       }
@@ -505,14 +548,57 @@ function findCycles(
       const newVisited = new Set(visited);
       newVisited.add(to);
 
-      dfs(to, [...path, to], [...edges, edge], newNet, newGross, newSlip,
-          newVisited, [...hopNets, newNet], [...hopGross, newGross]);
+      dfs(to, [...path, to], [...edges, edge], newNet, newSlip,
+          newVisited, [...hopNets, newNet], legUnpriceable);
     }
   }
 
   const initVisited = new Set<GraphNode>([startNode]);
-  dfs(startNode, [startNode], [], startUsd, startUsd, 0, initVisited, [], []);
+  dfs(startNode, [startNode], [], startUsd, 0, initVisited, [], false);
   return routes;
+}
+
+/** Re-walk a completed edge chain at ZERO fee to get the fee-free output —
+ *  used for an honest gross-profit / fee-drag figure. Returns startUsd (→ 0
+ *  gross) if any leg can't be priced (never happens for a route that already
+ *  priced net, but be safe). */
+function computeGrossProfit(edges: GraphEdge[], startUsd: number, maker: boolean): number {
+  let amt = startUsd;
+  for (const e of edges) {
+    const zeroFeeEdge: GraphEdge = { ...e, feePct: 0 };
+    const priced = priceLeg(zeroFeeEdge, amt, maker);
+    if (!priced) return startUsd; // shouldn't happen; keep gross == start (0 profit)
+    amt = priced.amountOut;
+  }
+  return amt - startUsd;
+}
+
+/**
+ * Decide executable/researchReason for a completed route. Money-safety honesty:
+ * a route is executable ONLY when ALL of these hold:
+ *   • the shape is one the live executor supports (Kraken triangle or 2-leg
+ *     cross-exchange inventory) — isRouteExecutable();
+ *   • it is NOT maker-mode (maker fills are not guaranteed, no confirmed-fill
+ *     engine integration);
+ *   • EVERY real (non-bridge) leg was priced from a LIVE stream book;
+ *   • the caller supplied DETECTED fee tiers (feesDetected).
+ * Otherwise the route is research-only with the most important honest reason.
+ */
+function classifyRoute(hops: GraphRouteHop[], ctx: CycleContext): { executable: boolean; researchReason: string | null } {
+  const realHops = hops.filter(h => h.exchange !== "bridge");
+  if (!isRouteExecutable(hops)) {
+    return { executable: false, researchReason: "unsupported route shape (4-leg / mixed) — projection only" };
+  }
+  if (ctx.maker) {
+    return { executable: false, researchReason: "maker fills not guaranteed — projection only" };
+  }
+  if (realHops.some(h => !h.streamed)) {
+    return { executable: false, researchReason: "priced from REST/non-stream books — research only" };
+  }
+  if (!ctx.feesDetected) {
+    return { executable: false, researchReason: "fees assumed — connect Kraken keys" };
+  }
+  return { executable: true, researchReason: null };
 }
 
 // ── Public scan function ──────────────────────────────────────────────────────
@@ -523,14 +609,20 @@ export async function scanGraphOpportunities(
   coinbaseFeesPct: number,
   maxHops = 4,
   executionStyle: ExecutionStyle = "taker",
+  feesDetected = false,
 ): Promise<GraphScanResult> {
-  const { graph, crossPairsDiscovered } = await buildGraph(krakenFeesPct, coinbaseFeesPct, tradeSizeUsd, executionStyle);
+  const { graph, crossPairsDiscovered, universeUsdPairs } = await buildGraph(krakenFeesPct, coinbaseFeesPct);
+
+  // Safety buffer identical to the execution preflight in routes/arb.ts:
+  //   Math.max(0.02, tradeSizeUsd * 0.0005)
+  const safetyBufferUsd = Math.max(0.02, tradeSizeUsd * 0.0005);
+  const ctx: CycleContext = { maker: executionStyle === "maker", feesDetected, safetyBufferUsd };
 
   // Search from both USD nodes so we find cross-exchange cycles that begin on
   // either Kraken or Coinbase (e.g. USD[CB]→BTC[CB]→BTC[K]→USD[K]).
   const allRoutes = [
-    ...findCycles(graph, "kraken:USD",   tradeSizeUsd, maxHops),
-    ...findCycles(graph, "coinbase:USD", tradeSizeUsd, maxHops),
+    ...findCycles(graph, "kraken:USD",   tradeSizeUsd, maxHops, ctx),
+    ...findCycles(graph, "coinbase:USD", tradeSizeUsd, maxHops, ctx),
   ];
 
   // Deduplicate by description (same cycle can be discovered from either start).
@@ -542,12 +634,11 @@ export async function scanGraphOpportunities(
   });
 
   // Executable routes first (the top route is what Execute Top Route fires),
-  // then by net profit within each group.
-  unique.sort((a, b) => (Number(b.executable) - Number(a.executable)) || (b.netProfitUsd - a.netProfitUsd));
+  // then by BUFFERED net (netAfterBufferUsd) within each group — rank on the
+  // pessimistic, post-buffer number, not the raw net.
+  unique.sort((a, b) => (Number(b.executable) - Number(a.executable)) || (b.netAfterBufferUsd - a.netAfterBufferUsd));
 
-  const assetsScanned =
-    OB_ASSETS.filter(a => graph.has(`kraken:${a}`)).length +
-    (Object.keys(CB_ASSET_MAP) as ObAsset[]).filter(a => graph.has(`coinbase:${a}`)).length;
+  const assetsScanned = graph.size; // number of nodes with outgoing edges
 
   return {
     routes: unique.slice(0, 25),
@@ -555,8 +646,10 @@ export async function scanGraphOpportunities(
     krakenFeesPct,
     coinbaseFeesPct,
     executionStyle,
+    feesDetected,
     assetsScanned,
     crossPairsDiscovered,
+    universeUsdPairs,
     routesEvaluated: allRoutes.length,
     scannedAt: new Date().toISOString(),
   };

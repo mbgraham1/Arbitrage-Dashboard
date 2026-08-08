@@ -1383,6 +1383,188 @@ export const DiscoveryScanResponse = zod.object({
 
 
 /**
+ * Prices every ordered venue pair × mutually supported USD asset from LIVE stream books (depth-walked VWAP, per-venue fees on notional, slippage vs top-of-book, per-leg quote ages) and runs a FEASIBLE size sweep bounded by real balances and exchange minimums when credentials are provided. Fees are DETECTED per-venue when that venue's keys are in the request; assumed (labeled) otherwise. A route can only be marked FIRE when BOTH legs' fees are DETECTED and balances cover the legs — assumptions never gate live decisions. NEVER trades.
+ * @summary Cross-venue scanner across Kraken · Coinbase · Gemini (never trades)
+ */
+export const XvScanQueryParams = zod.object({
+  "minNetUsd": zod.coerce.number().optional().describe('net-after-buffer floor a route must clear to FIRE (default 0.01)'),
+  "maxQuoteAgeMs": zod.coerce.number().optional().describe('max staleness of the oldest leg for a live decision (default 200)')
+})
+
+export const XvScanBody = zod.object({
+  "krakenKey": zod.string().optional(),
+  "krakenSecret": zod.string().optional(),
+  "coinbaseKey": zod.string().optional(),
+  "coinbaseSecret": zod.string().optional(),
+  "geminiKey": zod.string().optional(),
+  "geminiSecret": zod.string().optional()
+}).describe('Optional per-venue credentials. Providing a venue\'s keys upgrades its fees from ASSUMED (labeled) to DETECTED and verifies its balances. A route only ever FIREs when both legs\' fees are DETECTED.\n')
+
+export const XvScanResponse = zod.object({
+  "scannedAt": zod.string(),
+  "params": zod.object({
+  "minNetUsd": zod.number().optional(),
+  "maxQuoteAgeMs": zod.number().optional(),
+  "execCapUsd": zod.number().optional(),
+  "candidateSizes": zod.array(zod.number()).optional()
+}),
+  "venues": zod.array(zod.object({
+  "id": zod.string().describe('kraken | coinbase | gemini'),
+  "feeSource": zod.string().describe('detected | assumed'),
+  "takerPct": zod.number().describe('per-leg taker fee percent (DETECTED tier, or a labeled ASSUMED default)'),
+  "usd": zod.number().nullish().describe('spendable USD balance (null = unknown, keys not provided)'),
+  "error": zod.string().nullish().describe('fee\/balance detection failure — never silently downgraded for live decisions'),
+  "streaming": zod.boolean().describe('live book stream connected (Gemini reflects its own WS state)')
+})),
+  "fireCount": zod.number(),
+  "routes": zod.array(zod.object({
+  "asset": zod.string(),
+  "buyVenue": zod.string().describe('kraken | coinbase | gemini'),
+  "sellVenue": zod.string().describe('kraken | coinbase | gemini'),
+  "usdRoute": zod.boolean().describe('all-USD quotes — no basis haircut'),
+  "stable": zod.boolean().describe('USDC stablecoin rotation route'),
+  "decision": zod.string().describe('FIRE | SKIP — FIRE requires detected fees on both legs, fresh books, positive net, and verified feasible balances'),
+  "reason": zod.string().describe('verbatim decision reason — SKIP reasons must be shown as-is'),
+  "feeSourceBuy": zod.string().describe('detected | assumed'),
+  "feeSourceSell": zod.string().describe('detected | assumed'),
+  "buyTakerPct": zod.number(),
+  "sellTakerPct": zod.number(),
+  "best": zod.object({
+  "sizeUsd": zod.number(),
+  "grossSpreadUsd": zod.number().describe('raw edge at top-of-book for this size'),
+  "feesUsd": zod.number(),
+  "slippageUsd": zod.number(),
+  "bufferUsd": zod.number(),
+  "netProfitUsd": zod.number().describe('after fees + slippage (buffer NOT subtracted)'),
+  "netAfterBufferUsd": zod.number().describe('the number that must clear the floor'),
+  "baseQty": zod.number(),
+  "quoteAgeMs": zod.number().describe('age of the oldest leg'),
+  "buyAgeMs": zod.number(),
+  "sellAgeMs": zod.number().describe('for a Gemini leg this is measured from local arrival (no exchange timestamp)'),
+  "feasible": zod.boolean().describe('balances + exchange minimums allow this size'),
+  "infeasibleWhy": zod.string().nullish().describe('verbatim reason this size is not feasible (null when feasible)')
+}).describe('One priced size candidate for a route (buffer is shown separately, not folded into netProfitUsd).').nullish().describe('best net across all candidate sizes (may be infeasible)'),
+  "bestFeasible": zod.object({
+  "sizeUsd": zod.number(),
+  "grossSpreadUsd": zod.number().describe('raw edge at top-of-book for this size'),
+  "feesUsd": zod.number(),
+  "slippageUsd": zod.number(),
+  "bufferUsd": zod.number(),
+  "netProfitUsd": zod.number().describe('after fees + slippage (buffer NOT subtracted)'),
+  "netAfterBufferUsd": zod.number().describe('the number that must clear the floor'),
+  "baseQty": zod.number(),
+  "quoteAgeMs": zod.number().describe('age of the oldest leg'),
+  "buyAgeMs": zod.number(),
+  "sellAgeMs": zod.number().describe('for a Gemini leg this is measured from local arrival (no exchange timestamp)'),
+  "feasible": zod.boolean().describe('balances + exchange minimums allow this size'),
+  "infeasibleWhy": zod.string().nullish().describe('verbatim reason this size is not feasible (null when feasible)')
+}).describe('One priced size candidate for a route (buffer is shown separately, not folded into netProfitUsd).').nullish().describe('best net across only the sizes balances\/minimums allow (null when none feasible)'),
+  "projections": zod.array(zod.object({
+  "sizeUsd": zod.number(),
+  "grossSpreadUsd": zod.number().describe('raw edge at top-of-book for this size'),
+  "feesUsd": zod.number(),
+  "slippageUsd": zod.number(),
+  "bufferUsd": zod.number(),
+  "netProfitUsd": zod.number().describe('after fees + slippage (buffer NOT subtracted)'),
+  "netAfterBufferUsd": zod.number().describe('the number that must clear the floor'),
+  "baseQty": zod.number(),
+  "quoteAgeMs": zod.number().describe('age of the oldest leg'),
+  "buyAgeMs": zod.number(),
+  "sellAgeMs": zod.number().describe('for a Gemini leg this is measured from local arrival (no exchange timestamp)'),
+  "feasible": zod.boolean().describe('balances + exchange minimums allow this size'),
+  "infeasibleWhy": zod.string().nullish().describe('verbatim reason this size is not feasible (null when feasible)')
+}).describe('One priced size candidate for a route (buffer is shown separately, not folded into netProfitUsd).')),
+  "requiredBalances": zod.object({
+  "buyUsd": zod.number().optional(),
+  "sellAssetQty": zod.number().optional()
+}).nullish(),
+  "balancesOk": zod.boolean().nullish().describe('null = unknown (keys missing)'),
+  "minNotionalUsd": zod.number().nullish().describe('exchange-minimum notional for this pair when known (Gemini legs)')
+})),
+  "note": zod.string()
+})
+
+
+/**
+ * Re-projects the requested route on CURRENT books with DETECTED fees, 200ms freshness, and a shared live lock; the first leg is confirmed by ACTUAL fill quantity and the second leg placed for exactly the confirmed quantity. "completed" only on a full terminal second-leg fill; any ambiguity latches live runs off pending manual reconciliation.
+ * @summary Execute ONE cross-venue cycle ($10 hard cap, detected fees only)
+ */
+export const XvExecuteBody = zod.object({
+  "krakenKey": zod.string().optional(),
+  "krakenSecret": zod.string().optional(),
+  "coinbaseKey": zod.string().optional(),
+  "coinbaseSecret": zod.string().optional(),
+  "geminiKey": zod.string().optional(),
+  "geminiSecret": zod.string().optional(),
+  "asset": zod.string(),
+  "buyVenue": zod.enum(['kraken', 'coinbase', 'gemini']),
+  "sellVenue": zod.enum(['kraken', 'coinbase', 'gemini']),
+  "sizeUsd": zod.number().optional().describe('clamped to [1, 10] — the $10 hard cap is enforced server-side'),
+  "minNetUsd": zod.number().optional(),
+  "maxQuoteAgeMs": zod.number().optional()
+}).describe('Route to execute plus the credentials for BOTH venues (detected fees are mandatory for a live run).')
+
+export const XvExecuteResponse = zod.object({
+  "executed": zod.boolean(),
+  "outcome": zod.string().describe('completed | partial_sell | sell_failed | indeterminate | unhedged | skipped'),
+  "reason": zod.string().describe('verbatim outcome\/skip reason — shown as-is'),
+  "asset": zod.string(),
+  "buyVenue": zod.string(),
+  "sellVenue": zod.string(),
+  "startedAt": zod.string(),
+  "finishedAt": zod.string(),
+  "buyLeg": zod.object({
+  "venue": zod.string().describe('kraken | coinbase | gemini'),
+  "orderId": zod.string().nullish(),
+  "status": zod.string(),
+  "filledQty": zod.number().describe('CONFIRMED fill quantity — the only source of truth'),
+  "avgPrice": zod.number().nullish(),
+  "notionalUsd": zod.number().nullish(),
+  "feeUsd": zod.number().nullish(),
+  "latencyMs": zod.number()
+}).nullish(),
+  "sellLeg": zod.object({
+  "venue": zod.string().describe('kraken | coinbase | gemini'),
+  "orderId": zod.string().nullish(),
+  "status": zod.string(),
+  "filledQty": zod.number().describe('CONFIRMED fill quantity — the only source of truth'),
+  "avgPrice": zod.number().nullish(),
+  "notionalUsd": zod.number().nullish(),
+  "feeUsd": zod.number().nullish(),
+  "latencyMs": zod.number()
+}).nullish(),
+  "realizedProfitUsd": zod.number().nullish().describe('ONLY from confirmed fills; null when not fully hedged \/ indeterminate'),
+  "projection": zod.object({
+  "sizeUsd": zod.number(),
+  "grossSpreadUsd": zod.number().describe('raw edge at top-of-book for this size'),
+  "feesUsd": zod.number(),
+  "slippageUsd": zod.number(),
+  "bufferUsd": zod.number(),
+  "netProfitUsd": zod.number().describe('after fees + slippage (buffer NOT subtracted)'),
+  "netAfterBufferUsd": zod.number().describe('the number that must clear the floor'),
+  "baseQty": zod.number(),
+  "quoteAgeMs": zod.number().describe('age of the oldest leg'),
+  "buyAgeMs": zod.number(),
+  "sellAgeMs": zod.number().describe('for a Gemini leg this is measured from local arrival (no exchange timestamp)'),
+  "feasible": zod.boolean().describe('balances + exchange minimums allow this size'),
+  "infeasibleWhy": zod.string().nullish().describe('verbatim reason this size is not feasible (null when feasible)')
+}).describe('One priced size candidate for a route (buffer is shown separately, not folded into netProfitUsd).').nullish(),
+  "geminiFeeNote": zod.string().nullish().describe('present when a Gemini leg ran — its fee is computed from the verified taker tier on the confirmed notional')
+})
+
+
+/**
+ * @summary Cross-venue executor ledger stats (XV: prefix, live runs only)
+ */
+export const XvStatsResponse = zod.object({
+  "trades": zod.number(),
+  "completed": zod.number(),
+  "incomplete": zod.number(),
+  "cumulativeRealizedUsd": zod.number().describe('sum of realized P&L from confirmed fills only')
+})
+
+
+/**
  * @summary Start the 24-hour Profit Hunter evidence collector (read-only, never trades)
  */
 export const HunterStartBody = zod.object({

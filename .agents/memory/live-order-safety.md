@@ -81,3 +81,9 @@ Trader's rule ordering: fresh taker breakdown (real fees/leg, depth-walked slip,
 ## Submit ambiguity classification (added 2026-08-08)
 Only EXPLICIT API-level rejections (Kraken `EOrder:`/`EAPI:Invalid`/etc., Coinbase `success:false`) may be reported as "nothing traded". Any other post-submit failure (timeout, network, parse) means the order MAY exist: latch live runs off (sticky reconcile flag), write an auditable indeterminate ledger row, and require manual verification before trading again.
 **Why:** a lost response after acceptance otherwise lets the trader safely-looking rerun and double-buy.
+
+## Cross-venue (XV) executor additions (2026-08-08)
+- Sell leg 2 must be judged against a VENUE-QUANTIZED submitted target, not the raw buy fill; "completed" only if the quantized target fully fills AND quantization dust ≤1 step AND ≤$0.02 notional. Otherwise partial — never mask residual with tolerances.
+- Any unexpected exception AFTER an order was submitted must latch reconciliation + ledger an indeterminate row — never return a clean "skipped" from an outer catch.
+- Never make a network call (e.g. re-verify fee tier) after a confirmed fill to compute its fee — carry the pre-verified tier forward; a transient error there would turn a confirmed fill ambiguous.
+- Gemini: l2 WS has no exchange timestamps (age = local arrival); order/status has no fee field (fee = verified taker tier × confirmed notional, surfaced as such); IOC = "immediate-or-cancel" option on exchange limit; explicit-reject reasons list in gemini-exec.ts.

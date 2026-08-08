@@ -12,6 +12,7 @@ import { format } from "date-fns";
 import { CrossMmCard } from "@/components/cross-mm-card";
 import { TwoExchangeTestCard } from "@/components/two-exchange-test-card";
 import { TwoXScannerCard } from "@/components/two-x-scanner-card";
+import { CrossVenueScannerCard } from "@/components/cross-venue-scanner-card";
 import { CbMmCard } from "@/components/cb-mm-card";
 import { DiscoveryCard } from "@/components/discovery-card";
 import { ProfitHunterCard } from "@/components/profit-hunter-card";
@@ -690,6 +691,7 @@ export default function Dashboard() {
       {/* 24h Profit Hunter evidence collector (never trades) */}
       <ProfitHunterCard />
       <TwoXScannerCard />
+      <CrossVenueScannerCard />
 
       {/* Diagnostics & plumbing tests — collapsed, never auto-run, NOT profit strategies */}
       <details className="rounded-lg border border-border" data-testid="section-diagnostics">

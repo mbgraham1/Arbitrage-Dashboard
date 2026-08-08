@@ -328,8 +328,99 @@ export function startCoinbaseTickerStream(productIds: string[]): void {
   if (!coinbaseWs || coinbaseWs.readyState === WebSocket.CLOSED || coinbaseWs.readyState === WebSocket.CLOSING) connectCoinbase();
 }
 
+
+// ── Gemini (public v2 marketdata l2 streams) ─────────────────────────────────
+// Full-depth books maintained from l2_updates deltas — same "never truncate a
+// delta-fed book" rule as Coinbase (a removed top level can't be backfilled
+// from discarded depth). Gemini l2_updates carry NO exchange timestamp, so a
+// Gemini leg's age is measured from local arrival time (exchangeTsMs stays
+// null → getGeminiStreamBook falls back to updatedAtMs). That is the honest
+// bound available; the freshness gate treats it exactly like other legs.
+interface GemFullBook { bids: Map<number, number>; asks: Map<number, number>; updatedAtMs: number; }
+const geminiBooks = new Map<string, GemFullBook>(); // keyed by UPPER symbol, e.g. BTCUSD
+let geminiWs: WebSocket | null = null;
+let geminiConnected = false;
+let gemReconnectMs = 1_000;
+let gemSymbols: string[] = []; // UPPER, e.g. BTCUSD
+
+/** Listener key for Gemini book updates (used with onBookUpdate/waitForBookTouch). */
+export function geminiBookKey(symbol: string): string { return `GEM:${symbol.toUpperCase()}`; }
+
+export function getGeminiStreamBook(symbol: string): (StreamBook & { ageMs: number }) | null {
+  const b = geminiBooks.get(symbol.toUpperCase());
+  if (!b || b.asks.size === 0 || b.bids.size === 0) return null;
+  const asks: Level[] = [...b.asks.entries()].sort((x, y) => x[0] - y[0]).slice(0, DEPTH);
+  const bids: Level[] = [...b.bids.entries()].sort((x, y) => y[0] - x[0]).slice(0, DEPTH);
+  const ageMs = Math.max(0, Date.now() - b.updatedAtMs);
+  return { asks, bids, updatedAtMs: b.updatedAtMs, exchangeTsMs: null, ageMs };
+}
+
+export function geminiStreamStats(): { connected: boolean; books: number; tracked: number } {
+  return { connected: geminiConnected, books: geminiBooks.size, tracked: gemSymbols.length };
+}
+
+function connectGemini(): void {
+  if (stopped) return;
+  try {
+    const ws = new WebSocket("wss://api.gemini.com/v2/marketdata");
+    geminiWs = ws;
+    ws.onopen = () => {
+      geminiConnected = true;
+      gemReconnectMs = 1_000;
+      ws.send(JSON.stringify({ type: "subscribe", subscriptions: [{ name: "l2", symbols: gemSymbols }] }));
+      console.log(`[BookStream] Gemini WS connected — ${gemSymbols.length} symbols (l2 depth)`);
+    };
+    ws.onmessage = ev => {
+      if (typeof ev.data !== "string") return;
+      try {
+        const m = JSON.parse(ev.data) as { type?: string; symbol?: string; changes?: [string, string, string][] };
+        if (m.type !== "l2_updates" || !m.symbol || !m.changes) return;
+        const sym = m.symbol.toUpperCase();
+        let book = geminiBooks.get(sym);
+        if (!book) { book = { bids: new Map(), asks: new Map(), updatedAtMs: 0 }; geminiBooks.set(sym, book); }
+        for (const [side, p, q] of m.changes) {
+          const price = parseFloat(p), qty = parseFloat(q);
+          if (!isFinite(price) || !isFinite(qty) || price <= 0) continue;
+          const map = side === "buy" ? book.bids : side === "sell" ? book.asks : null;
+          if (!map) continue;
+          if (qty <= 0) map.delete(price); else map.set(price, qty);
+        }
+        book.updatedAtMs = Date.now();
+        const key = geminiBookKey(sym);
+        for (const cb of updateListeners) { try { cb(key); } catch { /* listener errors must not kill the feed */ } }
+      } catch { /* ignore malformed frames */ }
+    };
+    ws.onclose = () => {
+      geminiConnected = false;
+      geminiBooks.clear(); // never serve books from a dead stream
+      if (stopped) return;
+      setTimeout(connectGemini, gemReconnectMs);
+      gemReconnectMs = Math.min(gemReconnectMs * 2, 30_000);
+    };
+    ws.onerror = () => { try { ws.close(); } catch { /* onclose reconnects */ } };
+  } catch {
+    setTimeout(connectGemini, gemReconnectMs);
+    gemReconnectMs = Math.min(gemReconnectMs * 2, 30_000);
+  }
+}
+
+/** Start (or extend) the Gemini l2 stream for UPPER symbols like BTCUSD. */
+export function startGeminiBookStream(symbols: string[]): void {
+  const up = symbols.map(s => s.toUpperCase());
+  const added = up.filter(s => !gemSymbols.includes(s));
+  gemSymbols = [...new Set([...gemSymbols, ...up])];
+  if (!geminiWs || geminiWs.readyState === WebSocket.CLOSED || geminiWs.readyState === WebSocket.CLOSING) {
+    connectGemini();
+  } else if (geminiConnected && added.length) {
+    // Gemini v2 has no incremental subscribe on an open socket — reconnect to
+    // pick up the wider list (books clear + rebuild from fresh snapshots).
+    try { geminiWs.close(); } catch { /* onclose reconnects with full list */ }
+  }
+}
+
 export function stopBookStreams(): void {
   stopped = true;
   try { krakenWs?.close(); } catch { /* shutdown */ }
   try { coinbaseWs?.close(); } catch { /* shutdown */ }
+  try { geminiWs?.close(); } catch { /* shutdown */ }
 }

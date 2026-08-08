@@ -237,8 +237,9 @@ describe("scanGraphOpportunities — drops routes when books can't fill the size
     fakeNow += 300_000; // jump past the OB 5s REST cache and cross-pair cache TTLs
     vi.useFakeTimers();
     vi.setSystemTime(fakeNow);
-    const { _testOnly_clearCrossCache } = await import("./order-book.js");
+    const { _testOnly_clearCrossCache, _testOnly_clearDynUniverse } = await import("./order-book.js");
     _testOnly_clearCrossCache();
+    _testOnly_clearDynUniverse();
   });
 
   afterEach(() => {
@@ -304,5 +305,121 @@ describe("scanGraphOpportunities — drops routes when books can't fill the size
     const result = await scanGraphOpportunities(100, 0.40, 0.60, 3, "taker");
     const route = result.routes.find(r => r.description === ROUTE);
     expect(route).toBeUndefined();
+  });
+
+  // ── (a) Exact quantity propagation on a synthetic 3-leg book set ───────────
+  //
+  // Hand-computed walk at $100, 0.40% Kraken fee per leg:
+  //   Leg 1  buy BTC on XXBTZUSD asks: spend 100 USD.
+  //          50 @ 50 000 → 0.001 BTC; remaining 50 @ 50 100 → 0.000998004 BTC.
+  //          BTC out = 0.001998004 gross → ×(1-0.004) net = 0.00199001 BTC.
+  //   Leg 2  buy ETH on ETHXBT asks with the ACTUAL 0.00199001 BTC.
+  //          0.05 BTC-per-ETH depth: 0.05 @ 0.05 covers 0.0025 BTC, enough.
+  //          ETH gross = 0.00199001 / 0.05 = 0.0398002; ×(1-0.004) = 0.03964098.
+  //   Leg 3  sell 0.03964098 ETH on ETHUSD bids @ 3 000.
+  //          USD gross = 118.92295; ×(1-0.004) = 118.4473.
+  //   netProfitUsd = 118.4473 − 100 = 18.4473. The KEY assertion: leg 2/3 sizes
+  //   use the PROPAGATED amount, not a USD-mid guess.
+  it("(a) propagates the actual output of each leg (net matches the hand-walk)", async () => {
+    const BOOKS = {
+      // Two ask levels so the propagated BTC amount is NOT a round number the
+      // old USD-mid sizing would have produced.
+      XXBTZUSD: depthResponse("XXBTZUSD", [[50_000, 0.001], [50_100, 1]], [[49_900, 1]]),
+      ETHXBT:   depthResponse("ETHXBT",   [[0.05, 10]],  [[0.049, 10]]),
+      ETHUSD:   depthResponse("ETHUSD",   [[3_010, 100]], [[3_000, 100]]),
+    };
+    vi.stubGlobal("fetch", mockFetch(BOOKS));
+    const result = await scanGraphOpportunities(100, 0.40, 0.60, 3, "taker");
+    const route = result.routes.find(r => r.description === ROUTE)!;
+    expect(route).toBeDefined();
+
+    // Recompute the hand-walk exactly.
+    const fee = 1 - 0.004;
+    const btcGross = 0.001 + (100 - 50) / 50_100; // level1 + partial level2
+    const btc = btcGross * fee;
+    const eth = (btc / 0.05) * fee;
+    const usd = eth * 3_000 * fee;
+    const expectedNet = usd - 100;
+
+    expect(route.netProfitUsd).toBeCloseTo(expectedNet, 9);
+    // Each hop's amountIn must equal the previous hop's amountOut (propagation).
+    expect(route.hops[0]!.amountIn).toBeCloseTo(100, 9);
+    expect(route.hops[1]!.amountIn).toBeCloseTo(route.hops[0]!.amountOut, 12);
+    expect(route.hops[2]!.amountIn).toBeCloseTo(route.hops[1]!.amountOut, 12);
+    expect(route.hops[0]!.amountOut).toBeCloseTo(btc, 12);
+    expect(route.hops[1]!.amountOut).toBeCloseTo(eth, 12);
+    expect(route.hops[2]!.amountOut).toBeCloseTo(usd, 9);
+  });
+
+  // ── (b) Safety buffer is included in the ranked net ────────────────────────
+  it("(b) subtracts the preflight buffer max(0.02, size×0.0005) into netAfterBufferUsd", async () => {
+    vi.stubGlobal("fetch", mockFetch(DEEP));
+    const size = 100;
+    const result = await scanGraphOpportunities(size, 0.40, 0.60, 3, "taker");
+    const route = result.routes.find(r => r.description === ROUTE)!;
+    expect(route).toBeDefined();
+    const expectedBuffer = Math.max(0.02, size * 0.0005); // = 0.05
+    expect(route.safetyBufferUsd).toBeCloseTo(expectedBuffer, 12);
+    expect(route.netAfterBufferUsd).toBeCloseTo(route.netProfitUsd - expectedBuffer, 12);
+    expect(route.netAfterBufferUsd).toBeLessThan(route.netProfitUsd);
+
+    // Tiny size → the 0.02 floor dominates.
+    vi.stubGlobal("fetch", mockFetch(DEEP));
+    const small = await scanGraphOpportunities(1, 0.40, 0.60, 3, "taker");
+    const sr = small.routes.find(r => r.description === ROUTE);
+    if (sr) expect(sr.safetyBufferUsd).toBeCloseTo(0.02, 12);
+  });
+
+  // ── (c) REST-priced routes are research-only ───────────────────────────────
+  // getStreamBook returns null in tests (no WS stream stubbed), so every leg is
+  // priced from the REST fallback → the route can never be executable.
+  it("(c) marks a REST-priced route research-only ('REST/non-stream books')", async () => {
+    vi.stubGlobal("fetch", mockFetch(DEEP));
+    // feesDetected=true so the ONLY remaining reason must be the REST pricing.
+    const result = await scanGraphOpportunities(100, 0.40, 0.60, 3, "taker", true);
+    const route = result.routes.find(r => r.description === ROUTE)!;
+    expect(route).toBeDefined();
+    expect(route.executable).toBe(false);
+    expect(route.researchReason).toMatch(/REST|non-stream|research/i);
+    expect(route.hops.every(h => h.streamed === false)).toBe(true);
+  });
+
+  // ── (d) 4-leg routes are always research-only ──────────────────────────────
+  // USD→BTC→ETH→XRP→USD is a 4-hop cycle. Provide the cross books to form it.
+  it("(d) marks a 4-leg route research-only (unsupported shape)", async () => {
+    // Deep books for BTC/ETH/XRP with BOTH cross legs (ETHXBT, XRPETH, XRPXBT)
+    // so USD→BTC→ETH→XRP→USD (and similar) 4-hop cycles reliably form.
+    const FOUR = {
+      XXBTZUSD: depthResponse("XXBTZUSD", [[50_000, 100]], [[49_900, 100]]),
+      ETHXBT:   depthResponse("ETHXBT",   [[0.05, 1_000]], [[0.049, 1_000]]),
+      XRPETH:   depthResponse("XRPETH",   [[0.0005, 1_000_000]], [[0.00049, 1_000_000]]),
+      XRPXBT:   depthResponse("XRPXBT",   [[0.00001, 100_000_000]], [[0.0000099, 100_000_000]]),
+      XRPUSD:   depthResponse("XRPUSD",   [[0.62, 10_000_000]], [[0.60, 10_000_000]]),
+      ETHUSD:   depthResponse("ETHUSD",   [[3_010, 1_000]], [[3_000, 1_000]]),
+    };
+    vi.stubGlobal("fetch", mockFetch(FOUR));
+    const result = await scanGraphOpportunities(100, 0.40, 0.60, 4, "taker", true);
+    const fourLegs = result.routes.filter(r => r.hops.length === 4);
+    // The book set must produce at least one 4-leg route (guard against a
+    // vacuous test), and EVERY 4-leg route must be research-only.
+    expect(fourLegs.length).toBeGreaterThan(0);
+    for (const r of fourLegs) {
+      expect(r.executable).toBe(false);
+      expect(r.researchReason).toMatch(/4-leg|mixed|unsupported|shape/i);
+    }
+    // No route with hops.length !== 3 may ever be executable.
+    for (const r of result.routes) {
+      if (r.hops.length !== 3) expect(r.executable).toBe(false);
+    }
+  });
+
+  // ── Maker-mode honesty: maker routes are always research-only ──────────────
+  it("marks maker-mode routes research-only ('maker fills not guaranteed')", async () => {
+    vi.stubGlobal("fetch", mockFetch(DEEP));
+    const result = await scanGraphOpportunities(100, 0.16, 0.40, 3, "maker", true);
+    for (const r of result.routes) {
+      expect(r.executable).toBe(false);
+      expect(r.researchReason).toMatch(/maker fills not guaranteed/i);
+    }
   });
 });
