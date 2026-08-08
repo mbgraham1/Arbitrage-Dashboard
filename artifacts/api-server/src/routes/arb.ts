@@ -1356,7 +1356,11 @@ async function runKrakenTriangle(input: TriangleExecInput, reqLog: ReqLog): Prom
           isDryRun: false, krakenPrice: "0", coinbasePrice: "0",
           buyOrderId: (l1Fills.map(f => f.txid).filter(Boolean).join(",") || failCtx.acceptedOrders.filter(o => o.leg === 1).map(o => o.txid).join(",")) || null,
           sellOrderId: (l3Fills.map(f => f.txid).filter(Boolean).join(",") || failCtx.acceptedOrders.filter(o => o.leg === 3).map(o => o.txid).join(",")) || null,
-          status: "failed", realizedProfitUsd: null, legFills: [...failCtx.legFills, ...acceptedOnly],
+          // Zero confirmed fills → nothing moved → realized is exactly $0.
+          // With partial fills the net USD effect is unknown (unwinds aren't
+          // reconciled yet) → null, rendered as "—", never an estimate.
+          realizedProfitUsd: failCtx.legFills.length === 0 ? "0" : null,
+          status: "failed", legFills: [...failCtx.legFills, ...acceptedOnly],
         });
       } catch (e) { reqLog.error(`Failed to write FAILED ledger row: ${(e as Error).message}`); }
     }
@@ -2069,6 +2073,8 @@ router.post("/arb/graph-execute", async (req, res): Promise<void> => {
           buyOrderId: buyOrderId || null,
           sellOrderId: sellOrderId || null,
           status: "failed",
+          // No accepted buy order → nothing filled → realized exactly $0.
+          realizedProfitUsd: buyOrderId ? null : "0",
         });
       } catch (e) { log.error(`Failed to write failure ledger row: ${(e as Error).message}`); }
     };
@@ -3078,6 +3084,7 @@ router.post("/arb/execute-triangular", async (req, res): Promise<void> => {
           isDryRun: false, krakenPrice: "0", coinbasePrice: "0",
           buyOrderId: leg1Id || null, sellOrderId: leg3Id || null,
           status: "failed",
+          realizedProfitUsd: null, // fills/unwinds not reconciled — unknown, never an estimate
         });
       } catch (e) { req.log.error({ e }, "tri FAILED ledger row failed"); }
       await snapshotAccountValue(creds, "post_trade", req.log);
@@ -3550,6 +3557,7 @@ router.get("/trades", async (req, res): Promise<void> => {
     netEdgePct: parseFloat(t.netEdgePct),
     krakenPrice: parseFloat(t.krakenPrice),
     coinbasePrice: parseFloat(t.coinbasePrice),
+    realizedProfitUsd: t.realizedProfitUsd != null ? parseFloat(t.realizedProfitUsd) : null,
     createdAt: t.createdAt.toISOString(),
   })));
 });
@@ -3600,6 +3608,7 @@ router.get("/trades/summary", async (req, res): Promise<void> => {
       netEdgePct: parseFloat(t.netEdgePct),
       krakenPrice: parseFloat(t.krakenPrice),
       coinbasePrice: parseFloat(t.coinbasePrice),
+      realizedProfitUsd: t.realizedProfitUsd != null ? parseFloat(t.realizedProfitUsd) : null,
       createdAt: t.createdAt.toISOString(),
     })),
   });
@@ -4018,6 +4027,7 @@ router.post("/arb/inventory-execute", async (req, res): Promise<void> => {
             isDryRun: false, krakenPrice: "0", coinbasePrice: "0",
             buyOrderId: buyOrderId || null, sellOrderId: sellOrderId || null,
             status: "failed",
+            realizedProfitUsd: filledVolume > 0 ? null : "0",
           });
         } catch { /* best effort */ }
       }

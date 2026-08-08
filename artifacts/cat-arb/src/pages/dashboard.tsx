@@ -2261,7 +2261,10 @@ function TradeHistoryTable() {
               {trades.map((t, i) => {
                 const verified = t.status === "verified";
                 const failed = t.status === "failed";
-                const profit = verified && t.realizedProfitUsd != null ? t.realizedProfitUsd : t.estimatedProfitUsd;
+                // Failed attempts must never display the scanner estimate as
+                // profit: show realized (0 for zero-fill failures) or nothing.
+                const profit = t.realizedProfitUsd != null ? t.realizedProfitUsd
+                  : failed ? null : t.estimatedProfitUsd;
                 const buyPrice = t.buyExchange === "Kraken" ? t.krakenPrice : t.coinbasePrice;
                 const sellPrice = t.sellExchange === "Kraken" ? t.krakenPrice : t.coinbasePrice;
                 return (
@@ -2284,8 +2287,8 @@ function TradeHistoryTable() {
                     <td className="px-3 py-1.5">{Number(t.volume).toFixed(4)} {t.pair ? t.pair.split("/")[0] : "SOL"}</td>
                     <td className="px-3 py-1.5">${Number(buyPrice).toFixed(4)}</td>
                     <td className="px-3 py-1.5">${Number(sellPrice).toFixed(4)}</td>
-                    <td className={cn("px-3 py-1.5 font-bold", profit >= 0 ? "text-success" : "text-destructive")}>
-                      {profit >= 0 ? "+" : ""}${profit.toFixed(4)}
+                    <td className={cn("px-3 py-1.5 font-bold", profit != null && profit >= 0 ? "text-success" : profit != null ? "text-destructive" : "text-muted-foreground")}>
+                      {profit == null ? "—" : `${profit >= 0 ? "+" : ""}$${profit.toFixed(4)}${!verified ? " est." : ""}`}
                     </td>
                     <td className="px-3 py-1.5 text-muted-foreground max-w-[160px] truncate">
                       {[t.buyOrderId, t.sellOrderId].filter(Boolean).join(" / ") || "—"}

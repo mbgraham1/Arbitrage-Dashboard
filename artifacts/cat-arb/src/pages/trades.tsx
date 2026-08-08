@@ -202,7 +202,8 @@ export default function Trades() {
                     <th className="px-4 py-3 text-left font-bold uppercase text-xs">Route</th>
                     <th className="px-4 py-3 text-right font-bold uppercase text-xs">Volume</th>
                     <th className="px-4 py-3 text-right font-bold uppercase text-xs">Net Edge</th>
-                    <th className="px-4 py-3 text-right font-bold uppercase text-xs">Profit (USD)</th>
+                    <th className="px-4 py-3 text-right font-bold uppercase text-xs">Expected (USD)</th>
+                    <th className="px-4 py-3 text-right font-bold uppercase text-xs">Realized (USD)</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y-2 divide-border">
@@ -258,21 +259,24 @@ export default function Trades() {
                           {trade.netEdgePct.toFixed(3)}%
                         </span>
                       </td>
-                      <td className="px-4 py-3 text-right font-bold">
-                        {verified && trade.realizedProfitUsd != null ? (
+                      <td className="px-4 py-3 text-right text-muted-foreground" title="Scanner expectation at execution time — never counted as profit">
+                        ~${trade.estimatedProfitUsd.toFixed(2)}
+                      </td>
+                      <td className="px-4 py-3 text-right font-bold" data-testid={`text-realized-${trade.id}`}>
+                        {trade.realizedProfitUsd != null ? (
                           <span className={cn(trade.realizedProfitUsd > 0 ? "text-success" : trade.realizedProfitUsd < 0 ? "text-destructive" : "")}>
                             ${trade.realizedProfitUsd.toFixed(4)}
                           </span>
+                        ) : failed ? (
+                          <span className="text-muted-foreground" title="Partial fills occurred — net effect not reconciled">—</span>
                         ) : (
-                          <span className="text-muted-foreground" title="Estimate only — not verified realized profit">
-                            ~${trade.estimatedProfitUsd.toFixed(2)}
-                          </span>
+                          <span className="text-muted-foreground" title="No confirmed fill data — nothing realized">—</span>
                         )}
                       </td>
                     </tr>
                     {expanded && (
                       <tr className="bg-muted/20">
-                        <td colSpan={7} className="px-6 py-3 text-xs">
+                        <td colSpan={8} className="px-6 py-3 text-xs">
                           {fills.length > 0 ? (
                             <div className="flex flex-col gap-1">
                               <span className="font-bold uppercase text-[10px] text-muted-foreground">Confirmed exchange fills</span>
