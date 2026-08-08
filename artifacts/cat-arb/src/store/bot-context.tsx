@@ -125,7 +125,7 @@ const EMPTY_CREDS: ExchangeCredentials = {
 
 const DEFAULT_SETTINGS: BotSettings = {
   minNetEdge: 0.05,    // v8: limit orders catch smaller spreads
-  minProfitUsd: 1.00,  // v11: minimum $1.00 estimated net profit to execute
+  minProfitUsd: 0.05,  // trader-tuned: $0.05 floor — filters weak edges while letting small taker-viable edges fire
   maxDailyLoss: 25.00, // v11: halt if cumulative loss exceeds $25.00
   totalFees: 0.56,     // v8: Kraken maker 0.16% + Coinbase maker 0.40%
   slippage: 0.05,      // v8: limit orders have near-zero slippage
@@ -195,6 +195,11 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
   const settings: BotSettings = needsMigration
     ? DEFAULT_SETTINGS
     : { ...DEFAULT_SETTINGS, ...storedSettingsClean };
+  // One-time targeted migration: the old default min-profit floor was $1.00,
+  // which silently blocked every small edge. If the stored value is exactly
+  // the old default (i.e. the trader never customized it away from $1.00),
+  // adopt the new $0.05 floor.
+  if (settings.minProfitUsd === 1.00) settings.minProfitUsd = 0.05;
   const setSettings = (s: BotSettings) => setStoredSettingsRaw({ ...s, _v: SETTINGS_VERSION });
 
   // Run migration once on mount

@@ -724,6 +724,11 @@ interface TriangleExecInput {
   makerTimeoutMs?: number;
   /** Max leg-1 maker reprices before abandoning the route (default 4). */
   maxReprices?: number;
+  /** Trader-directed: when leg-1 maker doesn't fill in its window, go taker
+   *  IMMEDIATELY without the taker-priced profit-floor gate. WARNING: a
+   *  decayed edge will execute at whatever the fresh taker price gives —
+   *  possibly a loss. Never applies when the fresh pre-flight is unavailable. */
+  alwaysTakerFallback?: boolean;
   /** Caller ALREADY holds the live execution lock with this generation token.
    *  Skip the internal acquire (which would see the caller's own lock and
    *  self-block) — the caller releases it. */
@@ -1143,8 +1148,16 @@ async function runKrakenTriangle(input: TriangleExecInput, reqLog: ReqLog): Prom
         }
         const takerFeePct = tiers?.takerFeePct ?? effectiveFeesPct;
         const freshTaker = await preflightObCycle(assetA as ObAsset, assetB as ObAsset, tradeSizeUsd, takerFeePct, "taker");
-        if (freshTaker && freshTaker.profitUsd > threshold) {
-          log.info(`leg1 taker fallback firing — taker-priced net $${freshTaker.profitUsd.toFixed(4)} > floor $${threshold.toFixed(4)}`);
+        // Trader-directed "always taker" mode skips the profit-floor gate but
+        // STILL requires a fresh taker pre-flight (books must be readable) —
+        // firing blind into an unreadable book is never authorized.
+        const fireAnyway = input.alwaysTakerFallback === true && !!freshTaker;
+        if (freshTaker && (freshTaker.profitUsd > threshold || fireAnyway)) {
+          if (freshTaker.profitUsd > threshold) {
+            log.info(`leg1 taker fallback firing — taker-priced net $${freshTaker.profitUsd.toFixed(4)} > floor $${threshold.toFixed(4)}`);
+          } else {
+            log.info(`leg1 taker fallback firing (ALWAYS-TAKER override) — taker-priced net $${freshTaker.profitUsd.toFixed(4)} is BELOW floor $${threshold.toFixed(4)}; trader accepted fill-over-floor risk`);
+          }
           const m = await marketFill(1, "leg1", l1.side, l1.volume - aHeld, l1.pair);
           aHeld += m.volExec; usdSpent += m.cost + m.fee; totalFees += m.fee;
           leg1Id = [leg1Id, m.txid].filter(Boolean).join(",");
@@ -1943,9 +1956,13 @@ router.post("/arb/graph-execute", async (req, res): Promise<void> => {
         assetA: asset(route.hops[0]!.to),
         assetB: asset(route.hops[1]!.to),
         tradeSizeUsd, feesPct: krakenFeesPct, minProfitUsd, isDryRun,
-        makerTimeoutMs: probeAttempt ? PROBE_MAKER_TIMEOUT_MS : undefined,
+        makerTimeoutMs: probeAttempt
+          ? PROBE_MAKER_TIMEOUT_MS
+          // Clamp trader-supplied maker window to 1–30s.
+          : parsed.data.makerTimeoutMs != null ? Math.min(30_000, Math.max(1_000, Math.round(parsed.data.makerTimeoutMs))) : undefined,
         // Clamp: 1..10 reprices — never trust client numbers for live orders.
         maxReprices: Math.min(10, Math.max(1, Math.round(parsed.data.maxReprices ?? 4))),
+        alwaysTakerFallback: parsed.data.alwaysTakerFallback === true,
         heldLockGen: lockGen ?? undefined, // graph-execute already holds the live lock
       }, req.log);
       if (out.badRequest) { res.status(400).json({ error: out.badRequest }); return; }

@@ -571,6 +571,7 @@ export const graphExecuteBodyIsDryRunDefault = true;
 export const graphExecuteBodyExecutionStyleDefault = `taker`;
 export const graphExecuteBodyForceModeDefault = false;
 export const graphExecuteBodyMaxRepricesDefault = 4;
+export const graphExecuteBodyAlwaysTakerFallbackDefault = false;
 
 export const GraphExecuteBody = zod.object({
   "krakenKey": zod.string(),
@@ -585,7 +586,9 @@ export const GraphExecuteBody = zod.object({
   "isDryRun": zod.boolean().default(graphExecuteBodyIsDryRunDefault),
   "executionStyle": zod.enum(['taker', 'maker']).default(graphExecuteBodyExecutionStyleDefault),
   "forceMode": zod.boolean().default(graphExecuteBodyForceModeDefault).describe('FORCE MODE — skip the fill-rate feedback gate, historical-shortfall penalty, and consecutive-failure blacklist entirely. Fresh pre-flight profit gates (net profit minus slippage buffer > minProfitUsd) still apply; this never authorizes a trade the live re-quote says is unprofitable.\n'),
-  "maxReprices": zod.number().default(graphExecuteBodyMaxRepricesDefault).describe('Max leg-1 maker reprices (cancel + re-place at the freshest aggressive maker price, pre-flight re-run each time) before the route is abandoned so execution falls through to the next-best one.\n')
+  "maxReprices": zod.number().default(graphExecuteBodyMaxRepricesDefault).describe('Max leg-1 maker reprices (cancel + re-place at the freshest aggressive maker price, pre-flight re-run each time) before the route is abandoned so execution falls through to the next-best one.\n'),
+  "makerTimeoutMs": zod.number().optional().describe('Per-leg maker fill window in ms (clamped 1000–30000 server-side). Lower = faster taker fallback; default derives from maxReprices.\n'),
+  "alwaysTakerFallback": zod.boolean().default(graphExecuteBodyAlwaysTakerFallbackDefault).describe('Trader-directed — when the leg-1 maker order doesn\'t fill in its window, fire the taker fallback immediately WITHOUT the taker-priced profit-floor gate. A decayed edge will execute at the fresh taker price, possibly at a loss. Still requires a readable fresh order book.\n')
 })
 
 export const GraphExecuteResponse = zod.object({

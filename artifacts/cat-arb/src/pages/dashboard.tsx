@@ -1621,6 +1621,10 @@ function GraphEngineCard() {
   // Maker style: post-only limit orders — better prices + maker fee, but no
   // fill guarantee. Taker style: market orders priced by depth-walked VWAP.
   const [style, setStyle] = useState<"taker" | "maker">("taker");
+  // Fast-fill mode (trader-directed): 3s maker window, a single reprice, then
+  // an UNGATED taker fallback — fills small edges instead of cancelling them,
+  // at the cost of occasionally eating a decayed edge at taker prices.
+  const [fastTakerFallback, setFastTakerFallback] = useLocalStorage<boolean>("graph-fast-taker-fallback", true);
   const fees = useActualKrakenFees();
   const actualFee = style === "maker" ? (fees.maker ?? fees.taker) : fees.taker;
   const params = {
@@ -1678,6 +1682,7 @@ function GraphEngineCard() {
             isDryRun: !liveMode,
             executionStyle: style,
             forceMode: forceMode && liveMode,
+            ...(fastTakerFallback ? { maxReprices: 1, makerTimeoutMs: 3_000, alwaysTakerFallback: true } : {}),
           },
         });
         if (r.success && r.executed) {
@@ -1828,6 +1833,19 @@ function GraphEngineCard() {
               : "TAKER: market orders — guaranteed fill, priced by depth-walked VWAP incl. slippage"}
           >
             {style.toUpperCase()}
+          </button>
+          <button
+            onClick={() => setFastTakerFallback(v => !v)}
+            data-testid="button-fast-taker"
+            className={cn(
+              "text-[10px] font-mono font-bold px-1.5 py-0.5 border",
+              fastTakerFallback ? "border-primary text-primary" : "border-border text-muted-foreground",
+            )}
+            title={fastTakerFallback
+              ? "FAST FILL ON: 3s maker window, 1 reprice, then IMMEDIATE taker fallback with NO profit-floor gate — a decayed edge can fill at a small loss. Turn off to restore patient maker execution with the gated fallback."
+              : "FAST FILL OFF: patient maker execution — up to 4 reprices, taker fallback only if the fresh taker-priced edge still clears your floor."}
+          >
+            {fastTakerFallback ? "FAST·FILL" : "PATIENT"}
           </button>
           <button
             onClick={() => setAutoArmed(a => !a)}

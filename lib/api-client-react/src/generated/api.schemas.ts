@@ -681,6 +681,10 @@ export interface GraphExecuteRequest {
   forceMode?: boolean;
   /** Max leg-1 maker reprices (cancel + re-place at the freshest aggressive maker price, pre-flight re-run each time) before the route is abandoned so execution falls through to the next-best one. */
   maxReprices?: number;
+  /** Per-leg maker fill window in ms (clamped 1000–30000 server-side). Lower = faster taker fallback; default derives from maxReprices. */
+  makerTimeoutMs?: number;
+  /** Trader-directed — when the leg-1 maker order doesn't fill in its window, fire the taker fallback immediately WITHOUT the taker-priced profit-floor gate. A decayed edge will execute at the fresh taker price, possibly at a loss. Still requires a readable fresh order book. */
+  alwaysTakerFallback?: boolean;
 }
 
 export interface RouteHistoryClearResult {
