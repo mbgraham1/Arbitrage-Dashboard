@@ -19,6 +19,8 @@ export interface TwoXRouteDecision {
   slippageUsd?: number | null;
   bufferUsd?: number;
   netProfitUsd?: number | null;
+  /** netProfitUsd minus the safety buffer — the unified display net used across all cards */
+  netAfterBufferUsd?: number | null;
   baseQty?: number | null;
   quoteAgeMs?: number | null;
   legs?: TwoXRouteDecisionLegsItem[] | null;

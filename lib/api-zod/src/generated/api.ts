@@ -713,6 +713,7 @@ export const Get2xScanResponse = zod.object({
   "slippageUsd": zod.number().nullish(),
   "bufferUsd": zod.number().optional(),
   "netProfitUsd": zod.number().nullish(),
+  "netAfterBufferUsd": zod.number().nullish().describe('netProfitUsd minus the safety buffer — the unified display net used across all cards'),
   "baseQty": zod.number().nullish(),
   "quoteAgeMs": zod.number().nullish(),
   "legs": zod.array(zod.object({
@@ -735,6 +736,7 @@ export const Get2xScanResponse = zod.object({
   "slippageUsd": zod.number().nullish(),
   "bufferUsd": zod.number().optional(),
   "netProfitUsd": zod.number().nullish(),
+  "netAfterBufferUsd": zod.number().nullish().describe('netProfitUsd minus the safety buffer — the unified display net used across all cards'),
   "baseQty": zod.number().nullish(),
   "quoteAgeMs": zod.number().nullish(),
   "legs": zod.array(zod.object({
@@ -810,6 +812,7 @@ export const Execute2xResponse = zod.object({
   "slippageUsd": zod.number().nullish(),
   "bufferUsd": zod.number().optional(),
   "netProfitUsd": zod.number().nullish(),
+  "netAfterBufferUsd": zod.number().nullish().describe('netProfitUsd minus the safety buffer — the unified display net used across all cards'),
   "baseQty": zod.number().nullish(),
   "quoteAgeMs": zod.number().nullish(),
   "legs": zod.array(zod.object({
@@ -948,6 +951,11 @@ export const MmScanBody = zod.object({
 })
 
 export const MmScanResponse = zod.object({
+  "gateSummary": zod.object({
+  "status": zod.string().optional(),
+  "detail": zod.string().optional(),
+  "maxQuoteAgeMs": zod.number().optional()
+}).optional().describe('Why routes do\/don\'t qualify — EXECUTABLE | NO_EDGE | BLOCKED_BY_FEES | STALE_DATA | INSUFFICIENT_INVENTORY | BELOW_FLOOR'),
   "sizeUsd": zod.number().optional(),
   "floorUsd": zod.number().optional(),
   "bufferUsd": zod.number().optional(),

@@ -609,6 +609,8 @@ export interface TwoXRouteDecision {
   slippageUsd?: number | null;
   bufferUsd?: number;
   netProfitUsd?: number | null;
+  /** netProfitUsd minus the safety buffer — the unified display net used across all cards */
+  netAfterBufferUsd?: number | null;
   baseQty?: number | null;
   quoteAgeMs?: number | null;
   legs?: TwoXRouteDecisionLegsItem[] | null;
@@ -812,6 +814,15 @@ export interface MmScanRow {
   autoExecutable?: boolean;
 }
 
+/**
+ * Why routes do/don't qualify — EXECUTABLE | NO_EDGE | BLOCKED_BY_FEES | STALE_DATA | INSUFFICIENT_INVENTORY | BELOW_FLOOR
+ */
+export type MmScanResultGateSummary = {
+  status?: string;
+  detail?: string;
+  maxQuoteAgeMs?: number;
+};
+
 export type MmScanResultFees = {
   coinbaseMakerPct?: number;
   coinbaseTakerPct?: number;
@@ -827,6 +838,8 @@ export type MmScanResultBalances = {
 };
 
 export interface MmScanResult {
+  /** Why routes do/don't qualify — EXECUTABLE | NO_EDGE | BLOCKED_BY_FEES | STALE_DATA | INSUFFICIENT_INVENTORY | BELOW_FLOOR */
+  gateSummary?: MmScanResultGateSummary;
   sizeUsd?: number;
   floorUsd?: number;
   bufferUsd?: number;

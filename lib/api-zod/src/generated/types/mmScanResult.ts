@@ -7,9 +7,12 @@
  */
 import type { MmScanResultBalances } from './mmScanResultBalances';
 import type { MmScanResultFees } from './mmScanResultFees';
+import type { MmScanResultGateSummary } from './mmScanResultGateSummary';
 import type { MmScanRow } from './mmScanRow';
 
 export interface MmScanResult {
+  /** Why routes do/don't qualify — EXECUTABLE | NO_EDGE | BLOCKED_BY_FEES | STALE_DATA | INSUFFICIENT_INVENTORY | BELOW_FLOOR */
+  gateSummary?: MmScanResultGateSummary;
   sizeUsd?: number;
   floorUsd?: number;
   bufferUsd?: number;

@@ -96,7 +96,18 @@ function loadState(): void {
     const j = JSON.parse(fs.readFileSync(STATE_FILE, "utf8")) as { hunter?: typeof hunter; stats?: OppStat[] };
     if (j.stats) stats = new Map(j.stats.map(s => [s.key, s]));
     if (j.hunter) {
-      Object.assign(hunter, j.hunter, { running: false, stopReason: j.hunter.running ? "server restarted mid-run — press start to resume (evidence kept)" : j.hunter.stopReason });
+      const wasRunning = j.hunter.running && j.hunter.endsAt && Date.now() < Date.parse(j.hunter.endsAt);
+      Object.assign(hunter, j.hunter, { running: false, stopReason: j.hunter.running && !wasRunning ? "24h window elapsed during downtime — report is ready" : j.hunter.stopReason });
+      if (wasRunning) {
+        // AUTO-RESUME: the 24h window is still open — continue sampling.
+        // Credentials never persist, so the resumed run uses labeled assumed
+        // fees until the user restarts it with keys.
+        hunter.running = true;
+        hunter.feeSource = "assumed";
+        hunter.stopReason = null;
+        hunter.errors.unshift(`${new Date().toISOString()} server restarted — hunt auto-resumed WITHOUT keys (evidence kept; restart with keys for balance-verified rows)`);
+        timer = setInterval(() => { void sampleTick(); }, TICK_MS);
+      }
     }
   } catch { /* start fresh */ }
 }
@@ -293,7 +304,7 @@ async function sampleTick(): Promise<void> {
       });
     }
 
-    if (hunter.ticks % 10 === 0) saveState();
+    saveState(); // every tick — a restart may never silently lose more than ~30s of evidence
   } catch (e) {
     hunter.errors.unshift(`${new Date().toISOString()} ${(e as Error).message.slice(0, 100)}`);
     if (hunter.errors.length > 10) hunter.errors.length = 10;

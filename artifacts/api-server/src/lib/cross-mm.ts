@@ -222,6 +222,7 @@ export interface TakerProjection {
   buyFeeUsd: number; sellFeeUsd: number;
   slippageUsd: number;
   projectedNetUsd: number;
+  legAges: LegAge[];
   quoteAgeMs: number;
 }
 
@@ -260,6 +261,10 @@ export function projectTakerTaker(
     grossEdgeUsd: (sellTop - buyTop) * qty,
     buyFeeUsd, sellFeeUsd, slippageUsd,
     projectedNetUsd: s.usd - b.usd - buyFeeUsd - sellFeeUsd,
+    legAges: [
+      { pair: `${OB_USD_PAIRS[asset]}[K]`, ageMs: kBook.ageMs, recvAgeMs: Math.max(0, Date.now() - kBook.updatedAtMs) },
+      { pair: `${asset}-USD[C]`, ageMs: cBook.ageMs, recvAgeMs: Math.max(0, Date.now() - cBook.updatedAtMs) },
+    ],
     quoteAgeMs: Math.max(kBook.ageMs, cBook.ageMs),
   };
 }

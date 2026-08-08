@@ -73,7 +73,12 @@ const POLL_MS = 700;
 const TERMINAL_WAIT_MS = 25_000;
 const DEFAULT_REST_WINDOW_SEC = 30;
 const MAX_REST_WINDOW_SEC = 120;
-const DEFAULT_MAX_QUOTE_AGE_MS = 500;
+// User's strict rule: "Default freshness window: 200 ms. If any required leg
+// is older than 200 ms, the entire route is stale. Do not execute."
+const DEFAULT_MAX_QUOTE_AGE_MS = 200;
+/** Scanner vs pre-fire tolerance on the SAME snapshot ($). Beyond this we
+ *  refuse to fire and log PRICING CONSISTENCY ERROR. */
+const CONSISTENCY_TOLERANCE_USD = 0.005;
 const SIZE_USD_CAP = 10; // HARD cap — never auto-scaled
 
 // Profit floor: configurable, DEFAULT $0.01 net after ALL costs (maker fee,
@@ -119,25 +124,14 @@ async function ledgerRow(o: {
 // ── Fee & balance caches (bounded staleness, keyed by key material) ──────────
 const FEE_CACHE_MS = 10 * 60_000;
 const BAL_CACHE_MS = 20_000;
-export type Fees = { cbMakerPct: number; cbTakerPct: number; kTakerPct: number; kMakerPct: number | null; detectedAt: number };
+import { detectFees, type Fees } from "../lib/fees";
+export type { Fees };
 const feeCache = new Map<string, Fees>();
 export type Balances = { kUsd: number; cbUsd: number; kAssets: Map<string, number>; cbAssets: Map<string, number>; fetchedAt: number };
 const balCache = new Map<string, Balances>();
 const credKey = (c: Creds) => `${c.krakenKey}:${c.coinbaseKey}`;
 
-export async function detectFees(creds: Creds): Promise<Fees> {
-  const k = credKey(creds);
-  const hit = feeCache.get(k);
-  if (hit && Date.now() - hit.detectedAt < FEE_CACHE_MS) return hit;
-  const [kTier, cbTier] = await Promise.all([
-    krakenFeeTiers(creds, [OB_USD_PAIRS.ETH, OB_USD_PAIRS.BTC]),
-    getCoinbaseFeeTier(creds),
-  ]);
-  if (!kTier) throw new Error("Kraken fee tier unavailable");
-  const f: Fees = { cbMakerPct: cbTier.makerFeePct, cbTakerPct: cbTier.takerFeePct, kTakerPct: kTier.takerFeePct, kMakerPct: kTier.makerFeePct, detectedAt: Date.now() };
-  feeCache.set(k, f);
-  return f;
-}
+export { detectFees };
 
 export function krakenCodesFor(asset: string): string[] {
   if (asset === "BTC") return ["XXBT", "XBT", "BTC"];
@@ -369,10 +363,32 @@ async function runCbMmCycle(b: CycleParams, log: Logger): Promise<CycleResult> {
     if (!candidates.length) return finish("skipped", "no live depth books on one/both venues (or depth cannot absorb the hedge)");
     const proj = candidates.reduce((a, c) => (c.projectedNetUsd > a.projectedNetUsd ? c : a));
     const projInfo = { direction: proj.direction, makerPrice: proj.makerPrice, makerQty: proj.makerQty, projectedNetUsd: proj.projectedNetUsd, makerFeeUsd: proj.makerFeeUsd, hedgeFeeUsd: proj.hedgeFeeUsd, hedgeVwapPx: proj.hedgeVwapPx, hedgeSlippageUsd: proj.hedgeSlippageUsd, quoteAgeMs: proj.quoteAgeMs, cbMakerPct, kTakerPct, minNetUsd, bufferUsd };
-    if (proj.quoteAgeMs > maxQuoteAgeMs) return finish("skipped", `books stale: oldest leg ${proj.quoteAgeMs}ms > ${maxQuoteAgeMs}ms`, { projection: projInfo });
+
+    // DECISION LOG — before every decision: each market's age, route age
+    // (oldest leg), scanner net, executable net, and the profit floor.
+    log.info({
+      asset, decision: "pre-fire",
+      legAges: proj.legAges.map(l => ({ market: l.pair, ageMs: l.ageMs, recvAgeMs: l.recvAgeMs })),
+      routeAgeMs: proj.quoteAgeMs,
+      scannerNetUsd: proj.projectedNetUsd,
+      executableNetUsd: proj.projectedNetUsd, // identical function+books at this instant; divergence re-checked below
+      profitFloorUsd: minNetUsd, bufferUsd, maxQuoteAgeMs,
+    }, "[MM2] decision");
+    if (proj.quoteAgeMs > maxQuoteAgeMs) return finish("skipped", `books stale: oldest leg ${proj.quoteAgeMs}ms > ${maxQuoteAgeMs}ms — entire route treated as stale, not executing`, { projection: projInfo });
     if (proj.projectedNetUsd < minNetUsd + bufferUsd) {
       return finish("skipped", `projected net $${proj.projectedNetUsd.toFixed(4)} below floor $${minNetUsd.toFixed(2)} + buffer $${bufferUsd.toFixed(2)}`, { projection: projInfo });
     }
+    // PRE-FIRE CONSISTENCY — an immediate second re-projection of the same
+    // route with the identical function on the live stream books (not an
+    // immutable snapshot). If two consecutive reads disagree beyond a tiny
+    // tolerance, the books are moving mid-decision: block execution.
+    const recheck = projectCbMakerHedge(asset, proj.direction, sizeUsd, cbMakerPct, kTakerPct);
+    if (!recheck) return finish("skipped", "PRICING CONSISTENCY ERROR: pre-fire re-projection lost the books — not executing", { projection: projInfo });
+    if (Math.abs(recheck.projectedNetUsd - proj.projectedNetUsd) > CONSISTENCY_TOLERANCE_USD) {
+      log.error({ asset, scannerNetUsd: proj.projectedNetUsd, preFireNetUsd: recheck.projectedNetUsd, toleranceUsd: CONSISTENCY_TOLERANCE_USD }, "[MM2] PRICING CONSISTENCY ERROR");
+      return finish("skipped", `PRICING CONSISTENCY ERROR: scanner net $${proj.projectedNetUsd.toFixed(4)} vs pre-fire net $${recheck.projectedNetUsd.toFixed(4)} diverged beyond $${CONSISTENCY_TOLERANCE_USD} between consecutive re-projections — not executing`, { projection: projInfo });
+    }
+    if (recheck.quoteAgeMs > maxQuoteAgeMs) return finish("skipped", `books went stale during consistency check (${recheck.quoteAgeMs}ms > ${maxQuoteAgeMs}ms)`, { projection: projInfo });
     const direction = proj.direction;
 
     // 3. Inventory precheck for BOTH legs before any order.
@@ -606,7 +622,34 @@ router.post("/arb/mm-scan", async (req, res): Promise<void> => {
   try { bal = await fetchBalances(b); }
   catch (e) { res.status(502).json({ error: `balance fetch failed: ${(e as Error).message}` }); return; }
   const rows = scanAll(fees, bal, floorUsd, bufferUsd, DEFAULT_MAX_QUOTE_AGE_MS);
+  // Gate summary — distinguish WHY nothing qualifies (honest taxonomy).
+  const avail = rows.filter(r => r.available && r.projectedNetUsd != null);
+  const positives = avail.filter(r => (r.projectedNetUsd ?? 0) > 0);
+  const runnable = rows.filter(r => r.verdict === "RUN");
+  let gateStatus: string, gateDetail: string;
+  if (runnable.length > 0) {
+    gateStatus = "EXECUTABLE";
+    gateDetail = `${runnable.length} route(s) clear the full gate right now`;
+  } else if (avail.length === 0) {
+    gateStatus = "STALE_DATA";
+    gateDetail = "no live books fresh enough to price any route";
+  } else if (positives.length === 0) {
+    const bestRow = avail[0];
+    const feeUsd = (bestRow?.makerFeeUsd ?? 0) + (bestRow?.hedgeFeeUsd ?? 0);
+    const gross = bestRow?.grossEdgeUsd ?? 0;
+    gateStatus = gross > 0 && feeUsd > gross ? "BLOCKED_BY_FEES" : "NO_EDGE";
+    gateDetail = gross > 0 && feeUsd > gross
+      ? `best gross edge $${gross.toFixed(4)} exists but fees $${feeUsd.toFixed(4)} exceed it — fee tier is the blocker`
+      : "no positive gross edge exists on current books — the market is simply too tight";
+  } else {
+    const inv = positives.filter(r => !r.inventoryReady);
+    const stale = positives.filter(r => r.inventoryReady && (r.quoteAgeMs ?? 0) > DEFAULT_MAX_QUOTE_AGE_MS);
+    if (inv.length === positives.length) { gateStatus = "INSUFFICIENT_INVENTORY"; gateDetail = `${inv.length} positive route(s) blocked only by inventory: ${inv[0]?.inventoryReason ?? ""}`; }
+    else if (stale.length > 0) { gateStatus = "STALE_DATA"; gateDetail = `${stale.length} positive route(s) blocked by the 200ms freshness rule`; }
+    else { gateStatus = "BELOW_FLOOR"; gateDetail = `positive nets exist but none clears floor $${floorUsd.toFixed(2)} + buffer $${bufferUsd.toFixed(2)}`; }
+  }
   res.json({
+    gateSummary: { status: gateStatus, detail: gateDetail, maxQuoteAgeMs: DEFAULT_MAX_QUOTE_AGE_MS },
     sizeUsd: SIZE_USD_CAP, floorUsd, bufferUsd, requiredNetUsd: floorUsd + bufferUsd,
     fees: { coinbaseMakerPct: fees.cbMakerPct, coinbaseTakerPct: fees.cbTakerPct, krakenTakerPct: fees.kTakerPct, krakenMakerPct: fees.kMakerPct, detectedAt: new Date(fees.detectedAt).toISOString() },
     balances: { krakenUsd: bal.kUsd, coinbaseUsd: bal.cbUsd, fetchedAt: new Date(bal.fetchedAt).toISOString() },

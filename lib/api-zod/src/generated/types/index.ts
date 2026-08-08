@@ -94,6 +94,7 @@ export * from './mmScanRequest';
 export * from './mmScanResult';
 export * from './mmScanResultBalances';
 export * from './mmScanResultFees';
+export * from './mmScanResultGateSummary';
 export * from './mmScanRow';
 export * from './obCycleEntry';
 export * from './obCycleEntryStatus';

@@ -62,7 +62,8 @@ import { getBestPairPrices, getTriPrices, getBtcTriPrices, scanAllPairs, getPair
 import { scanOrderBookCycles, preflightObCycle, discoverCrossPairs, freshJoinPrice, makerQuote, takerCycleBreakdown, cachedTakerCycleBreakdown, getEventScan, krakenStreamStats, getStreamBook, waitForBookTouch, formatLegAges, OB_ASSETS, OB_USD_PAIRS, CROSS_LOOKUP, type ObAsset } from "../lib/order-book";
 import { scanGraphOpportunities } from "../lib/graph-engine";
 import { crossTakerBreakdown } from "../lib/cross-pricing";
-import { projectMakerHedge, bestMakerHedgeProjection, type MmProjection, type MmDirection } from "../lib/cross-mm";
+import { projectMakerHedge, bestMakerHedgeProjection, projectTakerTaker, type MmProjection, type MmDirection } from "../lib/cross-mm";
+import { detectFees as detectRealFees } from "../lib/fees";
 import { coinbaseBookKey, coinbaseStreamStats, getCoinbaseStreamBook } from "../lib/book-stream";
 import { createPairHistory, updatePairHistory, type PairHistory } from "../lib/kalman";
 import { waitForTriLimitFill } from "../lib/tri-fill.js";
@@ -4843,16 +4844,22 @@ router.get("/arb/inventory-scan", async (req, res): Promise<void> => {
 
       const [kba, cba] = result.value;
 
-      // Best direction: buy cheaper, sell more expensive
-      const kToC = ((cba.bid - kba.ask) / kba.ask) * 100; // buy kraken, sell coinbase
-      const cToK = ((kba.bid - cba.ask) / cba.ask) * 100; // buy coinbase, sell kraken
-      const useKraken = kToC >= cToK;
-      const grossSpreadPct = useKraken ? kToC : cToK;
-      const netSpreadPct = grossSpreadPct - totalFees;
+      // Depth-walked, buffer-inclusive projection on the live stream snapshot —
+      // IDENTICAL math to the executor (projectTakerTaker), so the preview can
+      // never show a net the executor wouldn't compute. Falls back to marking
+      // the row unavailable when depth/books are missing (never top-of-book).
+      const bufUsd = 0.02 * (tradeSizeUsd / 10);
+      const pKtoC = projectTakerTaker(asset as ObAsset, "kraken", tradeSizeUsd, krakenFeesPct, coinbaseFeesPct);
+      const pCtoK = projectTakerTaker(asset as ObAsset, "coinbase", tradeSizeUsd, coinbaseFeesPct, krakenFeesPct);
+      const best = [pKtoC, pCtoK].filter(Boolean).sort((a, b) => b!.projectedNetUsd - a!.projectedNetUsd)[0] ?? null;
+      if (!best) continue; // no live depth — do not fabricate a preview from REST top-of-book
+      const useKraken = best === pKtoC;
+      const grossSpreadPct = (best.grossEdgeUsd / tradeSizeUsd) * 100;
+      const estimatedNetProfitUsd = best.projectedNetUsd - bufUsd; // buffer-inclusive, like every other card
+      const netSpreadPct = (estimatedNetProfitUsd / tradeSizeUsd) * 100;
       const buyPrice  = useKraken ? kba.ask : cba.ask;
       const sellPrice = useKraken ? cba.bid : kba.bid;
-      const volume = tradeSizeUsd / buyPrice;
-      const estimatedNetProfitUsd = (netSpreadPct / 100) * tradeSizeUsd;
+      const volume = best.qty;
 
       opportunities.push({
         asset, pair,
@@ -4864,7 +4871,7 @@ router.get("/arb/inventory-scan", async (req, res): Promise<void> => {
         buyPrice, sellPrice,
         tradeSizeUsd,
         estimatedNetProfitUsd,
-        meetsThreshold: grossSpreadPct > threshold,
+        meetsThreshold: estimatedNetProfitUsd > 0,
         scannedAt,
       });
       void volume; // used for display only; actual fill volume is determined at execution
@@ -4948,19 +4955,89 @@ router.post("/arb/inventory-execute", async (req, res): Promise<void> => {
   let lockGen: number | null = null;
 
   try {
-    // 1. Fresh quote (bypasses WS cache)
+    // 1. DETECTED fees for live runs — never trade on user-typed assumptions.
+    let realKFee = krakenFeesPct, realCFee = coinbaseFeesPct;
+    if (!isDryRun) {
+      try {
+        const f = await detectRealFees({ krakenKey, krakenSecret, coinbaseKey, coinbaseSecret });
+        realKFee = f.kTakerPct; realCFee = f.cbTakerPct;
+      } catch (e) {
+        res.status(502).json({ error: `could not detect REAL fee tiers (refusing to trade on assumed fees): ${(e as Error).message}` });
+        return;
+      }
+    }
+    // 2. Depth-walked projection on the live stream snapshot — the SAME math
+    //    and snapshot source the rest of the app executes on. Top-of-book
+    //    REST quotes are display-only below.
     const [kba, cba] = await Promise.all([getKrakenBidAsk(pair), getCoinbaseBidAsk(pair)]);
-    const kToC = ((cba.bid - kba.ask) / kba.ask) * 100;
-    const cToK = ((kba.bid - cba.ask) / cba.ask) * 100;
-    const useKraken = kToC >= cToK;
-    const grossSpreadPct = useKraken ? kToC : cToK;
-    const netSpreadPct   = grossSpreadPct - totalFees;
+    const bufUsd = isDryRun ? 0 : 0.02 * (tradeSizeUsd / 10);
+    const MAX_ROUTE_AGE_MS = 200; // strict rule: any leg older than 200ms → route stale
+    const pKtoC = projectTakerTaker(sym as ObAsset, "kraken", tradeSizeUsd, realKFee, realCFee);
+    const pCtoK = projectTakerTaker(sym as ObAsset, "coinbase", tradeSizeUsd, realCFee, realKFee);
+    const best = [pKtoC, pCtoK].filter(Boolean).sort((a, b) => b!.projectedNetUsd - a!.projectedNetUsd)[0] ?? null;
+    if (!best) {
+      res.status(409).json({ error: "no live depth books on one/both venues — refusing to price from top-of-book" });
+      return;
+    }
+    const useKraken = best === pKtoC;
+    const grossSpreadPct = (best.grossEdgeUsd / tradeSizeUsd) * 100;
+    const estimatedNetProfitUsd = best.projectedNetUsd - bufUsd;
+    const netSpreadPct   = (estimatedNetProfitUsd / tradeSizeUsd) * 100;
     const buyExchange    = useKraken ? "Kraken" : "Coinbase";
     const sellExchange   = useKraken ? "Coinbase" : "Kraken";
     const buyPrice       = useKraken ? kba.ask : cba.ask;
     const sellPrice      = useKraken ? cba.bid : kba.bid;
-    const plannedVolume  = tradeSizeUsd / buyPrice;
-    const estimatedNetProfitUsd = (netSpreadPct / 100) * tradeSizeUsd;
+    const plannedVolume  = best.qty;
+
+    // DECISION LOG — market ages, route age, scanner vs executable net, floor.
+    req.log.info({
+      sym, decision: "inventory-pre-fire",
+      legAges: best.legAges.map(l => ({ market: l.pair, ageMs: l.ageMs, recvAgeMs: l.recvAgeMs })),
+      routeAgeMs: best.quoteAgeMs,
+      scannerNetUsd: best.projectedNetUsd,
+      executableNetUsd: estimatedNetProfitUsd,
+      profitFloorUsd: minProfitUsd, bufferUsd: bufUsd,
+      feesDetected: !isDryRun, kFeePct: realKFee, cbFeePct: realCFee,
+    }, "[INV] decision");
+
+    if (!isDryRun && best.quoteAgeMs > MAX_ROUTE_AGE_MS) {
+      res.json({
+        success: false, isDryRun: false, executed: false, asset: sym, pair,
+        buyExchange, sellExchange, volume: null, buyPrice, sellPrice,
+        grossSpreadPct, netSpreadPct, estimatedNetProfitUsd,
+        buyOrderId: null, sellOrderId: null,
+        error: `route stale: oldest leg ${best.quoteAgeMs}ms > ${MAX_ROUTE_AGE_MS}ms — entire route treated as stale, not executing`,
+      });
+      return;
+    }
+    // PRE-FIRE CONSISTENCY — an immediate second re-projection with the
+    // identical function against the live stream books. Not an immutable
+    // snapshot: it blocks execution when the two consecutive reads diverge.
+    if (!isDryRun) {
+      const recheck = projectTakerTaker(sym as ObAsset, useKraken ? "kraken" : "coinbase", tradeSizeUsd, useKraken ? realKFee : realCFee, useKraken ? realCFee : realKFee);
+      if (recheck) req.log.info({ sym, recheckLegAges: recheck.legAges.map(l => ({ market: l.pair, ageMs: l.ageMs })), recheckRouteAgeMs: recheck.quoteAgeMs }, "[INV] recheck");
+      if (recheck && recheck.quoteAgeMs > MAX_ROUTE_AGE_MS) {
+        res.json({
+          success: false, isDryRun: false, executed: false, asset: sym, pair,
+          buyExchange, sellExchange, volume: null, buyPrice, sellPrice,
+          grossSpreadPct, netSpreadPct, estimatedNetProfitUsd,
+          buyOrderId: null, sellOrderId: null,
+          error: `route went stale during consistency check: oldest leg ${recheck.quoteAgeMs}ms > ${MAX_ROUTE_AGE_MS}ms — not executing`,
+        });
+        return;
+      }
+      if (!recheck || Math.abs(recheck.projectedNetUsd - best.projectedNetUsd) > 0.005) {
+        req.log.error({ sym, scannerNetUsd: best.projectedNetUsd, preFireNetUsd: recheck?.projectedNetUsd ?? null }, "[INV] PRICING CONSISTENCY ERROR");
+        res.json({
+          success: false, isDryRun: false, executed: false, asset: sym, pair,
+          buyExchange, sellExchange, volume: null, buyPrice, sellPrice,
+          grossSpreadPct, netSpreadPct, estimatedNetProfitUsd,
+          buyOrderId: null, sellOrderId: null,
+          error: `PRICING CONSISTENCY ERROR: scanner net $${best.projectedNetUsd.toFixed(4)} vs pre-fire net $${recheck ? recheck.projectedNetUsd.toFixed(4) : "n/a"} diverged beyond $0.005 between consecutive re-projections — not executing`,
+        });
+        return;
+      }
+    }
 
     // Gate
     if (netSpreadPct <= 0 || estimatedNetProfitUsd <= minProfitUsd) {

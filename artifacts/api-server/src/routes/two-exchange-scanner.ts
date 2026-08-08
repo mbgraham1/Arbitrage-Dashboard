@@ -49,7 +49,7 @@ const SCAN_ASSETS: ObAsset[] = ["ETH", "BTC", "SOL"];
 const POLL_MS = 600;
 const TERMINAL_WAIT_MS = 25_000;
 const DEFAULT_MIN_NET_USD = 0.01;     // profit floor AFTER all costs
-const DEFAULT_MAX_QUOTE_AGE_MS = 400; // freshness gate for firing
+const DEFAULT_MAX_QUOTE_AGE_MS = 200; // unified hard freshness rule: any leg older than 200ms → route stale, no execution
 // Safety buffer: protects against book movement between projection and fills.
 const bufferFor = (sizeUsd: number, override?: number) =>
   override != null && override >= 0 ? override : Math.max(0.02, sizeUsd * 0.002);
@@ -57,7 +57,7 @@ const bufferFor = (sizeUsd: number, override?: number) =>
 // Assumed fees for CREDENTIAL-LESS scanning only (labelled in the response).
 // Live execution NEVER uses these — it detects real tiers or refuses.
 const ASSUMED_KRAKEN_TAKER_PCT = 0.4;
-const ASSUMED_COINBASE_TAKER_PCT = 0.6;
+const ASSUMED_COINBASE_TAKER_PCT = 1.2; // conservative entry tier — matches discovery; never optimistic
 
 type Decision = {
   asset: ObAsset;
@@ -93,7 +93,7 @@ function decide(
   }
   const common = {
     grossSpreadUsd: bd.rawEdgeUsd, feesUsd: bd.feesUsd, slippageUsd: bd.slippageUsd,
-    netProfitUsd: bd.netProfitUsd, baseQty: bd.baseQty, quoteAgeMs: bd.quoteAgeMs, legs: bd.legDiag,
+    netProfitUsd: bd.netProfitUsd, netAfterBufferUsd: bd.netProfitUsd - bufferUsd, baseQty: bd.baseQty, quoteAgeMs: bd.quoteAgeMs, legs: bd.legDiag,
   };
   if (bd.quoteAgeMs > maxQuoteAgeMs) {
     return { ...base, ...common, decision: "SKIP", reason: `books stale: oldest leg ${bd.quoteAgeMs}ms > ${maxQuoteAgeMs}ms limit` };

@@ -10,4 +10,5 @@
 - [Per-account scope rule](account-scope-rule.md) — one canonical helper derives the account history scope; Coinbase key counts only with its secret, or a trader's fills vanish from their own gate.
 - [WS streaming & latency](latency-streaming.md) — Kraken WS v2 symbols need XBT→BTC translation; quote age = per-leg from exchange update ts (never connection-wide); stale→wait-a-tick→skip; scaled buffer must reach the executor.
 - [Multi-venue discovery scan](multi-venue-discovery.md) — Bybit/Binance.com geo-blocked here; USDT venues need basis haircut; assumed fees never mark a route executable.
+- [Pre-fire consistency rules](pre-fire-consistency.md) — 200ms hard freshness (recheck too), consecutive re-projection consistency block, buffer-inclusive display nets, SHA-256 cred-cache keys, fees in lib/fees.ts.
 - [Exchange id casing](exchange-id-casing.md) — scan maps key lowercase ids (kraken/coinbase) but opportunities carry display-cased labels; always normalize before lookup or safety gates silently no-op.

@@ -188,6 +188,19 @@ export function CbMmCard() {
         {!hasCreds && <div className="text-amber-500" data-testid="text-mm2-nocreds">Enter Kraken AND Coinbase API keys to scan.</div>}
         {hasCreds && scanError && <div className="text-red-500" data-testid="text-mm2-scanerror">Scan failed: {scanError} — no assumed fees, no trading.</div>}
         {hasCreds && !scan && !scanError && <div className="text-muted-foreground">Detecting real fees, balances, and live books…</div>}
+        {hasCreds && scan?.gateSummary && (
+          <div className="flex items-start gap-2" data-testid="text-mm2-gate">
+            <span className={
+              scan.gateSummary.status === "EXECUTABLE" ? "shrink-0 rounded bg-green-500/15 px-1.5 py-0.5 font-medium text-green-500"
+              : scan.gateSummary.status === "STALE_DATA" ? "shrink-0 rounded bg-yellow-500/15 px-1.5 py-0.5 font-medium text-yellow-500"
+              : scan.gateSummary.status === "INSUFFICIENT_INVENTORY" ? "shrink-0 rounded bg-orange-500/15 px-1.5 py-0.5 font-medium text-orange-500"
+              : "shrink-0 rounded bg-muted px-1.5 py-0.5 font-medium text-muted-foreground"
+            }>
+              {String(scan.gateSummary.status).replaceAll("_", " ")}
+            </span>
+            <span className="text-muted-foreground">{scan.gateSummary.detail}</span>
+          </div>
+        )}
 
         {scan && (
           <>

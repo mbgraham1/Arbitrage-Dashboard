@@ -117,7 +117,7 @@ export function TwoXScannerCard() {
                     <td className="pr-2 text-right">{fmt(r.grossSpreadUsd)}</td>
                     <td className="pr-2 text-right">{fmt(r.feesUsd)}</td>
                     <td className="pr-2 text-right">{fmt(r.slippageUsd)}</td>
-                    <td className={cn("pr-2 text-right", (r.netProfitUsd ?? -1) > 0 ? "text-green-500" : "text-red-500")}>{fmt(r.netProfitUsd)}</td>
+                    <td className={cn("pr-2 text-right", ((r.netAfterBufferUsd ?? r.netProfitUsd) ?? -1) > 0 ? "text-green-500" : "text-red-500")}>{fmt(r.netAfterBufferUsd ?? r.netProfitUsd)}</td>
                     <td className="pr-2">
                       <span className={cn("font-semibold", r.decision === "FIRE" ? "text-green-500" : "text-muted-foreground")} title={r.reason ?? ""}>{r.decision}</span>
                     </td>

@@ -1914,6 +1914,7 @@ components:
         slippageUsd: { type: number, nullable: true }
         bufferUsd: { type: number }
         netProfitUsd: { type: number, nullable: true }
+        netAfterBufferUsd: { type: number, nullable: true, description: "netProfitUsd minus the safety buffer — the unified display net used across all cards" }
         baseQty: { type: number, nullable: true }
         quoteAgeMs: { type: number, nullable: true }
         legs:
@@ -2113,6 +2114,13 @@ components:
     MmScanResult:
       type: object
       properties:
+        gateSummary:
+          type: object
+          description: Why routes do/don't qualify — EXECUTABLE | NO_EDGE | BLOCKED_BY_FEES | STALE_DATA | INSUFFICIENT_INVENTORY | BELOW_FLOOR
+          properties:
+            status: { type: string }
+            detail: { type: string }
+            maxQuoteAgeMs: { type: number }
         sizeUsd: { type: number }
         floorUsd: { type: number }
         bufferUsd: { type: number }
