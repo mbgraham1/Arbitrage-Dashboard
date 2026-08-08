@@ -836,6 +836,12 @@ function OrderBookHunterCard() {
     const t = setTimeout(() => setDebouncedSize(tradeSizeInput), 500);
     return () => clearTimeout(t);
   }, [tradeSizeInput]);
+  // Sync back whenever the setting changes externally (e.g. trader updates
+  // OB Trade Size in Config and returns to the dashboard).
+  useEffect(() => {
+    setTradeSizeInput(String(settings.obTradeSize));
+    setDebouncedSize(String(settings.obTradeSize));
+  }, [settings.obTradeSize, settings.obFeesPct]);
   const tradeSize = Math.max(1, parseFloat(debouncedSize) || settings.obTradeSize);
   // Min-profit floor: seeded from settings.minProfitUsd so it matches the
   // auto-execute threshold that the bot loop uses.
