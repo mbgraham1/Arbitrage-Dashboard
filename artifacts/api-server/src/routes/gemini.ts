@@ -18,15 +18,22 @@ router.post("/test-gemini", async (req, res): Promise<void> => {
     const acct = await geminiVerify(parsed.data);
     res.json({
       ok: true,
-      message: `Connected — detected fee tier ${acct.makerPct.toFixed(3)}% maker / ${acct.takerPct.toFixed(3)}% taker; $${acct.usdBalance.toFixed(2)} USD spendable`,
+      message: acct.scopeIssue
+        ? `Auth + fee tier verified (${acct.makerPct.toFixed(3)}% maker / ${acct.takerPct.toFixed(3)}% taker) — BUT balances are NOT verified: ${acct.scopeIssue}`
+        : `Connected — detected fee tier ${acct.makerPct.toFixed(3)}% maker / ${acct.takerPct.toFixed(3)}% taker; $${acct.usdBalance.toFixed(2)} USD available`,
       makerPct: acct.makerPct,
       takerPct: acct.takerPct,
-      usdBalance: acct.usdBalance,
+      usdBalance: acct.scopeIssue ? null : acct.usdBalance, // never render an unverified $0.00 as a real zero
       balances: acct.balances,
-      note: "Read-only: Gemini live trading is NOT enabled — keys are used for balances + detected fees in Discovery/Hunter only.",
+      balancesVerified: acct.scopeIssue == null,
+      scopeIssue: acct.scopeIssue,
+      keyScope: acct.keyScope,
+      balanceDetail: acct.balanceDetail,      // per currency: total / available / held
+      accountScopes: acct.accountScopes,      // per Gemini account visible to the key
+      note: "Read-only endpoint. Live Gemini execution stays blocked while balances or fees are unverified.",
     });
   } catch (e) {
-    res.json({ ok: false, message: (e as Error).message.slice(0, 200), makerPct: null, takerPct: null, usdBalance: null, balances: {}, note: null });
+    res.json({ ok: false, message: (e as Error).message.slice(0, 200), makerPct: null, takerPct: null, usdBalance: null, balances: {}, balancesVerified: false, scopeIssue: null, keyScope: null, balanceDetail: [], accountScopes: [], note: null });
   }
 });
 

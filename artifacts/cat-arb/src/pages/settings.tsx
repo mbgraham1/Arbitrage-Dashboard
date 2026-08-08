@@ -5,8 +5,8 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { useBotContext, ALL_PAIRS } from "@/store/bot-context";
-import { Settings2, KeySquare, SlidersHorizontal, ShieldAlert, CheckCircle2, XCircle, Lock, Layers, BookOpen, Repeat2 } from "lucide-react";
-import { useTestKraken, useTestCoinbase, useTestGemini } from "@workspace/api-client-react";
+import { Settings2, KeySquare, SlidersHorizontal, ShieldAlert, CheckCircle2, XCircle, Lock, Layers, BookOpen, Repeat2, AlertTriangle } from "lucide-react";
+import { useTestKraken, useTestCoinbase, useTestGemini, GeminiTestResult } from "@workspace/api-client-react";
 
 const INVENTORY_ASSETS = ["BTC", "ETH", "SOL", "AVAX", "DOT"] as const;
 
@@ -26,7 +26,7 @@ export default function Settings() {
   const [coinbaseMessage, setCoinbaseMessage] = useState("");
   const [geminiStatus, setGeminiStatus] = useState<"idle" | "success" | "error">("idle");
   const [geminiMessage, setGeminiMessage] = useState("");
-  const [geminiInfo, setGeminiInfo] = useState<{ makerPct: number; takerPct: number; usdBalance: number; balances: Record<string, number> } | null>(null);
+  const [geminiInfo, setGeminiInfo] = useState<GeminiTestResult | null>(null);
 
   const handleSaveCreds = () => {
     setCredentials(localCreds);
@@ -74,7 +74,7 @@ export default function Settings() {
       setGeminiStatus(res.ok ? "success" : "error");
       setGeminiMessage(res.message);
       if (res.ok && res.makerPct != null && res.takerPct != null) {
-        setGeminiInfo({ makerPct: res.makerPct, takerPct: res.takerPct, usdBalance: res.usdBalance ?? 0, balances: (res.balances as Record<string, number>) ?? {} });
+        setGeminiInfo(res);
       }
     } catch (e: unknown) {
       setGeminiStatus("error");
@@ -290,12 +290,61 @@ export default function Settings() {
                 </div>
               </div>
               {geminiInfo && (
-                <div className="text-xs font-mono text-muted-foreground border border-border p-2" data-testid="text-gemini-info">
-                  <div>Detected fee tier: <span className="text-green-500">{geminiInfo.makerPct.toFixed(3)}% maker / {geminiInfo.takerPct.toFixed(3)}% taker</span></div>
-                  <div>USD spendable: ${geminiInfo.usdBalance.toFixed(2)}</div>
-                  {Object.entries(geminiInfo.balances).filter(([c]) => c !== "USD").slice(0, 8).map(([c, v]) => (
-                    <div key={c}>{c}: {v}</div>
-                  ))}
+                <div className="text-xs font-mono text-muted-foreground border border-border p-2 space-y-2" data-testid="text-gemini-info">
+                  {/* (c) Auth + detected fee tier — always shown (auth is verified even when balances are not). */}
+                  <div>Detected fee tier: <span className="text-green-500">{(geminiInfo.makerPct ?? 0).toFixed(3)}% maker / {(geminiInfo.takerPct ?? 0).toFixed(3)}% taker</span></div>
+
+                  {/* (a) Balances verified → green + per-currency table. */}
+                  {geminiInfo.balancesVerified && (
+                    <div data-testid="text-gemini-balances-verified">
+                      <div className="text-green-500 flex items-center gap-1">
+                        <CheckCircle2 className="h-3.5 w-3.5" /> Balances verified{geminiInfo.keyScope ? ` (${geminiInfo.keyScope} key)` : ""}
+                      </div>
+                      {(geminiInfo.balanceDetail?.length ?? 0) > 0 ? (
+                        <table className="w-full text-left mt-1">
+                          <thead className="text-muted-foreground">
+                            <tr><th className="pr-3">Currency</th><th className="pr-3 text-right">Total</th><th className="pr-3 text-right">Available</th><th className="text-right">Held</th></tr>
+                          </thead>
+                          <tbody>
+                            {geminiInfo.balanceDetail!.map((b) => (
+                              <tr key={b.currency}>
+                                <td className="pr-3">{b.currency}</td>
+                                <td className="pr-3 text-right">{b.total}</td>
+                                <td className="pr-3 text-right">{b.available}</td>
+                                <td className="text-right">{b.held}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      ) : (
+                        <div className="text-muted-foreground mt-1">No balances in this scope.</div>
+                      )}
+                    </div>
+                  )}
+
+                  {/* (b) scopeIssue → prominent amber/red alert with VERBATIM text; never render $0.00 as real. */}
+                  {geminiInfo.scopeIssue && (
+                    <div className="border border-amber-500/60 bg-amber-500/10 rounded p-2 space-y-1" data-testid="text-gemini-scope-issue">
+                      <div className="text-amber-500 flex items-center gap-1 font-bold">
+                        <AlertTriangle className="h-3.5 w-3.5 shrink-0" /> Balances NOT verified — treat as UNVERIFIED, not $0.00
+                      </div>
+                      <div className="text-amber-400 whitespace-pre-wrap">{geminiInfo.scopeIssue}</div>
+                      {geminiInfo.keyScope && <div className="text-muted-foreground">Key scope: {geminiInfo.keyScope}</div>}
+                      {(geminiInfo.accountScopes?.length ?? 0) > 0 && (
+                        <div className="mt-1">
+                          <div className="text-muted-foreground">Account scopes visible to this key:</div>
+                          {geminiInfo.accountScopes!.map((sc, i) => (
+                            <div key={i} className="pl-2">
+                              <span className="text-foreground">{sc.account ?? "(default scope)"}</span>
+                              {sc.error
+                                ? <span className="text-destructive"> — error: {sc.error}</span>
+                                : <span className="text-muted-foreground"> — {sc.balances.length ? sc.balances.map(b => `${b.currency} ${b.total}`).join(", ") : "no balances"}</span>}
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </div>
               )}
             </div>

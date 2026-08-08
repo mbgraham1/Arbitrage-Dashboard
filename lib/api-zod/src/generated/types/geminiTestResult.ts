@@ -5,6 +5,8 @@
  * CAT Arbitrage Dashboard API
  * OpenAPI spec version: 0.1.0
  */
+import type { GeminiAccountScope } from './geminiAccountScope';
+import type { GeminiBalanceRow } from './geminiBalanceRow';
 import type { GeminiTestResultBalances } from './geminiTestResultBalances';
 
 export interface GeminiTestResult {
@@ -14,7 +16,18 @@ export interface GeminiTestResult {
   makerPct?: number | null;
   /** DETECTED taker fee tier, percent */
   takerPct?: number | null;
+  /** Available USD in the trading scope — NULL when balances are unverified (scopeIssue set); never render as a real $0.00 */
   usdBalance?: number | null;
   balances?: GeminiTestResultBalances;
+  /** true only when Gemini returned a clean balance read for the key's trading scope (scopeIssue == null) */
+  balancesVerified?: boolean;
+  /** EXACT scope/permission diagnostic to show VERBATIM when balances could not be verified (e.g. funds in a different account, or missing balances permission); null when balances are verified clean */
+  scopeIssue?: string | null;
+  /** master | account — master keys can enumerate accounts */
+  keyScope?: string | null;
+  /** Per-currency detail for the key's trading scope */
+  balanceDetail?: GeminiBalanceRow[];
+  /** All account scopes visible to the key (master keys: every account; account keys: just the default) */
+  accountScopes?: GeminiAccountScope[];
   note?: string | null;
 }

@@ -18,24 +18,19 @@
  *    never guess precision on a live venue.
  */
 import crypto from "node:crypto";
-import type { GeminiCreds } from "./gemini";
+import { geminiNextNonce, type GeminiCreds } from "./gemini";
 
 const BASE = "https://api.gemini.com";
 
-// ── monotonic nonce (per process) ─────────────────────────────────────────────
-let lastNonce = 0;
-function nextNonce(): string {
-  const n = Math.max(Date.now(), lastNonce + 1);
-  lastNonce = n;
-  return String(n);
-}
+// Nonce: shared monotonic counter from lib/gemini.ts — two independent
+// counters on the same key can collide within a millisecond (InvalidNonce).
 
 /** Order-flow endpoints this module may call. Anything else throws. */
 const ORDER_ALLOWED = new Set(["/v1/order/new", "/v1/order/status", "/v1/order/cancel"]);
 
 async function geminiOrderApi<T>(creds: GeminiCreds, path: string, fields: Record<string, unknown>): Promise<T> {
   if (!ORDER_ALLOWED.has(path)) throw new Error(`Gemini exec endpoint ${path} not allowlisted`);
-  const payload = Buffer.from(JSON.stringify({ request: path, nonce: nextNonce(), ...fields })).toString("base64");
+  const payload = Buffer.from(JSON.stringify({ request: path, nonce: geminiNextNonce(), ...fields })).toString("base64");
   const signature = crypto.createHmac("sha384", creds.geminiSecret).update(payload).digest("hex");
   const resp = await fetch(`${BASE}${path}`, {
     method: "POST",

@@ -152,8 +152,27 @@ export const TestGeminiResponse = zod.object({
   "message": zod.string(),
   "makerPct": zod.number().nullish().describe('DETECTED maker fee tier, percent'),
   "takerPct": zod.number().nullish().describe('DETECTED taker fee tier, percent'),
-  "usdBalance": zod.number().nullish(),
+  "usdBalance": zod.number().nullish().describe('Available USD in the trading scope — NULL when balances are unverified (scopeIssue set); never render as a real $0.00'),
   "balances": zod.record(zod.string(), zod.number()).optional(),
+  "balancesVerified": zod.boolean().optional().describe('true only when Gemini returned a clean balance read for the key\'s trading scope (scopeIssue == null)'),
+  "scopeIssue": zod.string().nullish().describe('EXACT scope\/permission diagnostic to show VERBATIM when balances could not be verified (e.g. funds in a different account, or missing balances permission); null when balances are verified clean'),
+  "keyScope": zod.string().nullish().describe('master | account — master keys can enumerate accounts'),
+  "balanceDetail": zod.array(zod.object({
+  "currency": zod.string(),
+  "total": zod.number().describe('Total amount in the account (includes held\/reserved)'),
+  "available": zod.number().describe('Available\/tradable now'),
+  "held": zod.number().describe('Held \/ reserved (open orders etc.) = total − available')
+})).optional().describe('Per-currency detail for the key\'s trading scope'),
+  "accountScopes": zod.array(zod.object({
+  "account": zod.string().nullable().describe('Gemini account name\/label this row set came from (null = key\'s default scope)'),
+  "balances": zod.array(zod.object({
+  "currency": zod.string(),
+  "total": zod.number().describe('Total amount in the account (includes held\/reserved)'),
+  "available": zod.number().describe('Available\/tradable now'),
+  "held": zod.number().describe('Held \/ reserved (open orders etc.) = total − available')
+})),
+  "error": zod.string().nullable().describe('per-account fetch failure (exact Gemini reason)')
+})).optional().describe('All account scopes visible to the key (master keys: every account; account keys: just the default)'),
   "note": zod.string().nullish()
 })
 

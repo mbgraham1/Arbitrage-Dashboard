@@ -50,6 +50,8 @@ export * from './executionStatusResult';
 export * from './feeTierRequest';
 export * from './feeTierResult';
 export * from './feeTierResultSource';
+export * from './geminiAccountScope';
+export * from './geminiBalanceRow';
 export * from './geminiCredentials';
 export * from './geminiTestResult';
 export * from './geminiTestResultBalances';

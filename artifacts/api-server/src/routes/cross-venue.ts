@@ -239,7 +239,12 @@ async function venueStates(c: Creds): Promise<Record<LiveVenueId, VenueState>> {
     jobs.push((async () => {
       try {
         const acct: GeminiAccount = await geminiVerify(gc);
-        out.gemini = { feeSource: "detected", takerPct: acct.takerPct, usd: acct.usdBalance, assets: acct.balances, error: null };
+        // Fees verified — but balances count ONLY when the scope is clean.
+        // A scope/permission issue means balances are UNVERIFIED (usd/assets
+        // stay null → no FIRE), with the exact problem surfaced verbatim.
+        out.gemini = acct.scopeIssue
+          ? { feeSource: "detected", takerPct: acct.takerPct, usd: null, assets: null, error: acct.scopeIssue }
+          : { feeSource: "detected", takerPct: acct.takerPct, usd: acct.usdBalance, assets: acct.balances, error: null };
       } catch (e) { out.gemini.error = (e as Error).message; }
     })());
   }
@@ -331,7 +336,7 @@ router.post("/arb/xv-scan", async (req, res): Promise<void> => {
         ? `net negative after costs (fees $${g.feesUsd.toFixed(4)} + slippage $${g.slippageUsd.toFixed(4)} vs gross $${g.grossSpreadUsd.toFixed(4)})`
         : `net-after-buffer $${g.netAfterBufferUsd.toFixed(4)} below floor $${minNetUsd.toFixed(2)}`;
       else if (!bothDetected) reason = `positive projection but fees are ASSUMED on ${bs.feeSource === "assumed" ? buy : sell} — connect keys; assumptions never gate live decisions`;
-      else if (!balancesKnown) reason = "positive projection but balances unverified";
+      else if (!balancesKnown) reason = `positive projection but balances UNVERIFIED${bs.error ? ` — ${buy}: ${bs.error}` : ""}${ss.error ? ` — ${sell}: ${ss.error}` : ""}` || "positive projection but balances unverified";
       else if (!bestFeasible) reason = `positive at $${best.sizeUsd} but infeasible: ${projections.find(p => p.sizeUsd === best.sizeUsd)?.infeasibleWhy ?? "balances/minimums"}`;
       else { decision = "FIRE"; reason = `net-after-buffer $${bestFeasible.netAfterBufferUsd.toFixed(4)} clears floor at feasible size $${bestFeasible.sizeUsd}`; }
 
@@ -552,6 +557,10 @@ router.post("/arb/xv-execute", async (req, res): Promise<void> => {
     }
 
     // 2. Balance prechecks (Coinbase asset balance fetched on demand).
+    //    UNVERIFIED balances (scope/permission issue) are a hard refusal with
+    //    the exact reason — never treated as $0 and never guessed past.
+    if (bs.usd == null) { skip(`${buyVenue} balances UNVERIFIED — ${bs.error ?? "no balance data"}`); return; }
+    if (ss.assets == null && sellVenue !== "coinbase") { skip(`${sellVenue} balances UNVERIFIED — ${ss.error ?? "no balance data"}`); return; }
     const buyUsdAvail = bs.usd ?? 0;
     let sellAssetAvail = ss.assets?.[asset] ?? 0;
     if (sellVenue === "coinbase") {

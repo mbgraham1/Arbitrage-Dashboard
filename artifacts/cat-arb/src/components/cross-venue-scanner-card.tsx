@@ -24,6 +24,7 @@ import {
   XvScanResult, XvRoute, XvVenueStatus, XvProjection, XvExecuteResult,
 } from "@workspace/api-client-react";
 import { useQueryClient } from "@tanstack/react-query";
+import { AlertTriangle } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 const fmt = (v: number | null | undefined, d = 4) => (v == null ? "—" : `$${v.toFixed(d)}`);
@@ -50,18 +51,39 @@ function FeeBadge({ source, pct }: { source: string; pct: number }) {
 }
 
 function VenueStatusRow({ v }: { v: XvVenueStatus }) {
+  const [showErr, setShowErr] = useState(false);
+  // NEVER render $0.00 USD for a venue whose detection errored — the balance is
+  // UNVERIFIED, not a real zero (Gemini scope issues are the common case).
+  const balanceUnverified = v.error != null;
   return (
-    <div className="flex items-center gap-2 whitespace-nowrap" data-testid={`xv-venue-${v.id}`}>
-      <span className="font-medium capitalize">{v.id}</span>
-      <FeeBadge source={v.feeSource} pct={v.takerPct} />
-      {v.usd != null && <span className="text-muted-foreground">${v.usd.toFixed(2)} USD</span>}
-      {v.id === "gemini" && (
-        <span className={cn("rounded px-1 py-0.5", v.streaming ? "bg-green-500/15 text-green-500" : "bg-red-500/15 text-red-500")}
-          title={v.streaming ? "Gemini live book stream connected" : "Gemini book stream DISCONNECTED"}>
-          {v.streaming ? "● stream" : "○ stream"}
-        </span>
+    <div className="flex flex-col gap-0.5" data-testid={`xv-venue-${v.id}`}>
+      <div className="flex items-center gap-2 whitespace-nowrap">
+        <span className="font-medium capitalize">{v.id}</span>
+        <FeeBadge source={v.feeSource} pct={v.takerPct} />
+        {balanceUnverified
+          ? <span className="rounded bg-amber-500/15 px-1 py-0.5 text-amber-500 font-semibold" title="balance could not be verified — not a real $0.00">UNVERIFIED</span>
+          : v.usd != null && <span className="text-muted-foreground">${v.usd.toFixed(2)} USD</span>}
+        {v.id === "gemini" && (
+          <span className={cn("rounded px-1 py-0.5", v.streaming ? "bg-green-500/15 text-green-500" : "bg-red-500/15 text-red-500")}
+            title={v.streaming ? "Gemini live book stream connected" : "Gemini book stream DISCONNECTED"}>
+            {v.streaming ? "● stream" : "○ stream"}
+          </span>
+        )}
+        {v.error && (
+          <button
+            className="flex items-center gap-1 text-red-500"
+            onClick={() => setShowErr(s => !s)}
+            title={v.error}
+            data-testid={`button-xv-venue-error-${v.id}`}
+          >
+            <AlertTriangle className="h-3 w-3 shrink-0" />
+            <span className="max-w-[220px] truncate">{v.error}</span>
+          </button>
+        )}
+      </div>
+      {v.error && showErr && (
+        <div className="text-red-400 whitespace-pre-wrap pl-1" data-testid={`text-xv-venue-error-${v.id}`}>{v.error}</div>
       )}
-      {v.error && <span className="text-red-500" title={v.error}>detect failed: {v.error}</span>}
     </div>
   );
 }
