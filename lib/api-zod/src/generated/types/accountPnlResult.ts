@@ -12,8 +12,14 @@ export interface AccountPnlResult {
   currentValueUsd: number;
   usdBalance: number;
   unrealizedHoldingsUsd: number;
+  /** Equity change since today's baseline, minus external deposits/withdrawals when the ledger was fetchable (see cashFlowAdjusted) */
   realizedTodayUsd: number;
+  /** Equity change since the first baseline, minus external deposits/withdrawals when the ledger was fetchable (see cashFlowAdjusted) */
   lifetimePnlUsd: number;
+  /** True when realizedTodayUsd and lifetimePnlUsd exclude external deposits/withdrawals; false when the ledger couldn't be verified and the numbers are raw equity changes */
+  cashFlowAdjusted: boolean;
+  /** External deposits − withdrawals since today's baseline; null when unknowable */
+  netCashFlowTodayUsd: number | null;
   /** Total change in everything owned since baseline (current − starting) */
   equityChangeUsd: number;
   /** External deposits − withdrawals since baseline (Kraken Ledgers); null when unknowable (ledger unavailable/incomplete, or Coinbase included) — attribution withheld */

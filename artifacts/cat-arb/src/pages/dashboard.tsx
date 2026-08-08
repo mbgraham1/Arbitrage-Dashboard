@@ -2110,6 +2110,9 @@ function RealizedPnlCard() {
               <div className="border border-border p-3">
                 <div className="text-[10px] uppercase text-muted-foreground">Realized Today</div>
                 <div className={cn("text-lg font-bold", pnlClass(data.realizedTodayUsd))}>{money(data.realizedTodayUsd, true)}</div>
+                <div className={cn("text-[9px]", data.cashFlowAdjusted ? "text-muted-foreground" : "text-yellow-500")}>
+                  {data.cashFlowAdjusted ? "excl. deposits/withdrawals" : "incl. deposits/withdrawals (ledger unverified)"}
+                </div>
               </div>
               <div className="border border-border p-3">
                 <div className="text-[10px] uppercase text-muted-foreground">Unrealized Holdings</div>
@@ -2119,6 +2122,9 @@ function RealizedPnlCard() {
               <div className="border border-border p-3">
                 <div className="text-[10px] uppercase text-muted-foreground">Lifetime P&L</div>
                 <div className={cn("text-lg font-bold", pnlClass(data.lifetimePnlUsd))}>{money(data.lifetimePnlUsd, true)}</div>
+                <div className={cn("text-[9px]", data.cashFlowAdjusted ? "text-muted-foreground" : "text-yellow-500")}>
+                  {data.cashFlowAdjusted ? "excl. deposits/withdrawals" : "incl. deposits/withdrawals (ledger unverified)"}
+                </div>
               </div>
             </div>
 

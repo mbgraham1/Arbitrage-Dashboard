@@ -1201,15 +1201,26 @@ components:
         coinbaseSecret: { type: string }
     AccountPnlResult:
       type: object
-      required: [startingValueUsd, startedAt, currentValueUsd, usdBalance, unrealizedHoldingsUsd, realizedTodayUsd, lifetimePnlUsd, equityChangeUsd, netCashFlowUsd, tradingPnlUsd, tradedFillCount, unrealizedPnlUsd, cashFlowNote, includesCoinbase, snapshotCount, unpricedAssets]
+      required: [startingValueUsd, startedAt, currentValueUsd, usdBalance, unrealizedHoldingsUsd, realizedTodayUsd, lifetimePnlUsd, cashFlowAdjusted, netCashFlowTodayUsd, equityChangeUsd, netCashFlowUsd, tradingPnlUsd, tradedFillCount, unrealizedPnlUsd, cashFlowNote, includesCoinbase, snapshotCount, unpricedAssets]
       properties:
         startingValueUsd: { type: number }
         startedAt: { type: string }
         currentValueUsd: { type: number }
         usdBalance: { type: number }
         unrealizedHoldingsUsd: { type: number }
-        realizedTodayUsd: { type: number }
-        lifetimePnlUsd: { type: number }
+        realizedTodayUsd:
+          type: number
+          description: "Equity change since today's baseline, minus external deposits/withdrawals when the ledger was fetchable (see cashFlowAdjusted)"
+        lifetimePnlUsd:
+          type: number
+          description: "Equity change since the first baseline, minus external deposits/withdrawals when the ledger was fetchable (see cashFlowAdjusted)"
+        cashFlowAdjusted:
+          type: boolean
+          description: "True when realizedTodayUsd and lifetimePnlUsd exclude external deposits/withdrawals; false when the ledger couldn't be verified and the numbers are raw equity changes"
+        netCashFlowTodayUsd:
+          type: number
+          nullable: true
+          description: "External deposits − withdrawals since today's baseline; null when unknowable"
         equityChangeUsd:
           type: number
           description: "Total change in everything owned since baseline (current − starting)"

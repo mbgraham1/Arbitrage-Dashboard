@@ -1562,20 +1562,33 @@ router.post("/arb/account-pnl", async (req, res): Promise<void> => {
     // is unavailable or incomplete, FAIL CLOSED: withhold the decomposition
     // instead of presenting a wrong attribution.
     let netCashFlowUsd: number | null = 0;
+    let netCashFlowTodayUsd: number | null = 0;
     let cashFlowNote: string | null = null;
     try {
       const sinceUnix = Math.floor(first.createdAt.getTime() / 1000);
       const cf = await krakenNetCashFlowUsd({ krakenKey: creds.krakenKey, krakenSecret: creds.krakenSecret }, sinceUnix);
       if (!cf.complete) {
         netCashFlowUsd = null;
+        netCashFlowTodayUsd = null;
         cashFlowNote = "Kraken ledger history too long to fetch fully — attribution withheld this refresh.";
       } else {
         netCashFlowUsd = cf.netUsd;
         if (cf.approximated) cashFlowNote = "Some non-USD deposits/withdrawals valued at current (not historical) prices.";
+        // Today's cash flows: a separate ledger fetch from today's baseline.
+        // Reuse the lifetime result when the baselines coincide.
+        if (todayBase.id === first.id) {
+          netCashFlowTodayUsd = cf.netUsd;
+        } else {
+          const sinceTodayUnix = Math.floor(todayBase.createdAt.getTime() / 1000);
+          const cfToday = await krakenNetCashFlowUsd({ krakenKey: creds.krakenKey, krakenSecret: creds.krakenSecret }, sinceTodayUnix);
+          netCashFlowTodayUsd = cfToday.complete ? cfToday.netUsd : null;
+          if (!cfToday.complete) cashFlowNote = (cashFlowNote ? cashFlowNote + " " : "") + "Today's ledger history couldn't be fetched fully — today's number is unadjusted.";
+        }
       }
     } catch (err) {
       req.log.error({ err }, "ledger cash-flow fetch failed");
       netCashFlowUsd = null;
+      netCashFlowTodayUsd = null;
       cashFlowNote = "Kraken ledger fetch failed — cash flows unknown, attribution withheld this refresh.";
     }
     // Coinbase deposits/withdrawals aren't retrievable yet — a Coinbase cash
@@ -1583,9 +1596,11 @@ router.post("/arb/account-pnl", async (req, res): Promise<void> => {
     // residual attribution for combined accounts.
     if (hasCoinbase) {
       netCashFlowUsd = null;
+      netCashFlowTodayUsd = null;
       cashFlowNote = (cashFlowNote ? cashFlowNote + " " : "") + "Coinbase external deposits/withdrawals can't be tracked yet — attribution withheld for combined accounts.";
     }
     const equityChangeUsd = now.totalUsd - parseFloat(first.totalUsd);
+    const equityChangeTodayUsd = now.totalUsd - parseFloat(todayBase.totalUsd);
     const tradingPnlUsd = tradingAgg?.total != null ? parseFloat(tradingAgg.total) : 0;
     res.json({
       startingValueUsd: parseFloat(first.totalUsd),
@@ -1593,8 +1608,13 @@ router.post("/arb/account-pnl", async (req, res): Promise<void> => {
       currentValueUsd: now.totalUsd,
       usdBalance: now.usdBalance,
       unrealizedHoldingsUsd: now.holdingsUsd,
-      realizedTodayUsd: now.totalUsd - parseFloat(todayBase.totalUsd),
-      lifetimePnlUsd: equityChangeUsd,
+      // Headline numbers exclude external deposits/withdrawals when the
+      // Kraken ledger could be fetched; otherwise fall back to raw equity
+      // change and flag it via cashFlowAdjusted=false + cashFlowNote.
+      realizedTodayUsd: netCashFlowTodayUsd != null ? equityChangeTodayUsd - netCashFlowTodayUsd : equityChangeTodayUsd,
+      lifetimePnlUsd: netCashFlowUsd != null ? equityChangeUsd - netCashFlowUsd : equityChangeUsd,
+      cashFlowAdjusted: netCashFlowUsd != null && netCashFlowTodayUsd != null,
+      netCashFlowTodayUsd,
       // Three-way decomposition
       equityChangeUsd,
       netCashFlowUsd,
