@@ -2062,8 +2062,7 @@ router.post("/prices", async (req, res): Promise<void> => {
       coinbaseAsk:  cAsk,
       binancePrice: binancePrice ?? null,
       kuCoinPrice:  kuCoinPrice  ?? null,
-      grossSpreadPct,
-      netEdgePct: grossSpreadPct,
+      grossSpreadPct, // gross only — net edge is client-side: gross − (fees + slippage)
       route,
       buyExchange: bestBuyExchange,
       sellExchange: bestSellExchange,

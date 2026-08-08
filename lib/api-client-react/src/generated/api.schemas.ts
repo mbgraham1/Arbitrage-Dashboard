@@ -50,8 +50,8 @@ export interface PriceData {
   coinbaseAsk: number;
   binancePrice?: number | null;
   kuCoinPrice?: number | null;
+  /** Gross top-of-book spread, BEFORE fees/slippage. Net edge is computed client-side as gross − (totalFees + slippage) so it always matches the execution gate. */
   grossSpreadPct: number;
-  netEdgePct: number;
   route: string;
   buyExchange?: string;
   sellExchange?: string;

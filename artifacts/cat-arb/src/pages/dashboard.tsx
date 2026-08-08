@@ -223,7 +223,7 @@ export default function Dashboard() {
                 disabled={isForcingTrade}
                 title={
                   bestForcePair
-                    ? `Rescans, then trades ${bestForcePair.pair} if net edge (after fees + slippage) clears your minimum · gross spread +${bestForcePair.grossSpreadPct.toFixed(3)}%`
+                    ? `Rescans, then trades ${bestForcePair.pair} if net edge clears your minimum · net edge ${(bestForcePair.grossSpreadPct - feesAndSlip) >= 0 ? "+" : ""}${(bestForcePair.grossSpreadPct - feesAndSlip).toFixed(3)}% (gross ${bestForcePair.grossSpreadPct >= 0 ? "+" : ""}${bestForcePair.grossSpreadPct.toFixed(3)}% − ${feesAndSlip.toFixed(2)}% fees+slip)`
                     : "Rescans all pairs, fetches a fresh quote, then trades only if net edge clears your minimum"
                 }
               >
@@ -232,7 +232,7 @@ export default function Dashboard() {
               </Button>
               <span className="text-[10px] font-mono text-muted-foreground leading-none">
                 {bestForcePair
-                  ? <>Best: <span className="font-bold text-foreground">{bestForcePair.pair}</span> <span className={cn(bestForcePair.grossSpreadPct >= 0 ? "text-success" : "text-destructive")}>+{bestForcePair.grossSpreadPct.toFixed(3)}%</span></>
+                  ? <>Best: <span className="font-bold text-foreground">{bestForcePair.pair}</span> <span className={cn((bestForcePair.grossSpreadPct - feesAndSlip) >= 0 ? "text-success" : "text-destructive")}>{(bestForcePair.grossSpreadPct - feesAndSlip) >= 0 ? "+" : ""}{(bestForcePair.grossSpreadPct - feesAndSlip).toFixed(3)}% net</span></>
                   : <span className="italic">SOL/USD (fallback)</span>
                 }
               </span>

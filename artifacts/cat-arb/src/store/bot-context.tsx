@@ -666,7 +666,6 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
             coinbaseBid: freshQ.coinbaseBid,
             coinbaseAsk: freshQ.coinbaseAsk,
             grossSpreadPct: freshQ.grossSpreadPct,
-            netEdgePct: freshNetEdge,
             route: `${best.pair} ${freshQ.buyExchange} → ${freshQ.sellExchange}`,
             buyExchange: freshQ.buyExchange,
             sellExchange: freshQ.sellExchange,

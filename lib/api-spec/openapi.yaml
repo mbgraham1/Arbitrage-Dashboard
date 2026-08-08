@@ -658,7 +658,7 @@ components:
 
     PriceData:
       type: object
-      required: [krakenPrice, krakenBid, krakenAsk, coinbasePrice, coinbaseBid, coinbaseAsk, grossSpreadPct, netEdgePct, route, timestamp, bestBuyExchange, bestSellExchange, buyPrice, sellPrice, executable, wsStatus]
+      required: [krakenPrice, krakenBid, krakenAsk, coinbasePrice, coinbaseBid, coinbaseAsk, grossSpreadPct, route, timestamp, bestBuyExchange, bestSellExchange, buyPrice, sellPrice, executable, wsStatus]
       properties:
         pair:
           type: string
@@ -683,8 +683,7 @@ components:
           nullable: true
         grossSpreadPct:
           type: number
-        netEdgePct:
-          type: number
+          description: "Gross top-of-book spread, BEFORE fees/slippage. Net edge is computed client-side as gross − (totalFees + slippage) so it always matches the execution gate."
         route:
           type: string
         buyExchange:
