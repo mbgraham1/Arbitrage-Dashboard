@@ -642,12 +642,16 @@ export interface GraphExecuteRequest {
 export interface ExecLockClearRequest {
   krakenKey: string;
   krakenSecret: string;
+  /** Also cancel ALL open Kraken orders (kill switch). */
+  cancelOrders?: boolean;
 }
 
 export interface ExecLockClearResult {
   cleared: boolean;
   /** True when a live execution was actually holding the lock */
   wasHeld: boolean;
+  /** Open Kraken orders cancelled (when cancelOrders was set) */
+  cancelledOrders?: number;
 }
 
 export interface GraphExecuteResult {

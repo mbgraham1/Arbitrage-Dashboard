@@ -9,4 +9,6 @@
 export interface ExecLockClearRequest {
   krakenKey: string;
   krakenSecret: string;
+  /** Also cancel ALL open Kraken orders (kill switch). */
+  cancelOrders?: boolean;
 }

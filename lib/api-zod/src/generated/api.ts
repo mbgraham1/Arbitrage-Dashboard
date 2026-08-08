@@ -567,12 +567,14 @@ export const GraphExecuteResponse = zod.object({
  */
 export const ClearExecLockBody = zod.object({
   "krakenKey": zod.string(),
-  "krakenSecret": zod.string()
+  "krakenSecret": zod.string(),
+  "cancelOrders": zod.boolean().optional().describe('Also cancel ALL open Kraken orders (kill switch).')
 })
 
 export const ClearExecLockResponse = zod.object({
   "cleared": zod.boolean(),
-  "wasHeld": zod.boolean().describe('True when a live execution was actually holding the lock')
+  "wasHeld": zod.boolean().describe('True when a live execution was actually holding the lock'),
+  "cancelledOrders": zod.number().optional().describe('Open Kraken orders cancelled (when cancelOrders was set)')
 })
 
 

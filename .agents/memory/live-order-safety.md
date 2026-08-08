@@ -36,3 +36,8 @@ Never time-clear a live execution lock on age alone. Use generation tokens (rele
 
 ## History gates need a fresh re-quote to bypass
 Any 'current edge beats history' bypass of fill-rate gates/blacklists must be limited to execution paths that re-validate the edge with a fresh order-book preflight immediately before placing orders — otherwise a stale scanner edge can authorize a historically-failing route.
+
+## Lock heartbeat + kill switch (Aug 2026)
+- Rate-limit backoff sleeps must beat the lock heartbeat (hook in the private-API limiter). Without it, any "evict silent lock" threshold shorter than the max backoff (~60s) risks double-spend.
+- Manual lock-clear/kill endpoints on an unauthenticated server must require exchange credentials (verified via a private call) — clearing a concurrency lock is a money-safety control.
+- KILL = CancelAll BEFORE releasing the lock (a resting maker leg could fill after release), plus cooperative generation checks in executors before each new leg so an evicted run stops committing capital and unwinds.

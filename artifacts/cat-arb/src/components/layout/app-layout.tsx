@@ -1,6 +1,6 @@
 import * as React from "react"
 import { Link, useLocation } from "wouter"
-import { Activity, Settings, LayoutDashboard, Terminal, Zap, RotateCcw } from "lucide-react"
+import { Activity, Settings, LayoutDashboard, Terminal, Zap, RotateCcw, Skull } from "lucide-react"
 import { useClearExecLock } from "@workspace/api-client-react"
 import { cn } from "@/lib/utils"
 import { BotProvider, useBotContext, ALL_PAIRS } from "@/store/bot-context"
@@ -26,16 +26,18 @@ function NavItem({ href, icon: Icon, label }: { href: string; icon: any; label: 
 function ForceModeControls() {
   const { forceMode, setForceMode, addLog, credentials } = useBotContext();
   const clearLock = useClearExecLock();
-  const hardReset = async () => {
+  const hardReset = async (cancelOrders: boolean) => {
+    const tag = cancelOrders ? "[KILL·SWITCH]" : "[HARD·RESET]";
     if (!credentials.krakenKey || !credentials.krakenSecret) {
-      addLog("warning", "[HARD·RESET] Add Kraken credentials in Config first — clearing the lock requires proof of account ownership.");
+      addLog("warning", `${tag} Add Kraken credentials in Config first — clearing the lock requires proof of account ownership.`);
       return;
     }
     try {
-      const r = await clearLock.mutateAsync({ data: { krakenKey: credentials.krakenKey, krakenSecret: credentials.krakenSecret } });
-      addLog("warning", `[HARD·RESET] Execution lock force-cleared${r.wasHeld ? " (a live execution WAS holding it)" : " (lock was already free)"}.`);
+      const r = await clearLock.mutateAsync({ data: { krakenKey: credentials.krakenKey, krakenSecret: credentials.krakenSecret, cancelOrders } });
+      const cancelled = cancelOrders ? ` ${r.cancelledOrders ?? 0} open Kraken order(s) cancelled.` : "";
+      addLog("warning", `${tag} Execution lock force-cleared${r.wasHeld ? " (a live execution WAS holding it)" : " (lock was already free)"}.${cancelled}`);
     } catch (e) {
-      addLog("error", `[HARD·RESET] Failed: ${e instanceof Error ? e.message : "unknown error"}`);
+      addLog("error", `${tag} Failed: ${e instanceof Error ? e.message : "unknown error"}`);
     }
   };
   return (
@@ -68,7 +70,7 @@ function ForceModeControls() {
         <Tooltip>
           <TooltipTrigger asChild>
             <button
-              onClick={hardReset}
+              onClick={() => hardReset(false)}
               disabled={clearLock.isPending}
               className="flex items-center gap-2 px-2 py-1 border-2 border-border text-xs font-bold uppercase tracking-wider text-muted-foreground hover:text-destructive hover:border-destructive transition-colors disabled:opacity-50"
               data-testid="button-hard-reset"
@@ -79,6 +81,22 @@ function ForceModeControls() {
           </TooltipTrigger>
           <TooltipContent side="bottom" className="max-w-[220px]">
             <p className="text-[11px]">Force-clears the live execution lock if a dead route is holding it. If a trade is genuinely mid-flight, clearing allows concurrent execution — use only when stuck.</p>
+          </TooltipContent>
+        </Tooltip>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <button
+              onClick={() => hardReset(true)}
+              disabled={clearLock.isPending}
+              className="flex items-center gap-2 px-2 py-1 border-2 border-destructive text-xs font-bold uppercase tracking-wider text-destructive hover:bg-destructive/10 transition-colors disabled:opacity-50"
+              data-testid="button-kill-switch"
+            >
+              <Skull className="h-3 w-3" />
+              {clearLock.isPending ? "…" : "KILL"}
+            </button>
+          </TooltipTrigger>
+          <TooltipContent side="bottom" className="max-w-[220px]">
+            <p className="text-[11px]">KILL SWITCH: cancels ALL open Kraken orders on the account, then force-clears the execution lock. One click, full stop.</p>
           </TooltipContent>
         </Tooltip>
       </TooltipProvider>

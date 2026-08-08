@@ -19,6 +19,8 @@ import {
 import {
   getKrakenPrice,
   getKrakenBalances,
+  krakenCancelAllOrders,
+  setPrivateCallHeartbeat,
   krakenMarketOrder,
   krakenLimitOrder,
   krakenRawMarketOrder,
@@ -428,6 +430,25 @@ function releaseLiveLock(gen: number): void {
   }
 }
 
+/** True while `gen` is still the CURRENT lock owner. A KILL/HARD RESET bumps
+ *  the generation, so executors can check this before placing further orders
+ *  (cooperative abort). */
+function liveLockOwned(gen: number): boolean {
+  return liveExecLockHeld && gen === liveExecLockGen;
+}
+/** Milliseconds since the current lock holder's last heartbeat. */
+function liveLockSilentMs(): number {
+  return liveExecLockHeld ? Date.now() - liveExecLockSinceMs : 0;
+}
+/** FORCE MODE eviction threshold — executors heartbeat every ~1s, so 15s of
+ *  silence means the holder is dead. Shorter than LIVE_LOCK_STALE_MS (90s)
+ *  because the trader has explicitly opted into aggressive behavior. */
+const FORCE_LOCK_STALE_MS = 15_000;
+// Every Kraken private API attempt — including rate-limit backoff sleeps —
+// beats the execution-lock heartbeat, so a legitimately waiting executor is
+// never silent long enough (>15s) for FORCE MODE to evict it.
+setPrivateCallHeartbeat(touchLiveLock);
+
 /** HARD RESET: force-release the live lock regardless of holder. Bumps the
  *  generation so the evicted holder's finally-release becomes a no-op. */
 function forceReleaseLiveLock(): boolean {
@@ -483,9 +504,20 @@ router.post("/arb/exec-lock/clear", async (req, res): Promise<void> => {
     res.status(403).json({ error: "Kraken credential check failed — lock not cleared." });
     return;
   }
+  let cancelledOrders: number | undefined;
+  if (req.body?.cancelOrders === true) {
+    // KILL SWITCH: cancel every open Kraken order BEFORE releasing the lock,
+    // so a resting maker leg can't fill while a new execution starts.
+    try {
+      cancelledOrders = await krakenCancelAllOrders({ krakenKey: key, krakenSecret: secret });
+    } catch (e) {
+      res.status(502).json({ error: `Kraken CancelAll failed — lock NOT cleared (open orders may still be live): ${e instanceof Error ? e.message : String(e)}` });
+      return;
+    }
+  }
   const wasHeld = forceReleaseLiveLock();
-  req.log.info({ wasHeld }, "HARD RESET: live execution lock force-cleared");
-  res.json({ cleared: true, wasHeld });
+  req.log.info({ wasHeld, cancelledOrders }, "HARD RESET: live execution lock force-cleared");
+  res.json({ cleared: true, wasHeld, cancelledOrders });
 });
 
 /** Cancel confirmed only by a TERMINAL Kraken order status — a cancel ack is
@@ -781,6 +813,14 @@ async function runKrakenTriangle(input: TriangleExecInput, reqLog: ReqLog): Prom
       legsCompleted = 1;
     }
 
+    // Cooperative KILL check: if a HARD RESET / KILL revoked our lock while
+    // leg 1 ran, stop BEFORE committing more capital. The throw routes into
+    // the normal catch → actual-residual unwind (selling back what leg 1
+    // bought is the money-safest exit even after a kill).
+    if (lockGen != null && !liveLockOwned(lockGen)) {
+      throw new Error("Execution lock revoked (KILL/HARD RESET) — aborted before leg 2; leg 1 inventory unwound.");
+    }
+
     // ── Leg 2: convert A → B on cross. Post-only limit at best bid/ask ───────
     // We already hold A, so retries just re-join the fresh top of book —
     // abandoning here means unwinding at market, which costs the spread anyway.
@@ -854,6 +894,11 @@ async function runKrakenTriangle(input: TriangleExecInput, reqLog: ReqLog): Prom
         throw new Error("Leg 2 reported zero acquired volume despite full fill.");
       }
       legsCompleted = 2;
+    }
+
+    // Cooperative KILL check before the final leg (see leg-2 check above).
+    if (lockGen != null && !liveLockOwned(lockGen)) {
+      throw new Error("Execution lock revoked (KILL/HARD RESET) — aborted before leg 3; held inventory unwound.");
     }
 
     // ── Leg 3: sell B for USD. Post-only limit at best ask → maker fee ───────
@@ -1275,8 +1320,17 @@ router.post("/arb/graph-execute", async (req, res): Promise<void> => {
   // click) must never run concurrently and double-spend the same balance.
   let lockGen: number | null = null;
   if (!isDryRun) {
+    // FORCE MODE lock override: a genuinely live execution heartbeats every
+    // ~1s, so a lock silent for >15s under FORCE MODE is treated as dead and
+    // evicted immediately instead of waiting out the full 90s staleness
+    // window. A lock with a recent heartbeat is NEVER evicted — that would
+    // let two live executions spend the same balance.
+    if (forceMode && liveLockBusy() && liveLockSilentMs() > FORCE_LOCK_STALE_MS) {
+      req.log.warn({ silentMs: liveLockSilentMs() }, "FORCE MODE — evicting silent execution lock");
+      forceReleaseLiveLock();
+    }
     if (liveLockBusy()) {
-      res.json({ success: false, isDryRun, executed: false, route: routeDescription ?? "(top route)", preflightProfitUsd: null, error: "Another LIVE execution is already in progress — refused to run concurrently." });
+      res.json({ success: false, isDryRun, executed: false, route: routeDescription ?? "(top route)", preflightProfitUsd: null, error: forceMode ? "A live execution with a RECENT heartbeat holds the lock — use HARD RESET / KILL if you're sure it's dead." : "Another LIVE execution is already in progress — refused to run concurrently." });
       return;
     }
     lockGen = acquireLiveLock();

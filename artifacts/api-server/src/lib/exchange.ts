@@ -120,12 +120,26 @@ function isRateLimitError(e: unknown): boolean {
  * chain so a read's retry can never block a queued order/unwind behind a
  * multi-second sleep. Reads retry on rate-limit; order mutations never do.
  */
+/** Liveness hook: called on every private-call attempt AND every few seconds
+ *  during rate-limit backoff sleeps, so the execution-lock heartbeat never
+ *  goes silent while a live executor is legitimately waiting on Kraken.
+ *  Registered by the arb router (touches the live execution lock). */
+let privateCallHeartbeat: (() => void) | null = null;
+export function setPrivateCallHeartbeat(fn: () => void): void {
+  privateCallHeartbeat = fn;
+}
+const beat = () => { try { privateCallHeartbeat?.(); } catch { /* never break a call */ } };
+
 async function withPrivateLimiter<T>(key: string, fn: () => Promise<T>, retryOnRateLimit: boolean): Promise<T> {
   const st = limiterFor(key);
   for (let attempt = 0; ; attempt++) {
-    // Wait out an open backoff window WITHOUT holding the chain.
-    const backoffWait = st.rateLimitedUntil - Date.now();
-    if (backoffWait > 0) await new Promise(r => setTimeout(r, backoffWait));
+    // Wait out an open backoff window WITHOUT holding the chain, beating the
+    // liveness hook every ≤5s so the lock heartbeat never goes silent.
+    while (st.rateLimitedUntil - Date.now() > 0) {
+      beat();
+      await new Promise(r => setTimeout(r, Math.min(5_000, Math.max(1, st.rateLimitedUntil - Date.now()))));
+    }
+    beat();
     const p = st.chain.then(async () => {
       const gapWait = st.lastAt + PRIVATE_MIN_GAP_MS - Date.now();
       if (gapWait > 0) await new Promise(r => setTimeout(r, gapWait));
@@ -345,6 +359,12 @@ export async function getKrakenBalances(creds: KrakenCreds, fresh = false): Prom
     .map(([currency, amount]) => ({ currency, amount: parseFloat(amount) }));
   balanceCache.set(cacheKey, { at: Date.now(), val });
   return val;
+}
+
+/** KILL SWITCH support: cancel ALL open Kraken orders on the account. */
+export async function krakenCancelAllOrders(creds: KrakenCreds): Promise<number> {
+  const result = await krakenPrivateRequest<{ count: number }>("/0/private/CancelAll", {}, creds);
+  return result.count ?? 0;
 }
 
 export async function krakenMarketOrder(

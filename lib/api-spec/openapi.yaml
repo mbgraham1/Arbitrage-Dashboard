@@ -1430,6 +1430,9 @@ components:
       properties:
         krakenKey: { type: string }
         krakenSecret: { type: string }
+        cancelOrders:
+          type: boolean
+          description: Also cancel ALL open Kraken orders (kill switch).
 
     ExecLockClearResult:
       type: object
@@ -1439,6 +1442,9 @@ components:
         wasHeld:
           type: boolean
           description: True when a live execution was actually holding the lock
+        cancelledOrders:
+          type: number
+          description: Open Kraken orders cancelled (when cancelOrders was set)
 
     GraphExecuteResult:
       type: object
