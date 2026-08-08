@@ -1749,17 +1749,32 @@ router.post("/arb/execute-triangular", async (req, res): Promise<void> => {
   if (isBtc) {
     btcPrices = getBtcTriPrices();
     if (!btcPrices) {
+      // Request XXBTZUSD + SOLUSD + SOLXBT together. A partial error (e.g.
+      // SOLXBT temporarily unknown/delisted) still returns the other pairs in
+      // `result`, so only a missing result is a hard network/API failure.
+      // Unlike the ETH loop there is no synthetic fallback for SOL/BTC — if
+      // the direct market is absent we return a clear, descriptive error
+      // instead of a generic "Missing pairs" / "Kraken REST error" crash.
       try {
         const r = await fetch("https://api.kraken.com/0/public/Ticker?pair=XXBTZUSD,SOLUSD,SOLXBT", {
           signal: AbortSignal.timeout(5_000),
         });
         const data = await r.json() as { error?: string[]; result?: Record<string, { b: string[]; a: string[] }> };
-        if (data.error?.length || !data.result) throw new Error("Kraken REST error");
+        if (!data.result) throw new Error(`Kraken REST error: ${(data.error ?? []).join(", ") || "no result returned"}`);
         const res_ = data.result;
         const btcKey    = Object.keys(res_).find(k => k.includes("XBT") && k.includes("USD"));
         const solKey    = Object.keys(res_).find(k => k.startsWith("SOL") && k.endsWith("USD"));
+        // SOLXBT may appear under a key variant; search by content.
         const solBtcKey = Object.keys(res_).find(k => k.startsWith("SOL") && k.includes("XBT"));
-        if (!btcKey || !solKey || !solBtcKey) throw new Error("Missing pairs in Kraken response");
+        if (!btcKey || !solKey) {
+          const missing = [!btcKey && "BTC/USD", !solKey && "SOL/USD"].filter(Boolean).join(" and ");
+          throw new Error(`Missing ${missing} in Kraken response`);
+        }
+        if (!solBtcKey) {
+          req.log.warn({ btcKey, solKey }, "SOL/BTC (SOLXBT) market absent from Kraken REST response — BTC triangular loop cannot price its cross leg");
+          res.status(503).json({ error: "SOL/BTC direct market unavailable on Kraken — BTC triangular loops cannot execute" });
+          return;
+        }
         btcPrices = {
           btcBid:    parseFloat(res_[btcKey].b[0]),    btcAsk:    parseFloat(res_[btcKey].a[0]),
           solBid:    parseFloat(res_[solKey].b[0]),     solAsk:    parseFloat(res_[solKey].a[0]),
