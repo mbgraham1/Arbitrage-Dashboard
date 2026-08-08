@@ -11,7 +11,7 @@ import { useTestKraken, useTestCoinbase } from "@workspace/api-client-react";
 const INVENTORY_ASSETS = ["BTC", "ETH", "SOL", "AVAX", "DOT"] as const;
 
 export default function Settings() {
-  const { credentials, setCredentials, settings, setSettings, liveMode, setLiveMode, isRunning, secretsLoaded } = useBotContext();
+  const { credentials, setCredentials, settings, setSettings, liveMode, setLiveMode, isRunning, secretsLoaded, cachedBalances } = useBotContext();
 
   const [localCreds, setLocalCreds] = useState(credentials);
   const [localSettings, setLocalSettings] = useState(settings);
@@ -343,6 +343,47 @@ export default function Settings() {
             </CardDescription>
           </CardHeader>
           <CardContent className="flex flex-col gap-6">
+
+            {/* Live balances — lets traders cross-check Kelly's bankroll & inventory */}
+            <div className="border-2 border-border rounded-sm">
+              <div className="px-3 py-2 border-b-2 border-border flex items-center justify-between">
+                <span className="text-xs font-bold uppercase tracking-wide">Live Balances</span>
+                <span className="text-[10px] font-mono text-muted-foreground">
+                  {cachedBalances ? "refreshes every 30s while bot runs" : isRunning ? "fetching…" : "start bot to load"}
+                </span>
+              </div>
+              {cachedBalances ? (() => {
+                const baseAsset = cachedBalances.baseAsset ?? "SOL";
+                const isNonSol = baseAsset !== "SOL";
+                const krakenAmt = isNonSol
+                  ? (cachedBalances.baseAssetOnKraken ?? 0)
+                  : (cachedBalances.solOnKraken ?? 0);
+                const coinbaseAmt = isNonSol
+                  ? (cachedBalances.baseAssetOnCoinbase ?? 0)
+                  : (cachedBalances.solOnCoinbase ?? 0);
+                const precision = baseAsset === "BTC" ? 6 : 4;
+                return (
+                  <div className="grid grid-cols-3 divide-x-2 divide-border text-center">
+                    <div className="p-2 flex flex-col gap-0.5">
+                      <span className="text-[10px] uppercase text-muted-foreground">Kraken {baseAsset}</span>
+                      <span className="font-mono text-sm">{krakenAmt.toFixed(precision)}</span>
+                    </div>
+                    <div className="p-2 flex flex-col gap-0.5">
+                      <span className="text-[10px] uppercase text-muted-foreground">Coinbase {baseAsset}</span>
+                      <span className="font-mono text-sm">{coinbaseAmt.toFixed(precision)}</span>
+                    </div>
+                    <div className="p-2 flex flex-col gap-0.5 bg-primary/5">
+                      <span className="text-[10px] uppercase text-primary font-bold">Coinbase USD · bankroll</span>
+                      <span className="font-mono text-sm text-primary font-bold">${cachedBalances.usdOnCoinbase?.toFixed(2) ?? "0.00"}</span>
+                    </div>
+                  </div>
+                );
+              })() : (
+                <div className="p-3 text-center text-xs font-mono text-muted-foreground">
+                  No balance data — Kelly sizing uses Coinbase USD as bankroll once the bot fetches balances.
+                </div>
+              )}
+            </div>
 
             <div className="space-y-3">
               <div className="flex flex-col gap-1">
