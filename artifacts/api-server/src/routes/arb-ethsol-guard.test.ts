@@ -28,23 +28,41 @@ vi.mock("../lib/price-cache.js", () => ({
 }));
 
 vi.mock("../lib/exchange.js", () => ({
-  getKrakenPrice:        vi.fn(),
-  getKrakenBalances:     vi.fn(() => Promise.resolve([{ currency: "ZUSD", amount: 1000 }])),
-  krakenMarketOrder:     vi.fn(),
-  krakenLimitOrder:      vi.fn(),
-  krakenRawMarketOrder:  vi.fn(),
-  krakenRawLimitOrder:   vi.fn(),
-  krakenOrderFilled:     vi.fn(),
-  krakenOrderInfo:       vi.fn(),
-  krakenTakerFeePct:     vi.fn(),
-  krakenFillPrice:       vi.fn(),
-  krakenCancelOrder:     vi.fn(),
-  getCoinbaseBalances:   vi.fn(),
-  coinbaseMarketOrder:   vi.fn(),
-  coinbaseLimitOrder:    vi.fn(),
-  coinbaseOrderFilled:   vi.fn(),
-  coinbaseFillPrice:     vi.fn(),
-  coinbaseCancelOrder:   vi.fn(),
+  getKrakenPrice:           vi.fn(),
+  getKrakenBalances:        vi.fn(() => Promise.resolve([{ currency: "ZUSD", amount: 1000 }])),
+  krakenCancelAllOrders:    vi.fn(() => Promise.resolve(0)),
+  setPrivateCallHeartbeat:  vi.fn(),
+  krakenMarketOrder:        vi.fn(),
+  krakenLimitOrder:         vi.fn(),
+  krakenRawMarketOrder:     vi.fn(),
+  krakenRawLimitOrder:      vi.fn(),
+  krakenRawIocLimitOrder:   vi.fn(),
+  krakenOrderFilled:        vi.fn(),
+  krakenOrderInfo:          vi.fn(),
+  krakenTakerFeePct:        vi.fn(() => Promise.resolve(null)),
+  krakenFeeTiers:           vi.fn(() => Promise.resolve(null)),
+  krakenFillPrice:          vi.fn(),
+  krakenCancelOrder:        vi.fn(),
+  krakenAccountValueUsd:    vi.fn(() => Promise.resolve({ totalUsd: 0, usdBalance: 0, holdingsUsd: 0, holdings: [], unpriced: [] })),
+  krakenNetCashFlowUsd:     vi.fn(() => Promise.resolve({ netUsd: 0, entries: 0, approximated: false, complete: true })),
+  coinbaseAccountValueUsd:  vi.fn(() => Promise.resolve({ totalUsd: 0, usdBalance: 0, holdingsUsd: 0, unpriced: [] })),
+  getCoinbaseBalances:      vi.fn(),
+  coinbaseMarketOrder:      vi.fn(),
+  coinbaseLimitOrder:       vi.fn(),
+  coinbaseOrderFilled:      vi.fn(),
+  coinbaseOrderDetails:     vi.fn(),
+  coinbaseFillPrice:        vi.fn(),
+  coinbaseCancelOrder:      vi.fn(),
+  getKrakenBidAsk:          vi.fn(),
+  getCoinbaseBidAsk:        vi.fn(),
+  getCoinbaseProductIncrements: vi.fn(() => Promise.resolve({ baseIncrement: "0.00000001", quoteIncrement: "0.01" })),
+  quantizeDown: (value: number, increment: string) => {
+    const inc = parseFloat(increment);
+    const norm = increment.includes(".") ? increment.replace(/0+$/, "").replace(/\.$/, "") : increment;
+    const decimals = (norm.split(".")[1] ?? "").length;
+    const text = (Math.floor(value / inc + 1e-9) * inc).toFixed(decimals);
+    return { value: parseFloat(text), text };
+  },
   PAIRS: [] as string[],
 }));
 

@@ -3,6 +3,8 @@ import { desc, sql, sum, count, max, avg } from "drizzle-orm";
 import { db, tradesTable, triScanTable, executionQualityTable, accountSnapshotsTable } from "@workspace/db";
 import { desc as dbDesc, eq as dbEq, and as dbAnd, gte as dbGte, count as dbCount, inArray as dbInArray } from "drizzle-orm";
 import { createHash } from "node:crypto";
+import nodeFs from "node:fs";
+import nodePath from "node:path";
 import {
   FetchPricesBody,
   FetchBalancesBody,
@@ -44,6 +46,8 @@ import {
   coinbaseCancelOrder,
   getKrakenBidAsk,
   getCoinbaseBidAsk,
+  getCoinbaseProductIncrements,
+  quantizeDown,
   PAIRS,
   type Pair,
 } from "../lib/exchange";
@@ -525,9 +529,23 @@ router.post("/arb/exec-lock/clear", async (req, res): Promise<void> => {
       return;
     }
   }
+  // KILL must also resolve a pending indeterminate maker order — CancelAll
+  // only covers Kraken; a Coinbase maker order needs its own cancel+confirm.
+  let indeterminateResolved: boolean | undefined;
+  let indeterminateNote: string | null = null;
+  if (req.body?.cancelOrders === true && pendingIndeterminate) {
+    const out = await resolvePendingIndeterminate(
+      { krakenKey: key, krakenSecret: secret },
+      { coinbaseKey: typeof req.body?.coinbaseKey === "string" ? req.body.coinbaseKey : undefined,
+        coinbaseSecret: typeof req.body?.coinbaseSecret === "string" ? req.body.coinbaseSecret : undefined },
+      req.log,
+    );
+    indeterminateResolved = out.cleared;
+    indeterminateNote = out.message;
+  }
   const wasHeld = forceReleaseLiveLock();
-  req.log.info({ wasHeld, cancelledOrders }, "HARD RESET: live execution lock force-cleared");
-  res.json({ cleared: true, wasHeld, cancelledOrders });
+  req.log.info({ wasHeld, cancelledOrders, indeterminateResolved }, "HARD RESET: live execution lock force-cleared");
+  res.json({ cleared: true, wasHeld, cancelledOrders, indeterminateResolved, indeterminateNote });
 });
 
 /** Cancel confirmed only by a TERMINAL Kraken order status — a cancel ack is
@@ -548,6 +566,114 @@ class LockRevokedError extends Error {
     super(`${label}: execution lock revoked (KILL/HARD RESET) — ${detail}`);
   }
 }
+
+// ── Indeterminate maker-order reconciliation gate ─────────────────────────────
+// When a maker order's cancel can't be confirmed to a TERMINAL status, the
+// order may still be resting (or have filled late). Releasing the live lock is
+// not enough — a later execution could overlap with that resting order. This
+// gate persists past the lock: ALL live execution stays blocked until the
+// specific order is verified terminal (automatically retried with the next
+// live request's credentials, or via KILL/HARD RESET).
+interface PendingIndeterminate { exchange: "kraken" | "coinbase"; orderId: string; route: string; sinceMs: number; }
+
+// The gate is persisted to disk so a server RESTART cannot lose it while the
+// order may still be resting — it is reloaded at module init and re-checked
+// before any live-execution lock is acquired.
+const PENDING_STATE_FILE = nodePath.join(process.cwd(), ".state", "pending-indeterminate-order.json");
+function loadPendingIndeterminate(): PendingIndeterminate | null {
+  try {
+    const raw = JSON.parse(nodeFs.readFileSync(PENDING_STATE_FILE, "utf8")) as PendingIndeterminate;
+    if ((raw.exchange === "kraken" || raw.exchange === "coinbase") && typeof raw.orderId === "string" && raw.orderId) return raw;
+  } catch { /* no persisted gate */ }
+  return null;
+}
+let pendingIndeterminate: PendingIndeterminate | null = loadPendingIndeterminate();
+function setPendingIndeterminate(p: PendingIndeterminate | null): void {
+  pendingIndeterminate = p;
+  try {
+    if (p) {
+      nodeFs.mkdirSync(nodePath.dirname(PENDING_STATE_FILE), { recursive: true });
+      nodeFs.writeFileSync(PENDING_STATE_FILE, JSON.stringify(p));
+    } else {
+      nodeFs.rmSync(PENDING_STATE_FILE, { force: true });
+    }
+  } catch (e) {
+    // Persisting is defense-in-depth; the in-memory gate still holds.
+    console.error(`Failed to persist indeterminate-order gate state: ${e instanceof Error ? e.message : String(e)}`);
+  }
+}
+function pendingIndeterminateMsg(): string | null {
+  if (!pendingIndeterminate) return null;
+  const p = pendingIndeterminate;
+  return `LIVE execution blocked: maker order ${p.orderId} on ${p.exchange} (route ${p.route}) is in an INDETERMINATE cancel state — it may still be resting or have filled. It must be confirmed terminal before any new live trade.`;
+}
+// Test-scaled timers so mocked tests can exercise the full state machine fast.
+const IS_TEST_ENV = process.env["NODE_ENV"] === "test" || process.env["VITEST"] === "true";
+const MAKER_CROSS_FILL_WINDOW_MS = IS_TEST_ENV ? 60 : 30_000; // maker leg fill window
+const CANCEL_CONFIRM_MS          = IS_TEST_ENV ? 60 : 10_000; // cancel → terminal confirmation window
+const MAKER_POLL_MS              = IS_TEST_ENV ? 10 : 1_000;  // order-status poll interval
+
+/**
+ * Try to drive the pending indeterminate order to a TERMINAL status: re-issue
+ * the cancel, then poll. Clears the gate ONLY on a confirmed terminal state.
+ * Returns { cleared, message } — when cleared with a late fill, message
+ * reports the ACTUAL filled volume needing manual rebalance (no hedge was
+ * ever placed for it).
+ */
+async function resolvePendingIndeterminate(
+  kCreds: { krakenKey: string; krakenSecret: string },
+  cb: { coinbaseKey?: string; coinbaseSecret?: string },
+  log: { info: (o: unknown, m?: string) => void; error: (o: unknown, m?: string) => void },
+): Promise<{ cleared: boolean; message: string | null }> {
+  const p = pendingIndeterminate;
+  if (!p) return { cleared: true, message: null };
+  const deadline = Date.now() + CANCEL_CONFIRM_MS;
+  if (p.exchange === "kraken") {
+    try { await krakenCancelOrder(kCreds, p.orderId); } catch { /* may already be terminal */ }
+    for (;;) {
+      try {
+        const info = await krakenOrderInfo(kCreds, p.orderId);
+        if (info.status === "closed" || info.status === "canceled" || info.status === "expired") {
+          setPendingIndeterminate(null);
+          log.info({ orderId: p.orderId, status: info.status, volExec: info.volExec }, "Indeterminate maker order resolved to terminal state");
+          return {
+            cleared: true,
+            message: info.volExec > 0
+              ? `Previously indeterminate maker order ${p.orderId} (${p.route}) resolved ${info.status} with ${info.volExec.toFixed(8)} filled — that fill was NEVER hedged; rebalance manually before trading.`
+              : null,
+          };
+        }
+      } catch { /* keep polling */ }
+      if (Date.now() >= deadline) break;
+      await new Promise(r => setTimeout(r, MAKER_POLL_MS));
+    }
+  } else {
+    if (!cb.coinbaseKey || !cb.coinbaseSecret) {
+      return { cleared: false, message: `${pendingIndeterminateMsg()} Coinbase credentials are required to verify/cancel it.` };
+    }
+    const cbCreds = { coinbaseKey: cb.coinbaseKey, coinbaseSecret: cb.coinbaseSecret };
+    try { await coinbaseCancelOrder(cbCreds, p.orderId); } catch { /* may already be terminal */ }
+    for (;;) {
+      try {
+        const d = await coinbaseOrderDetails(cbCreds, p.orderId);
+        if (["FILLED", "CANCELLED", "EXPIRED", "FAILED"].includes(d.status)) {
+          setPendingIndeterminate(null);
+          log.info({ orderId: p.orderId, status: d.status, filledSize: d.filledSize }, "Indeterminate maker order resolved to terminal state");
+          return {
+            cleared: true,
+            message: d.filledSize > 0
+              ? `Previously indeterminate maker order ${p.orderId} (${p.route}) resolved ${d.status} with ${d.filledSize.toFixed(8)} filled — that fill was NEVER hedged; rebalance manually before trading.`
+              : null,
+          };
+        }
+      } catch { /* keep polling */ }
+      if (Date.now() >= deadline) break;
+      await new Promise(r => setTimeout(r, MAKER_POLL_MS));
+    }
+  }
+  return { cleared: false, message: pendingIndeterminateMsg() };
+}
+
 
 router.get("/arb/execution-status", (_req, res): void => {
   const s = execStatus;
@@ -652,6 +778,12 @@ async function runKrakenTriangle(input: TriangleExecInput, reqLog: ReqLog): Prom
     //    the execution aborts and unwinds the ACTUAL residual positions
     //    (queried from the exchange, never assumed from the plan). Success is
     //    only reported when the position ends flat.
+    // Indeterminate-order gate: a maker order from a previous cross-exchange
+    // run whose cancel was never confirmed blocks ALL live execution.
+    const pendMsg = pendingIndeterminateMsg();
+    if (pendMsg) {
+      return { body: { success: false, isDryRun, executed: false, route, preflightProfitUsd: pf.profitUsd, error: pendMsg } };
+    }
     // Single-flight: only one LIVE triangle may run in this process. When the
     // caller (graph-execute) already holds the lock, adopt its token instead
     // of re-checking — checking would see the caller's own lock and self-block.
@@ -1472,6 +1604,16 @@ router.post("/arb/graph-execute", async (req, res): Promise<void> => {
         req.log.error({ err: e }, "FORCE MODE eviction aborted — CancelAll failed, lock kept");
       }
     }
+    // Indeterminate-order gate: an unconfirmed maker cancel from a previous
+    // run blocks ALL live execution until that specific order is verified
+    // terminal. Try to resolve it now with this request's credentials.
+    if (pendingIndeterminate) {
+      const out = await resolvePendingIndeterminate({ krakenKey, krakenSecret }, { coinbaseKey, coinbaseSecret }, req.log);
+      if (!out.cleared || out.message) {
+        res.json({ success: false, isDryRun, executed: false, route: routeDescription ?? "(top route)", preflightProfitUsd: null, error: out.message ?? pendingIndeterminateMsg() });
+        return;
+      }
+    }
     if (liveLockBusy()) {
       res.json({ success: false, isDryRun, executed: false, route: routeDescription ?? "(top route)", preflightProfitUsd: null, error: forceMode ? "A live execution with a RECENT heartbeat holds the lock — use HARD RESET / KILL if you're sure it's dead." : "Another LIVE execution is already in progress — refused to run concurrently." });
       return;
@@ -1649,14 +1791,6 @@ router.post("/arb/graph-execute", async (req, res): Promise<void> => {
       res.json({ success: false, isDryRun: false, executed: false, route: route.description, preflightProfitUsd: route.netProfitUsd, error: "Live execution supports Kraken triangles and 2-leg cross-exchange inventory routes only. Run as dry-run to record the opportunity." });
       return;
     }
-    // Maker-priced cross routes were approved on post-only join economics for
-    // EVERY Kraken leg; this path can only guarantee taker execution on the
-    // hedge leg, so the fills would not match the approved route. Refuse
-    // rather than execute under different economics than were approved.
-    if (executionStyle === "maker") {
-      res.json({ success: false, isDryRun: false, executed: false, route: route.description, preflightProfitUsd: route.netProfitUsd, error: "Maker-style LIVE execution is supported for Kraken triangles only (post-only on every leg). Cross-exchange routes require taker style, or run as dry-run." });
-      return;
-    }
     const [buyHop, sellHop] = [realHops[0]!, realHops[1]!];
     if ((buyHop.exchange === "coinbase" || sellHop.exchange === "coinbase") && (!coinbaseKey || !coinbaseSecret)) {
       res.json({ success: false, isDryRun: false, executed: false, route: route.description, preflightProfitUsd: route.netProfitUsd, error: "Coinbase API credentials are required for this cross-exchange route." });
@@ -1719,12 +1853,147 @@ router.post("/arb/graph-execute", async (req, res): Promise<void> => {
       } catch (e) { log.error(`Failed to write failure ledger row: ${(e as Error).message}`); }
     };
 
+    // ── Maker-first machinery (executionStyle === "maker") ───────────────────
+    // The maker leg is placed FIRST as a post-only limit at the scan's join
+    // price. It gets a bounded fill window; on expiry we cancel and then poll
+    // to a TERMINAL status — a cancel ACK is NOT terminal, the order can still
+    // fill in the race. If the exchange can't confirm a terminal state, we
+    // fail CLOSED with the resting order id (never silent success, never a
+    // hedge sized on an assumed fill). The taker hedge is sized from the
+    // ACTUAL maker fill only — full or partial — so the two legs can never
+    // mismatch.
+
+    /** Kraken maker leg: post-only limit, confirmed-cancel state machine.
+     *  Returns the TERMINAL order info (actual fills). Throws
+     *  IndeterminateOrderError when no terminal status could be confirmed. */
+    const runKrakenMakerLeg = async (txid: string) => {
+      const safe = async () => {
+        try { return await krakenOrderInfo(kCreds, txid); }
+        catch { return { status: "unknown", volExec: 0, price: 0, cost: 0, fee: 0 }; }
+      };
+      const terminal = (s: string) => s === "closed" || s === "canceled" || s === "expired";
+      const deadline = Date.now() + MAKER_CROSS_FILL_WINDOW_MS;
+      let info = await safe();
+      while (!terminal(info.status) && Date.now() < deadline) {
+        touchLiveLock();
+        await new Promise(r => setTimeout(r, MAKER_POLL_MS));
+        info = await safe();
+      }
+      if (terminal(info.status)) return info;
+      // Fill window expired — cancel, then CONFIRM a terminal status.
+      try { await krakenCancelOrder(kCreds, txid); }
+      catch (e) { log.error(`Maker leg cancel request failed (${txid}) — order may still be live: ${(e as Error).message}`); }
+      const confirmDeadline = Date.now() + CANCEL_CONFIRM_MS;
+      info = await safe();
+      while (!terminal(info.status) && Date.now() < confirmDeadline) {
+        touchLiveLock();
+        await new Promise(r => setTimeout(r, MAKER_POLL_MS));
+        info = await safe();
+      }
+      if (!terminal(info.status)) {
+        // Persist the reconciliation gate BEFORE surfacing the error: all live
+        // execution stays blocked until this order is verified terminal.
+        setPendingIndeterminate({ exchange: "kraken", orderId: txid, route: route.description, sinceMs: Date.now() });
+        throw new IndeterminateOrderError(txid, "maker buy leg (graph cross)");
+      }
+      return info; // terminal — volExec reflects any late fill in the cancel race
+    };
+
+    /** Coinbase maker leg: post-only GTC limit, confirmed-cancel state machine. */
+    const runCoinbaseMakerLeg = async (orderId: string) => {
+      const terminal = (s: string) => CB_TERMINAL.has(s);
+      const safe = async () => {
+        try { return await coinbaseOrderDetails(cbCreds, orderId); }
+        catch { return { status: "UNKNOWN", filledSize: 0, filledValue: 0, avgPrice: 0, totalFees: 0 }; }
+      };
+      const deadline = Date.now() + MAKER_CROSS_FILL_WINDOW_MS;
+      let d = await safe();
+      while (!terminal(d.status) && Date.now() < deadline) {
+        touchLiveLock();
+        await new Promise(r => setTimeout(r, MAKER_POLL_MS));
+        d = await safe();
+      }
+      if (terminal(d.status)) return d;
+      try { await coinbaseCancelOrder(cbCreds, orderId); }
+      catch (e) { log.error(`Maker leg cancel request failed (${orderId}) — order may still be live: ${(e as Error).message}`); }
+      const confirmDeadline = Date.now() + CANCEL_CONFIRM_MS;
+      d = await safe();
+      while (!terminal(d.status) && Date.now() < confirmDeadline) {
+        touchLiveLock();
+        await new Promise(r => setTimeout(r, MAKER_POLL_MS));
+        d = await safe();
+      }
+      if (!terminal(d.status)) {
+        setPendingIndeterminate({ exchange: "coinbase", orderId, route: route.description, sinceMs: Date.now() });
+        throw new IndeterminateOrderError(orderId, "maker buy leg (graph cross, Coinbase)");
+      }
+      return d;
+    };
+
     let filledVolume = 0;
     // Realized USD accounting from ACTUAL fills (cost/fee), for the feedback loop.
     let buySpendUsd = 0, sellProceedsUsd = 0;
     try {
-      // ── Buy leg: place, confirm acceptance AND fill, learn ACTUAL volume ───
-      if (buyHop.exchange === "kraken") {
+      // ── Buy leg ─────────────────────────────────────────────────────────────
+      // maker style: post-only limit at the join price, confirmed-cancel on
+      //              timeout; a PARTIAL fill is acceptable — the hedge is sized
+      //              from it, keeping per-unit economics identical.
+      // taker style: market order; must FULLY fill or the run aborts.
+      if (executionStyle === "maker" && buyHop.exchange === "kraken") {
+        const r = await krakenRawLimitOrder(kCreds, "buy", plannedVolume, buyHop.limitPrice, buyHop.pair);
+        buyOrderId = r.txid[0] ?? "";
+        if (!buyOrderId) throw new Error("Kraken maker buy order was not accepted (no txid returned) — nothing executed.");
+        anyAccepted = true;
+        const fill = await runKrakenMakerLeg(buyOrderId); // terminal or throws
+        filledVolume = fill.volExec;
+        buySpendUsd = fill.cost + fill.fee;
+        if (filledVolume <= 0) {
+          throw new Error(`Maker buy leg ${buyOrderId} confirmed ${fill.status} with zero fill inside the ${MAKER_CROSS_FILL_WINDOW_MS / 1000}s window — nothing hedged, no exposure.`);
+        }
+        log.info(`Maker buy leg ${buyOrderId} terminal ${fill.status}: ${filledVolume.toFixed(8)}/${plannedVolume.toFixed(8)} filled — hedging ACTUAL fill only`);
+      } else if (executionStyle === "maker") {
+        // Join price for a BUY is the best BID — the scan's limitPrice for a
+        // Coinbase buy hop is the ask, which post-only would reject. Rest at
+        // the live bid, never above the approved price. Price AND size are
+        // quantized DOWN to the product's REAL increments (fetched live from
+        // Coinbase — never guessed) in the SAFE direction, and the price is
+        // clamped strictly BELOW the live ask so rounding can never produce a
+        // crossing (taker) submission (e.g. tick $0.01, bid 150.009 →
+        // 150.00, never 150.01 when the ask is 150.01).
+        const [cbQuote, cbInc] = await Promise.all([
+          getCoinbaseBidAsk(buyHop.pair as Pair),
+          getCoinbaseProductIncrements(buyHop.pair as Pair),
+        ]);
+        const quoteIncNum = parseFloat(cbInc.quoteIncrement);
+        let pxQ = quantizeDown(Math.min(buyHop.limitPrice, cbQuote.bid), cbInc.quoteIncrement);
+        const belowAsk = quantizeDown(cbQuote.ask - quoteIncNum * 0.5, cbInc.quoteIncrement); // highest tick strictly below the ask
+        if (pxQ.value > belowAsk.value) pxQ = belowAsk;
+        if (!(pxQ.value > 0)) throw new Error(`Cannot place a post-only Coinbase maker buy: no valid price tick below the ask (bid ${cbQuote.bid}, ask ${cbQuote.ask}, tick ${cbInc.quoteIncrement}). Nothing executed.`);
+        const volQ = quantizeDown(plannedVolume, cbInc.baseIncrement);
+        if (!(volQ.value > 0)) throw new Error(`Coinbase maker buy volume ${plannedVolume} is below the product's base increment ${cbInc.baseIncrement}. Nothing executed.`);
+        const submittedVolume = volQ.value;
+        const r = await coinbaseLimitOrder(cbCreds, "BUY", submittedVolume, pxQ.value, buyHop.pair as Pair, cbInc);
+        buyOrderId = r.orderId ?? "";
+        if (!buyOrderId || r.success === false) throw new Error("Coinbase maker buy order was rejected (no order id) — nothing executed.");
+        anyAccepted = true;
+        const d = await runCoinbaseMakerLeg(buyOrderId); // terminal or throws
+        filledVolume = d.filledSize;
+        buySpendUsd = d.filledValue + d.totalFees;
+        if (filledVolume <= 0) {
+          throw new Error(`Maker buy order ${buyOrderId} confirmed ${d.status} with zero fill inside the ${MAKER_CROSS_FILL_WINDOW_MS / 1000}s window — nothing hedged, no exposure.`);
+        }
+        // Reconcile reported fill against the SUBMITTED amount: the hedge is
+        // sized from the actual fill either way, but a fill above what we
+        // submitted means our accounting can't be trusted — refuse to hedge
+        // blind.
+        if (filledVolume > submittedVolume + parseFloat(cbInc.baseIncrement) * 0.5) {
+          throw new Error(`Coinbase maker buy ${buyOrderId} reports ${filledVolume.toFixed(8)} filled — MORE than the submitted ${submittedVolume.toFixed(8)}; refusing to hedge on inconsistent fill data. Verify on Coinbase.`);
+        }
+        if (filledVolume < submittedVolume) {
+          log.info(`Maker buy leg ${buyOrderId} PARTIAL: ${filledVolume.toFixed(8)}/${submittedVolume.toFixed(8)} submitted`);
+        }
+        log.info(`Maker buy leg ${buyOrderId} terminal ${d.status}: ${filledVolume.toFixed(8)}/${submittedVolume.toFixed(8)} filled — hedging ACTUAL fill only`);
+      } else if (buyHop.exchange === "kraken") {
         const r = await krakenRawMarketOrder(kCreds, "buy", plannedVolume, buyHop.pair);
         buyOrderId = r.txid[0] ?? "";
         if (!buyOrderId) throw new Error("Kraken buy order was not accepted (no txid returned) — nothing executed.");
@@ -1762,7 +2031,11 @@ router.post("/arb/graph-execute", async (req, res): Promise<void> => {
           if (!sellOrderId) throw new Error("Kraken sell order was not accepted (no txid returned).");
           const fill = await waitKrakenFill(sellOrderId);
           sellProceedsUsd = fill.cost - fill.fee;
-          if (fill.status !== "closed" || fill.volExec < filledVolume * 0.999) {
+          // Full coverage required: the only permitted shortfall is 8-decimal
+          // volume rounding dust (orders are submitted with toFixed(8)). Any
+          // material unsold residual fails the route and is unwound — never
+          // reported as success with unhedged maker-fill inventory.
+          if (fill.status !== "closed" || filledVolume - fill.volExec > 1e-7) {
             // Only the UNSOLD remainder is residual exposure.
             const residual = Math.max(0, filledVolume - fill.volExec);
             throw new ResidualError(`Kraken sell leg did not fully fill (status ${fill.status}, ${fill.volExec.toFixed(8)}/${filledVolume.toFixed(8)}).`, residual);

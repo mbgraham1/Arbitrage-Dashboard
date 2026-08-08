@@ -42,6 +42,8 @@ Any 'current edge beats history' bypass of fill-rate gates/blacklists must be li
 - Manual lock-clear/kill endpoints on an unauthenticated server must require exchange credentials (verified via a private call) — clearing a concurrency lock is a money-safety control.
 - KILL = CancelAll BEFORE releasing the lock (a resting maker leg could fill after release), plus cooperative generation checks in executors before each new leg so an evicted run stops committing capital and unwinds.
 
+**Post-only price ticks:** a post-only limit price must be normalized to the exchange tick in the SAFE direction (floor for buys) and clamped strictly below the ask BEFORE submission — helper-level rounding (e.g. toFixed(2)) can round a sub-cent bid UP into the ask and turn the maker order into a taker/rejection.
+**Indeterminate cancels:** releasing an execution lock is not enough after an unconfirmed cancel — persist a gate keyed to the specific order id that blocks all live execution until that order is verified terminal, and make KILL paths cancel on every venue involved, not just the primary exchange.
 ## Lock adoption + revoked-run order ban
 - A single-flight execution lock checked both by an outer route handler AND inside the executor it calls will SELF-BLOCK (executor sees its caller's lock). Pass the held generation token down (`heldLockGen`); only the acquirer releases.
 - A run whose lock was revoked (KILL/eviction) may cancel its own resting order and unwind ACTUAL confirmed fills, but must NEVER place new orders (taker fallbacks, retries). Enforce with a typed LockRevokedError carrying the confirmed fill so catch blocks can unwind without guessing volumes; re-check ownership immediately before every fallback order.

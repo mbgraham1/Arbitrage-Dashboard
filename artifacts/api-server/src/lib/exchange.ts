@@ -707,19 +707,72 @@ export async function coinbaseCancelOrder(creds: CoinbaseCreds, orderId: string)
   await coinbaseRequest<unknown>(creds, "POST", "/api/v3/brokerage/orders/batch_cancel", { order_ids: [orderId] });
 }
 
+// ---------------------------------------------------------------------------
+// Coinbase product increments + safe quantization
+// ---------------------------------------------------------------------------
+
+export interface CoinbaseIncrements { baseIncrement: string; quoteIncrement: string; }
+
+/**
+ * Quantize a value DOWN to a multiple of the exchange increment (tick/lot),
+ * returning both the numeric value and the exact decimal string to submit.
+ * Rounding is always toward zero — never up — so a quantized price can never
+ * cross the book and a quantized size can never exceed available funds.
+ */
+export function quantizeDown(value: number, increment: string): { value: number; text: string } {
+  const inc = parseFloat(increment);
+  if (!Number.isFinite(inc) || inc <= 0) throw new Error(`Invalid exchange increment: ${increment}`);
+  // Decimal places from the increment string (trailing zeros stripped:
+  // "0.01000000" → 2 decimals, "1.00" → 0).
+  const norm = increment.includes(".") ? increment.replace(/0+$/, "").replace(/\.$/, "") : increment;
+  const decimals = (norm.split(".")[1] ?? "").length;
+  const steps = Math.floor(value / inc + 1e-9);
+  const text = (steps * inc).toFixed(decimals);
+  return { value: parseFloat(text), text };
+}
+
+// Product increments move essentially never — cache aggressively (1 h).
+const cbIncrementCache = new Map<string, { at: number; val: CoinbaseIncrements }>();
+const CB_INCREMENT_CACHE_MS = 60 * 60_000;
+
+/**
+ * Live price (quote) and size (base) increments for a Coinbase product from
+ * the public product endpoint. Throws when unavailable — live maker orders
+ * must never be submitted with guessed precision.
+ */
+export async function getCoinbaseProductIncrements(pair: Pair): Promise<CoinbaseIncrements> {
+  const product = COINBASE_PRODUCTS[pair];
+  const hit = cbIncrementCache.get(product);
+  if (hit && Date.now() - hit.at < CB_INCREMENT_CACHE_MS) return hit.val;
+  const resp = await fetch(`https://api.exchange.coinbase.com/products/${product}`, { signal: AbortSignal.timeout(10_000) });
+  if (!resp.ok) throw new Error(`Coinbase product info HTTP ${resp.status} for ${product}`);
+  const json = await resp.json() as { base_increment?: string; quote_increment?: string };
+  const baseIncrement = json.base_increment ?? "";
+  const quoteIncrement = json.quote_increment ?? "";
+  if (!(parseFloat(baseIncrement) > 0) || !(parseFloat(quoteIncrement) > 0)) {
+    throw new Error(`Coinbase: missing/invalid increments for ${product} (base=${baseIncrement} quote=${quoteIncrement})`);
+  }
+  const val = { baseIncrement, quoteIncrement };
+  cbIncrementCache.set(product, { at: Date.now(), val });
+  return val;
+}
+
 export async function coinbaseLimitOrder(
   creds: CoinbaseCreds,
   side: "BUY" | "SELL",
   volume: number,
   price: number,
   pair: Pair = "SOL/USD",
+  // When provided, size/price are serialized EXACTLY on the product's real
+  // increments (quantized down) instead of the legacy fixed 4/2 decimals.
+  increments?: CoinbaseIncrements,
 ): Promise<{ orderId?: string; success?: boolean }> {
   const clientOrderId = crypto.randomUUID();
   const productId = COINBASE_PRODUCTS[pair];
   const orderConfig = {
     limit_limit_gtc: {
-      base_size: volume.toFixed(4),
-      limit_price: price.toFixed(2),
+      base_size:   increments ? quantizeDown(volume, increments.baseIncrement).text : volume.toFixed(4),
+      limit_price: increments ? quantizeDown(price, increments.quoteIncrement).text : price.toFixed(2),
       post_only: true,
     },
   };
