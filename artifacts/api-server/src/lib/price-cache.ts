@@ -3,8 +3,10 @@
  *
  * • Tracks bid/ask for 10 pairs across Kraken, Coinbase, Binance, KuCoin
  * • Maintains persistent Kraken WebSocket (v2) for all pairs
+ * • Maintains persistent Coinbase WebSocket (Exchange ticker channel) for all pairs
  * • Falls back to REST if WS price is stale (> 15 s)
- * • Polls Coinbase (2 s), Binance + KuCoin (5 s) via REST
+ * • Coinbase 2 s REST poll kept as fallback while the socket is down
+ * • Polls Binance + KuCoin (5 s) via REST
  * • Keeps ETH/SOL direct market for triangular arb detection
  * • All reconnections are handled automatically
  */
@@ -244,11 +246,73 @@ function startKrakenWs(includeEthSol: boolean): void {
   );
 }
 
-// ── Coinbase REST fast-poll (all pairs) ────────────────────────────────────────
+// ── Coinbase WebSocket (Exchange public ticker channel) ───────────────────────
+// wss://ws-feed.exchange.coinbase.com — subscribes to all pairs' ticker feed.
+// Mirrors startKrakenWs: auto-reconnect via reconnectingWs. The 2 s REST poll
+// below is kept as a fallback and only writes when the WS entry is stale.
+
+// Reverse lookup: "BTC-USD" → "BTC/USD"
+const COINBASE_PRODUCT_TO_PAIR: Record<string, Pair> = Object.fromEntries(
+  (Object.entries(COINBASE_SYMBOL) as [Pair, string][]).map(([pair, product]) => [product, pair])
+) as Record<string, Pair>;
+
+/**
+ * Applies a Coinbase WS ticker update to the pair cache.
+ * Exported for tests (race coverage: WS tick landing during a REST fallback).
+ */
+export function applyCoinbaseWsTick(pair: Pair, bid: number, ask: number, last?: number): void {
+  if (!pairCache.has(pair)) return;
+  const mid = bid > 0 && ask > 0 ? (bid + ask) / 2 : (last ?? 0);
+  if (mid <= 0) return;
+  const entry = pairCache.get(pair)!;
+  entry.coinbase = { price: mid, bid: bid || mid, ask: ask || mid, updatedAt: Date.now(), source: "ws" };
+}
+
+function startCoinbaseWs(): void {
+  reconnectingWs(
+    "wss://ws-feed.exchange.coinbase.com",
+    (ws) => {
+      const productIds = PAIRS.map(p => COINBASE_SYMBOL[p]);
+      console.log(`[price-cache] Coinbase WS subscribing to ${productIds.length} products (ticker channel)`);
+      ws.send(JSON.stringify({
+        type: "subscribe",
+        channels: [{ name: "ticker", product_ids: productIds }],
+      }));
+    },
+    (raw) => {
+      try {
+        const msg = JSON.parse(raw) as {
+          type?: string;
+          product_id?: string;
+          price?: string;
+          best_bid?: string;
+          best_ask?: string;
+          message?: string;
+        };
+        if (msg.type === "error") {
+          console.error(`[price-cache] Coinbase WS error message: ${msg.message ?? raw}`);
+          return;
+        }
+        if (msg.type !== "ticker" || !msg.product_id) return;
+        const pair = COINBASE_PRODUCT_TO_PAIR[msg.product_id];
+        if (!pair) return;
+        applyCoinbaseWsTick(pair, parseFloat(msg.best_bid ?? "0"), parseFloat(msg.best_ask ?? "0"), parseFloat(msg.price ?? "0"));
+      } catch (e) { console.error(`[price-cache] Coinbase WS parse error: ${e}`); }
+    },
+    "Coinbase",
+  );
+}
+
+// ── Coinbase REST fast-poll (fallback while WS is down/stale) ─────────────────
 // Uses api.exchange.coinbase.com/products/{product}/ticker — returns bid + ask.
 
-async function fetchCoinbasePair(pair: Pair): Promise<void> {
+/** Exported for tests (race coverage). Production entry point is startCoinbasePoll(). */
+export async function fetchCoinbasePair(pair: Pair): Promise<void> {
   const product = COINBASE_SYMBOL[pair];
+  // Skip when the WS feed is delivering fresh data — never downgrade a live
+  // ws entry to rest.
+  const existing = pairCache.get(pair)!.coinbase;
+  if (existing && existing.source === "ws" && Date.now() - existing.updatedAt < WS_STALE_MS) return;
   try {
     const r = await fetch(`https://api.exchange.coinbase.com/products/${product}/ticker`, {
       signal: AbortSignal.timeout(3_000),
@@ -261,7 +325,10 @@ async function fetchCoinbasePair(pair: Pair): Promise<void> {
     const mid = bid > 0 && ask > 0 ? (bid + ask) / 2 : last;
     if (mid > 0) {
       const entry = pairCache.get(pair)!;
-      // Honest labeling: Coinbase is REST polled every 2s (no WebSocket feed yet).
+      // Honest labeling: this path is the 2 s REST fallback poll.
+      // Re-check freshness after the await — a WS tick may have landed meanwhile.
+      const cur = entry.coinbase;
+      if (cur && cur.source === "ws" && Date.now() - cur.updatedAt < WS_STALE_MS) return;
       entry.coinbase = { price: mid, bid: bid || mid, ask: ask || mid, updatedAt: Date.now(), source: "rest" };
     }
   } catch { /* ignore */ }
@@ -338,6 +405,7 @@ let initialized = false;
 export function initPriceFeeds(): void {
   if (initialized) return;
   initialized = true;
+  startCoinbaseWs();
   startCoinbasePoll();
   startRestPollers();
   console.log("[price-cache] Price feeds initialised for 10 pairs (BTC, ETH, SOL, AVAX, DOT, POL, LINK, UNI, ATOM, ADA)");
@@ -567,7 +635,13 @@ export async function getPairPrices(pair: Pair): Promise<PairPrices> {
   if (!coinbaseFresh) {
     fallbacks.push(
       getCoinbasePrice(pair)
-        .then(p => { entry.coinbase = { price: p, bid: p, ask: p, updatedAt: Date.now(), source: "rest" }; })
+        .then(p => {
+          // Re-check after the await — a WS tick may have landed meanwhile;
+          // never overwrite a fresh ws entry with a late REST response.
+          const cur = entry.coinbase;
+          if (cur && cur.source === "ws" && Date.now() - cur.updatedAt < WS_STALE_MS) return;
+          entry.coinbase = { price: p, bid: p, ask: p, updatedAt: Date.now(), source: "rest" };
+        })
         .catch(() => {})
     );
   }
@@ -584,8 +658,8 @@ export async function getPairPrices(pair: Pair): Promise<PairPrices> {
     binance:     entry.binance?.price  ?? null,
     kucoin:      entry.kucoin?.price   ?? null,
     wsKraken:   !!(entry.kraken?.source   === "ws" && entry.kraken   && now - entry.kraken.updatedAt   < WS_STALE_MS),
-    // Coinbase has no WS feed — "live" here means the 2s REST poll is fresh.
-    wsCoinbase: !!(entry.coinbase && now - entry.coinbase.updatedAt < WS_STALE_MS),
+    // True only when the Coinbase WebSocket feed is live and fresh (REST fallback → false).
+    wsCoinbase: !!(entry.coinbase?.source === "ws" && entry.coinbase && now - entry.coinbase.updatedAt < WS_STALE_MS),
   };
 }
 

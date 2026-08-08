@@ -627,7 +627,7 @@ export default function Dashboard() {
                 {latestPriceData && (
                   <div className="flex items-center gap-1 text-[10px] font-mono text-muted-foreground">
                     <TrendingUp className="h-3 w-3" />
-                    {latestPriceData.wsStatus.kraken ? "K:WS" : "K:REST·fallback"} / {latestPriceData.wsStatus.coinbase ? "C:REST·2s" : "C:STALE"}
+                    {latestPriceData.wsStatus.kraken ? "K:WS" : "K:REST·fallback"} / {latestPriceData.wsStatus.coinbase ? "C:WS" : "C:REST·fallback"}
                   </div>
                 )}
                 {isRunning && <span className="flex h-2 w-2 rounded-full bg-success animate-pulse" />}
