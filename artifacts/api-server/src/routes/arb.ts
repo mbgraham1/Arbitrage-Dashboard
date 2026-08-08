@@ -612,6 +612,7 @@ async function runKrakenTriangle(input: TriangleExecInput, reqLog: ReqLog): Prom
     // minProfitUsd floor (flat USD, not scaled by trade size).
     const threshold = minProfitUsd;
     if (pf.profitUsd <= threshold) {
+      reqLog.info({ route, freshProfitUsd: pf.profitUsd, threshold, effectiveFeesPct }, "Pre-flight REJECTED — fresh books below profit floor");
       return { body: { success: false, isDryRun, executed: false, route, preflightProfitUsd: pf.profitUsd, error: `Pre-flight failed — fresh profit after ${effectiveFeesPct.toFixed(2)}%/leg fees (${feeStyleNote}) is $${pf.profitUsd.toFixed(4)} ≤ minimum $${threshold.toFixed(4)}.` } };
     }
 
