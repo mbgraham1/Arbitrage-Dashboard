@@ -1756,6 +1756,10 @@ function GraphEngineCard() {
   // The server re-validates everything (fresh scan, slippage buffer, feedback
   // -loop history) before any order — this loop only saves the button click.
   const [autoArmed, setAutoArmed] = useState(false);
+  // Snapshot of the last AUTO fire that went out on a razor-thin edge in live
+  // mode. AUTO deliberately bypasses the thin-edge confirm dialog, so this
+  // surfaces a non-blocking warning row after the fact (never on dry runs).
+  const [autoThinFire, setAutoThinFire] = useState<{ profitUsd: number; tradeSizeUsd: number; description: string; at: number } | null>(null);
   // Configurable cooldown (seconds) between AUTO fires. Applies only after a
   // REAL execution attempt — pre-flight rejections placed no orders, so they
   // clear the cooldown (overlap is prevented by the in-flight lock instead).
@@ -1801,6 +1805,14 @@ function GraphEngineCard() {
     if (dataUpdatedAt !== 0 && dataUpdatedAt === lastFireScanAt.current) return; // one attempt per scan snapshot
     lastFireScanAt.current = dataUpdatedAt;
     lastAutoFire.current = Date.now();
+    // Same thin-edge threshold as the manual confirm gate — but AUTO doesn't
+    // block: record the snapshot so a warning row appears after execution.
+    if (liveMode && topRoute.netProfitUsd < (settings.thinEdgeWarnPct / 100) * tradeSize) {
+      setAutoThinFire({ profitUsd: topRoute.netProfitUsd, tradeSizeUsd: tradeSize, description: topRoute.description, at: Date.now() });
+      addLog("warning", `[GRAPH·AUTO] ⚠ Thin edge — $${topRoute.netProfitUsd.toFixed(4)} on $${tradeSize} trade is below your ${settings.thinEdgeWarnPct}% warning threshold; firing anyway (AUTO).`);
+    } else {
+      setAutoThinFire(null);
+    }
     addLog("info", `[GRAPH·AUTO] Edge $${topRoute.netProfitUsd.toFixed(4)} > floor $${minProfit.toFixed(2)} — auto-firing ${topRoute.description}`);
     void executeRef.current();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1977,6 +1989,37 @@ function GraphEngineCard() {
         <div className={cn("px-3 py-2 text-[11px] font-mono border-b border-border/50", execResult.startsWith("✅") ? "text-success" : "text-destructive")}>
           {execResult}
           {topRoute && !execResult.startsWith("✅") && ` · Current best: ${topRoute.description} | $${topRoute.netProfitUsd.toFixed(4)}`}
+        </div>
+      )}
+      {/* AUTO thin-edge warning — non-blocking, shown after the fire completes.
+          Only set for LIVE fires (never dry runs); mirrors the manual confirm data. */}
+      {autoThinFire && !executeMutation.isPending && (
+        <div className="px-3 py-3 border-b-2 border-amber-500 bg-amber-500/10 flex flex-col gap-2" data-testid="banner-auto-thin-edge">
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex items-center gap-2 text-amber-500 font-bold text-[11px] font-mono uppercase">
+              ⚠ AUTO fired on a thin edge ({format(autoThinFire.at, "HH:mm:ss")})
+            </div>
+            <button
+              onClick={() => setAutoThinFire(null)}
+              className="text-[10px] font-mono text-muted-foreground hover:text-foreground border border-border px-1.5 py-0.5"
+              aria-label="Dismiss thin-edge warning"
+            >
+              DISMISS
+            </button>
+          </div>
+          <div className="grid grid-cols-3 gap-x-4 gap-y-0.5 text-[10px] font-mono">
+            <span className="text-muted-foreground">Expected profit</span>
+            <span className="text-muted-foreground">Trade size</span>
+            <span className="text-muted-foreground">Break-even move</span>
+            <span className="font-bold text-amber-500">${autoThinFire.profitUsd.toFixed(4)}</span>
+            <span className="font-bold">${autoThinFire.tradeSizeUsd.toFixed(2)}</span>
+            <span className="font-bold text-destructive">
+              {((autoThinFire.profitUsd / autoThinFire.tradeSizeUsd) * 100).toFixed(3)}% of price
+            </span>
+          </div>
+          <p className="text-[10px] font-mono text-muted-foreground">
+            {autoThinFire.description} — edge was below your {settings.thinEdgeWarnPct}% warning threshold. AUTO executed without confirmation; consider raising your profit floor if this keeps happening.
+          </p>
         </div>
       )}
       {!execResult && topRoute && topRoute.netProfitUsd <= minProfit && (
