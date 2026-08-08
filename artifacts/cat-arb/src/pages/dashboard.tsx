@@ -265,7 +265,7 @@ export default function Dashboard() {
                 disabled={isForcingTrade}
                 title={
                   bestForcePair
-                    ? `Rescans, then trades ${bestForcePair.pair} if net edge clears your minimum · net edge ${(bestForcePair.grossSpreadPct - feesAndSlip) >= 0 ? "+" : ""}${(bestForcePair.grossSpreadPct - feesAndSlip).toFixed(3)}% (gross ${bestForcePair.grossSpreadPct >= 0 ? "+" : ""}${bestForcePair.grossSpreadPct.toFixed(3)}% − ${feesAndSlip.toFixed(2)}% fees+slip)`
+                    ? `Rescans, then trades ${bestForcePair.pair} if net edge clears your minimum · net edge ${(bestForcePair.grossSpreadPct - feesAndSlip) >= 0 ? "+" : ""}${(bestForcePair.grossSpreadPct - feesAndSlip).toFixed(3)}% (gross ${bestForcePair.grossSpreadPct >= 0 ? "+" : ""}${bestForcePair.grossSpreadPct.toFixed(3)}% − ${feesAndSlip.toFixed(2)}% fees+slip) · buy ${bestForcePair.buyExchange} → sell ${bestForcePair.sellExchange}`
                     : "Rescans all pairs, fetches a fresh quote, then trades only if net edge clears your minimum"
                 }
               >
