@@ -9,6 +9,7 @@ import { cn } from "@/lib/utils";
 import { TriProfitChart } from "@/components/tri-profit-chart";
 
 const TRI_PAGE_SIZE = 100;
+const EXEC_PAGE_SIZE = 50;
 
 const TRI_SIZE_STORAGE_KEY = "tri-counterfactual-trade-size-usd";
 const TRI_SIZE_MIN = 100;
@@ -32,6 +33,7 @@ type Tab = "executions" | "triangular";
 export default function Trades() {
   const [tab, setTab] = useState<Tab>("executions");
   const [triPage, setTriPage] = useState(0);
+  const [execPage, setExecPage] = useState(0);
   // Applied (clamped) trade size driving the query, plus the raw input text so
   // the user can type freely before the value is committed on blur/Enter.
   const [triSizeUsd, setTriSizeUsd] = useState<number>(() => loadStoredTriSize());
@@ -51,7 +53,7 @@ export default function Trades() {
     }
   };
 
-  const tradesQuery = useListTrades();
+  const tradesQuery = useListTrades({ limit: EXEC_PAGE_SIZE, offset: execPage * EXEC_PAGE_SIZE });
   const summaryQuery = useGetTradeSummary();
   const triHistoryQuery = useGetTriangularHistory(
     { limit: TRI_PAGE_SIZE, offset: triPage * TRI_PAGE_SIZE },
@@ -67,6 +69,11 @@ export default function Trades() {
   const triItems = triHistoryQuery.data?.items ?? [];
   const triTotal = triHistoryQuery.data?.total ?? 0;
   const triSummary = triSummaryQuery.data;
+
+  const execTotal = summary?.totalTrades ?? 0;
+  const execTotalPages = Math.max(1, Math.ceil(execTotal / EXEC_PAGE_SIZE));
+  const execRangeStart = execTotal === 0 ? 0 : execPage * EXEC_PAGE_SIZE + 1;
+  const execRangeEnd = execPage * EXEC_PAGE_SIZE + trades.length;
 
   const triTotalPages = Math.max(1, Math.ceil(triTotal / TRI_PAGE_SIZE));
   const triRangeStart = triTotal === 0 ? 0 : triPage * TRI_PAGE_SIZE + 1;
@@ -151,6 +158,11 @@ export default function Trades() {
           <CardHeader className="py-3">
             <CardTitle className="text-sm flex items-center gap-2">
               <BarChart2 className="h-4 w-4" /> Execution History
+              {execTotal > 0 && (
+                <span className="ml-auto text-xs text-muted-foreground font-normal font-mono">
+                  Showing {execRangeStart}–{execRangeEnd} of {execTotal}
+                </span>
+              )}
             </CardTitle>
           </CardHeader>
           <CardContent className="p-0 overflow-x-auto">
@@ -214,6 +226,35 @@ export default function Trades() {
               </table>
             )}
           </CardContent>
+          {execTotal > EXEC_PAGE_SIZE && (
+            <div className="flex items-center justify-between px-4 py-3 border-t border-border">
+              <span className="text-xs font-mono text-muted-foreground">
+                Page {execPage + 1} of {execTotalPages}
+              </span>
+              <div className="flex items-center gap-2">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-7 px-2 text-xs font-mono"
+                  disabled={execPage === 0 || tradesQuery.isFetching}
+                  onClick={() => setExecPage((p) => Math.max(0, p - 1))}
+                >
+                  <ChevronLeft className="h-3.5 w-3.5 mr-1" />
+                  Prev
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-7 px-2 text-xs font-mono"
+                  disabled={execPage >= execTotalPages - 1 || tradesQuery.isFetching}
+                  onClick={() => setExecPage((p) => Math.min(execTotalPages - 1, p + 1))}
+                >
+                  Next
+                  <ChevronRight className="h-3.5 w-3.5 ml-1" />
+                </Button>
+              </div>
+            </div>
+          )}
         </Card>
       )}
 
