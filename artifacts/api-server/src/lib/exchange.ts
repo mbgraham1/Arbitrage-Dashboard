@@ -916,12 +916,17 @@ export async function getCoinbaseBalances(creds: CoinbaseCreds): Promise<Balance
  *  - staked:    held in staking wrappers (e.g. ETH2 or accounts marked staked)
  * Staked funds are NOT tradable until unstaked.
  */
+export type CoinbaseAssetAccount = {
+  currency: string; name: string | null; type: string | null;
+  available: number; hold: number; staked: boolean;
+};
 export async function getCoinbaseAssetDetail(
   creds: CoinbaseCreds,
   currency: string,
-): Promise<{ available: number; hold: number; staked: number; total: number }> {
+): Promise<{ available: number; hold: number; staked: number; total: number; accounts: CoinbaseAssetAccount[]; accountsScanned: number }> {
   const want = currency.toUpperCase();
-  let available = 0, hold = 0, staked = 0;
+  let available = 0, hold = 0, staked = 0, accountsScanned = 0;
+  const accounts: CoinbaseAssetAccount[] = [];
   let cursor: string | undefined;
   for (let page = 0; page < 20; page++) {
     const qs = `limit=250${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`;
@@ -933,21 +938,21 @@ export async function getCoinbaseAssetDetail(
       has_next?: boolean; cursor?: string;
     }>(creds, "GET", `/api/v3/brokerage/accounts?${qs}`);
     for (const a of data.accounts || []) {
+      accountsScanned++;
       const cur = (a.currency || "").toUpperCase();
       const avail = parseFloat(a.available_balance?.value ?? "0") || 0;
       const held = parseFloat(a.hold?.value ?? "0") || 0;
-      const isStakedWrapper = cur === `${want}2` || /staked/i.test(a.name ?? "") || /staked/i.test(a.type ?? "");
-      if (cur === want && !isStakedWrapper) {
-        available += avail;
-        hold += held;
-      } else if (isStakedWrapper && (cur === want || cur === `${want}2`)) {
-        staked += avail + held;
-      }
+      const isStakedWrapper = cur === `${want}2` || /stak/i.test(a.name ?? "") || /stak/i.test(a.type ?? "");
+      const related = cur === want || cur === `${want}2`;
+      if (!related) continue;
+      accounts.push({ currency: cur, name: a.name ?? null, type: a.type ?? null, available: avail, hold: held, staked: isStakedWrapper });
+      if (isStakedWrapper) staked += avail + held;
+      else { available += avail; hold += held; }
     }
     if (!data.has_next || !data.cursor) break;
     cursor = data.cursor;
   }
-  return { available, hold, staked, total: available + hold + staked };
+  return { available, hold, staked, total: available + hold + staked, accounts, accountsScanned };
 }
 
 export async function coinbaseMarketOrder(

@@ -523,6 +523,15 @@ export interface TwoExchangeTestLeg {
   error?: string | null;
 }
 
+export type TwoExchangeTestResultBalancesCoinbaseEthAccountsItem = {
+  currency?: string;
+  name?: string | null;
+  type?: string | null;
+  available?: number;
+  hold?: number;
+  staked?: boolean;
+};
+
 /**
  * Balances actually read from the exchanges during the check
  */
@@ -536,6 +545,10 @@ export type TwoExchangeTestResultBalances = {
   coinbaseEthHold?: number;
   /** Total ETH held (available + hold + staked) */
   coinbaseEthTotal?: number;
+  /** How many Coinbase accounts the key's portfolio exposed */
+  coinbaseAccountsScanned?: number;
+  /** Every ETH-related account visible to this API key's portfolio */
+  coinbaseEthAccounts?: TwoExchangeTestResultBalancesCoinbaseEthAccountsItem[];
 } | null;
 
 export interface TwoExchangeTestResult {

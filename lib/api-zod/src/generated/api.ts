@@ -628,7 +628,16 @@ export const RunTwoExchangeTestResponse = zod.object({
   "coinbaseEth": zod.number().optional().describe('Tradable (available) ETH — the only ETH the sell leg can use'),
   "coinbaseEthStaked": zod.number().optional().describe('Staked ETH — NOT tradable until unstaked'),
   "coinbaseEthHold": zod.number().optional().describe('ETH locked by open orders \/ pending activity'),
-  "coinbaseEthTotal": zod.number().optional().describe('Total ETH held (available + hold + staked)')
+  "coinbaseEthTotal": zod.number().optional().describe('Total ETH held (available + hold + staked)'),
+  "coinbaseAccountsScanned": zod.number().optional().describe('How many Coinbase accounts the key\'s portfolio exposed'),
+  "coinbaseEthAccounts": zod.array(zod.object({
+  "currency": zod.string().optional(),
+  "name": zod.string().nullish(),
+  "type": zod.string().nullish(),
+  "available": zod.number().optional(),
+  "hold": zod.number().optional(),
+  "staked": zod.boolean().optional()
+})).optional().describe('Every ETH-related account visible to this API key\'s portfolio')
 }).nullish().describe('Balances actually read from the exchanges during the check'),
   "buyLeg": zod.object({
   "exchange": zod.string().optional(),

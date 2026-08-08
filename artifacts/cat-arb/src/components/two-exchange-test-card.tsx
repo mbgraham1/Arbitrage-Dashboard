@@ -99,6 +99,19 @@ export function TwoExchangeTestCard() {
                 {(last.balances.coinbaseEthStaked ?? 0) > 0 && (last.balances.coinbaseEth ?? 0) < ((last.balances.coinbaseEthTotal ?? 0)) && (
                   <div className="text-amber-500">Staked ETH cannot be used for the sell leg — only the tradable amount counts.</div>
                 )}
+                {last.balances.coinbaseEthAccounts && last.balances.coinbaseEthAccounts.length > 0 && (
+                  <div className="text-muted-foreground">
+                    ETH accounts visible to this API key:{" "}
+                    {last.balances.coinbaseEthAccounts.map((a, i) => (
+                      <span key={i} className="mr-2">{a.name ?? a.currency}{a.staked ? " (staked)" : ""}: {((a.available ?? 0) + (a.hold ?? 0)).toFixed(8)}</span>
+                    ))}
+                  </div>
+                )}
+                {last.balances.coinbaseEthAccounts && last.balances.coinbaseEthAccounts.length === 0 && (
+                  <div className="text-red-500">
+                    No ETH account is visible to this API key's portfolio ({last.balances.coinbaseAccountsScanned ?? 0} accounts scanned) — your ETH likely sits in a different Coinbase portfolio or in staking the trading API can't see. Move/buy unstaked ETH in this key's portfolio, or create an API key on the portfolio holding the ETH.
+                  </div>
+                )}
               </div>
             )}
             {last.blockReason && <div className="text-amber-500">blocked: {last.blockReason}</div>}

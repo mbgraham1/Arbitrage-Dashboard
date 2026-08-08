@@ -60,7 +60,11 @@ router.post("/arb/two-exchange-test", async (req, res): Promise<void> => {
   const kCreds = { krakenKey: b.krakenKey, krakenSecret: b.krakenSecret };
   const cbCreds = { coinbaseKey: b.coinbaseKey, coinbaseSecret: b.coinbaseSecret };
 
-  let balancesSeen: { krakenUsd: number; coinbaseEth: number; coinbaseEthStaked: number; coinbaseEthHold: number; coinbaseEthTotal: number } | null = null;
+  let balancesSeen: {
+    krakenUsd: number; coinbaseEth: number; coinbaseEthStaked: number; coinbaseEthHold: number; coinbaseEthTotal: number;
+    coinbaseEthAccounts: Array<{ currency: string; name: string | null; type: string | null; available: number; hold: number; staked: boolean }>;
+    coinbaseAccountsScanned: number;
+  } | null = null;
   const blocked = (reason: string) => {
     res.json({ success: false, isDryRun, outcome: "blocked", blockReason: reason, balances: balancesSeen, buyLeg: null, sellLeg: null, realizedProfitUsd: null, residualEthOpen: null, startedAt, finishedAt: new Date().toISOString(), error: null });
   };
@@ -85,7 +89,12 @@ router.post("/arb/two-exchange-test", async (req, res): Promise<void> => {
       const [kBals, ethDetail] = await Promise.all([getKrakenBalances(kCreds, true), getCoinbaseAssetDetail(cbCreds, "ETH")]);
       kUsd = kBals.filter(x => ["ZUSD", "USD"].includes(x.currency)).reduce((a, x) => a + x.amount, 0);
       cbEth = ethDetail.available; // ONLY tradable ETH counts — staked/held ETH cannot fund a sell
-      balancesSeen = { krakenUsd: kUsd, coinbaseEth: ethDetail.available, coinbaseEthStaked: ethDetail.staked, coinbaseEthHold: ethDetail.hold, coinbaseEthTotal: ethDetail.total };
+      balancesSeen = {
+        krakenUsd: kUsd, coinbaseEth: ethDetail.available, coinbaseEthStaked: ethDetail.staked,
+        coinbaseEthHold: ethDetail.hold, coinbaseEthTotal: ethDetail.total,
+        coinbaseEthAccounts: ethDetail.accounts, coinbaseAccountsScanned: ethDetail.accountsScanned,
+      };
+      req.log.info({ eth: ethDetail, krakenUsd: kUsd }, "[2XTEST] balance check breakdown");
     } catch (e) {
       blocked(`Balance check failed (bad credentials or exchange error): ${(e as Error).message}`); return;
     }
@@ -93,12 +102,15 @@ router.post("/arb/two-exchange-test", async (req, res): Promise<void> => {
     if (kUsd < sizeUsd * 1.01) { blocked(`Insufficient USD on Kraken: need ~$${(sizeUsd * 1.01).toFixed(2)} incl. fees, have $${kUsd.toFixed(2)}.`); return; }
     if (cbEth < needEth) {
       const b = balancesSeen;
+      const shortfall = needEth - cbEth;
       const stakedNote = b && b.coinbaseEthStaked > 0
-        ? ` You hold ${b.coinbaseEthTotal.toFixed(8)} ETH total on Coinbase, but ${b.coinbaseEthStaked.toFixed(8)} is STAKED — staked ETH cannot be used for the sell leg until you unstake it (Coinbase unstaking can take hours to days).`
+        ? ` You hold ${b.coinbaseEthTotal.toFixed(8)} ETH total, but ${b.coinbaseEthStaked.toFixed(8)} is STAKED — staked ETH cannot be used for the sell leg until you unstake it (Coinbase unstaking can take hours to days).`
         : b && b.coinbaseEthHold > 0
           ? ` ${b.coinbaseEthHold.toFixed(8)} ETH is on hold (open orders or pending activity).`
-          : "";
-      blocked(`Insufficient TRADABLE ETH on Coinbase: need ~${needEth.toFixed(6)} ETH (incl. 2% fill cushion), tradable balance is ${cbEth.toFixed(6)}.${stakedNote} Fund Coinbase with ~$${sizeUsd + 1} of unstaked ETH to proceed.`);
+          : b && b.coinbaseEthAccounts.length === 0
+            ? ` The trading API found NO ETH account in the portfolio this API key can see (${b.coinbaseAccountsScanned} accounts scanned). Your ETH (and its staking) likely lives in a DIFFERENT Coinbase portfolio, or in staking that the trading API cannot see or sell. Either move/buy unstaked ETH in the portfolio this API key is scoped to, or create a key on the portfolio that holds the ETH.`
+            : "";
+      blocked(`Insufficient TRADABLE ETH on Coinbase: need ~${needEth.toFixed(8)} ETH (incl. 2% fill cushion), tradable is ${cbEth.toFixed(8)} — short by ${shortfall.toFixed(8)} ETH.${stakedNote} Only unstaked/tradable ETH counts. Fund with ~$${(sizeUsd + 1).toFixed(0)} of unstaked ETH to proceed.`);
       return;
     }
 

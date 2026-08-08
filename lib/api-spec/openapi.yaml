@@ -1565,6 +1565,19 @@ components:
             coinbaseEthStaked: { type: number, description: "Staked ETH — NOT tradable until unstaked" }
             coinbaseEthHold: { type: number, description: "ETH locked by open orders / pending activity" }
             coinbaseEthTotal: { type: number, description: "Total ETH held (available + hold + staked)" }
+            coinbaseAccountsScanned: { type: number, description: "How many Coinbase accounts the key's portfolio exposed" }
+            coinbaseEthAccounts:
+              type: array
+              description: Every ETH-related account visible to this API key's portfolio
+              items:
+                type: object
+                properties:
+                  currency: { type: string }
+                  name: { type: string, nullable: true }
+                  type: { type: string, nullable: true }
+                  available: { type: number }
+                  hold: { type: number }
+                  staked: { type: boolean }
         buyLeg:
           allOf: [{ $ref: "#/components/schemas/TwoExchangeTestLeg" }]
           nullable: true

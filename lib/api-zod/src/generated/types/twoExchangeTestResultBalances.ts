@@ -5,6 +5,7 @@
  * CAT Arbitrage Dashboard API
  * OpenAPI spec version: 0.1.0
  */
+import type { TwoExchangeTestResultBalancesCoinbaseEthAccountsItem } from './twoExchangeTestResultBalancesCoinbaseEthAccountsItem';
 
 /**
  * Balances actually read from the exchanges during the check
@@ -19,4 +20,8 @@ export type TwoExchangeTestResultBalances = {
   coinbaseEthHold?: number;
   /** Total ETH held (available + hold + staked) */
   coinbaseEthTotal?: number;
+  /** How many Coinbase accounts the key's portfolio exposed */
+  coinbaseAccountsScanned?: number;
+  /** Every ETH-related account visible to this API key's portfolio */
+  coinbaseEthAccounts?: TwoExchangeTestResultBalancesCoinbaseEthAccountsItem[];
 } | null;
