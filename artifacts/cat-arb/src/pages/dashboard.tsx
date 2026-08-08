@@ -10,6 +10,7 @@ import {
 } from "lucide-react";
 import { format } from "date-fns";
 import { cn } from "@/lib/utils";
+import { useToast } from "@/hooks/use-toast";
 import { useGetTradeSummary, useListTrades, useScanAllPairs, useGetObScan, getGetObScanQueryKey, useObExecute, useGetAllPairSnapshots, getGetAllPairSnapshotsQueryKey, useGetGraphScan, getGetGraphScanQueryKey, useGraphExecute, useGetFeeTier, getGetFeeTierQueryKey, useGetExecutionQuality, getGetExecutionQualityQueryKey, useGetExecutionStatus, getGetExecutionStatusQueryKey, useGetAccountPnl, getGetAccountPnlQueryKey, useGetInventoryScan, getGetInventoryScanQueryKey, useInventoryExecute, TradeRecord, PairScanEntry, ObCycleEntry, AllPairSnapshot, GraphRoute, GraphRouteHop, InventoryOpportunity, InventoryRebalanceAlert } from "@workspace/api-client-react";
 
 // ── Small helpers ──────────────────────────────────────────────────────────────
@@ -1441,6 +1442,31 @@ function TriangularCard({
   const krakenSynth = priceSource?.kraken === "synthetic";
   const coinbaseSynth = priceSource?.coinbase === "synthetic";
 
+  // ── SYNTH → DIRECT upgrade detection ────────────────────────────────────────
+  // Fire a one-time toast + brief badge highlight the first time the Kraken
+  // ETH/SOL source flips from synthetic to direct in this session.
+  const { toast } = useToast();
+  const prevKrakenSource = useRef<"direct" | "synthetic" | undefined>(undefined);
+  const upgradeToastFired = useRef(false);
+  const [justUpgraded, setJustUpgraded] = useState(false);
+  const krakenSource = priceSource?.kraken;
+  useEffect(() => {
+    const upgraded =
+      prevKrakenSource.current === "synthetic" &&
+      krakenSource === "direct" &&
+      !upgradeToastFired.current;
+    prevKrakenSource.current = krakenSource;
+    if (!upgraded) return undefined;
+    upgradeToastFired.current = true;
+    toast({
+      title: "ETH/SOL upgraded to direct prices",
+      description: "Kraken now lists a live ETH/SOL market — the triangular scanner switched from synthetic cross rates to direct order-book prices.",
+    });
+    setJustUpgraded(true);
+    const id = setTimeout(() => setJustUpgraded(false), 8_000);
+    return () => clearTimeout(id);
+  }, [krakenSource, toast]);
+
   return (
     <Card>
       <CardHeader className="py-3 flex flex-row items-center justify-between space-y-0">
@@ -1462,7 +1488,10 @@ function TriangularCard({
               )}
               {!krakenSynth && priceSource.kraken === "direct" && (
                 <span
-                  className="text-[9px] font-mono font-bold px-1 border border-success text-success"
+                  className={cn(
+                    "text-[9px] font-mono font-bold px-1 border border-success text-success",
+                    justUpgraded && "animate-pulse bg-success/20 ring-2 ring-success",
+                  )}
                   title="Kraken ETH/SOL direct market — live real-time prices"
                 >
                   K:DIRECT
