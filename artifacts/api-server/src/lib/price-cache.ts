@@ -141,6 +141,11 @@ let activeKrakenWs: WebSocket | null = null;
 function subscribeEthSolOnKrakenWs(): void {
   if (ethSolSubscribed) return;
   ethSolSubscribed = true;
+  // Pair is confirmed live — the periodic re-check is no longer needed.
+  if (ethSolRecheckInterval != null) {
+    clearInterval(ethSolRecheckInterval);
+    ethSolRecheckInterval = null;
+  }
   if (activeKrakenWs && activeKrakenWs.readyState === WebSocket.OPEN) {
     console.log("[price-cache] Kraken WS: dynamically subscribing to ETH/SOL (pair is now live)");
     try {
@@ -162,9 +167,12 @@ function subscribeEthSolOnKrakenWs(): void {
  * dynamically so the scanner switches from synthetic cross rates to direct prices
  * without requiring a server restart.
  */
+let ethSolRecheckInterval: ReturnType<typeof setInterval> | null = null;
+
 function scheduleEthSolRecheck(): void {
   const RECHECK_MS = 15 * 60_000; // 15 minutes
-  setInterval(async () => {
+  if (ethSolSubscribed) return; // already on direct prices — no re-check needed
+  ethSolRecheckInterval = setInterval(async () => {
     if (ethSolSubscribed) return; // already on direct prices — nothing to do
     const available = await checkKrakenEthSolAvailability();
     if (available) {
