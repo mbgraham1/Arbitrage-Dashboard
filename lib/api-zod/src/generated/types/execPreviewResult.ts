@@ -32,5 +32,9 @@ export interface ExecPreviewResult {
   makerFillProbability?: number | null;
   /** Which path adaptive mode would fire right now: taker (fresh taker net ≥ floor), maker (maker expected realized ≥ floor), or skip */
   adaptiveChoice?: string | null;
+  /** Age (ms) of the streamed book snapshot this preview was computed from; null when REST books were used */
+  quoteAgeMs?: number | null;
+  /** ISO timestamp of the snapshot used for this preview (scanner timestamp) */
+  asOf?: string | null;
   error?: string | null;
 }

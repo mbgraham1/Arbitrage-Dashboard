@@ -582,6 +582,7 @@ export const graphExecuteBodyExecutionStyleDefault = `taker`;
 export const graphExecuteBodyForceModeDefault = false;
 export const graphExecuteBodyMaxRepricesDefault = 4;
 export const graphExecuteBodyAlwaysTakerFallbackDefault = false;
+export const graphExecuteBodyMaxQuoteAgeMsDefault = 250;
 
 export const GraphExecuteBody = zod.object({
   "krakenKey": zod.string(),
@@ -599,7 +600,8 @@ export const GraphExecuteBody = zod.object({
   "maxReprices": zod.number().default(graphExecuteBodyMaxRepricesDefault).describe('Max leg-1 maker reprices (cancel + re-place at the freshest aggressive maker price, pre-flight re-run each time) before the route is abandoned so execution falls through to the next-best one.\n'),
   "makerTimeoutMs": zod.number().optional().describe('Per-leg maker fill window in ms (clamped 1000–30000 server-side). Lower = faster taker fallback; default derives from maxReprices.\n'),
   "partialFillTolerancePct": zod.number().optional().describe('Partial-fill acceptance in percent (server clamps to 50–100; default 99.9). A leg filled to at least this fraction counts as complete — the cycle proceeds sized to the actual fill and any residual inventory is swept back to USD at market instead of the whole cycle unwinding.\n'),
-  "alwaysTakerFallback": zod.boolean().default(graphExecuteBodyAlwaysTakerFallbackDefault).describe('Trader-directed — when the leg-1 maker order doesn\'t fill in its window, fire the taker fallback immediately WITHOUT the taker-priced profit-floor gate. A decayed edge will execute at the fresh taker price, possibly at a loss. Still requires a readable fresh order book.\n')
+  "alwaysTakerFallback": zod.boolean().default(graphExecuteBodyAlwaysTakerFallbackDefault).describe('Trader-directed — when the leg-1 maker order doesn\'t fill in its window, fire the taker fallback immediately WITHOUT the taker-priced profit-floor gate. A decayed edge will execute at the fresh taker price, possibly at a loss. Still requires a readable fresh order book.\n'),
+  "maxQuoteAgeMs": zod.number().default(graphExecuteBodyMaxQuoteAgeMsDefault).describe('Micro-check freshness threshold (ms, clamped 50–5000): the cached in-memory book snapshot used for the adaptive pre-fire decision must be at most this old, otherwise the fire is SKIPPED (stale data never executes blind).\n')
 })
 
 export const GraphExecuteResponse = zod.object({
@@ -611,7 +613,15 @@ export const GraphExecuteResponse = zod.object({
   "realizedProfitUsd": zod.number().nullish().describe('Actual USD profit from confirmed fills (cost\/fee accounting); null when unknown'),
   "orderIds": zod.array(zod.string()).nullish(),
   "error": zod.string().nullish(),
-  "chosenMode": zod.string().nullish().describe('Execution path actually used for this fire: maker or taker (set when executionStyle=adaptive or taker)')
+  "chosenMode": zod.string().nullish().describe('Execution path actually used for this fire: maker or taker (set when executionStyle=adaptive or taker)'),
+  "latency": zod.object({
+  "quoteAgeMs": zod.number().nullish().describe('Age of the cached book snapshot when the decision was made'),
+  "marketToDecisionMs": zod.number().nullish().describe('Last relevant book update → all gates passed'),
+  "requestToDecisionMs": zod.number().nullish().describe('Execute request received → decision'),
+  "decisionToSubmitMs": zod.number().nullish().describe('Decision → first order request sent to Kraken'),
+  "submitToAckMs": zod.number().nullish().describe('Order sent → Kraken acknowledgement (accept or reject)'),
+  "totalMs": zod.number().nullish().describe('Market update → exchange acknowledgement')
+}).nullish().describe('Execution pipeline latency breakdown (ms): market update → decision → order submitted → exchange acknowledgement')
 })
 
 
@@ -655,6 +665,8 @@ export const ExecPreviewResponse = zod.object({
   "makerEvUsd": zod.number().nullish().describe('Maker expected realized P&L = maker net × historical full-cycle fill probability − expected unwind cost'),
   "makerFillProbability": zod.number().nullish().describe('Historical full-cycle fill probability used in the maker EV (0-1); conservative default when history is thin'),
   "adaptiveChoice": zod.string().nullish().describe('Which path adaptive mode would fire right now: taker (fresh taker net ≥ floor), maker (maker expected realized ≥ floor), or skip'),
+  "quoteAgeMs": zod.number().nullish().describe('Age (ms) of the streamed book snapshot this preview was computed from; null when REST books were used'),
+  "asOf": zod.string().nullish().describe('ISO timestamp of the snapshot used for this preview (scanner timestamp)'),
   "error": zod.string().nullish()
 })
 

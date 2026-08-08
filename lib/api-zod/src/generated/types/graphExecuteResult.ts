@@ -5,6 +5,7 @@
  * CAT Arbitrage Dashboard API
  * OpenAPI spec version: 0.1.0
  */
+import type { GraphExecuteResultLatency } from './graphExecuteResultLatency';
 
 export interface GraphExecuteResult {
   success: boolean;
@@ -18,4 +19,6 @@ export interface GraphExecuteResult {
   error?: string | null;
   /** Execution path actually used for this fire: maker or taker (set when executionStyle=adaptive or taker) */
   chosenMode?: string | null;
+  /** Execution pipeline latency breakdown (ms): market update → decision → order submitted → exchange acknowledgement */
+  latency?: GraphExecuteResultLatency;
 }

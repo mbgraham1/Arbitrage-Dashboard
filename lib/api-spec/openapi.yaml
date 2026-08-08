@@ -1615,6 +1615,14 @@ components:
             taker-priced profit-floor gate. A decayed edge will execute at the
             fresh taker price, possibly at a loss. Still requires a readable
             fresh order book.
+        maxQuoteAgeMs:
+          type: number
+          default: 250
+          description: >
+            Micro-check freshness threshold (ms, clamped 50–5000): the cached
+            in-memory book snapshot used for the adaptive pre-fire decision
+            must be at most this old, otherwise the fire is SKIPPED (stale
+            data never executes blind).
 
     RouteHistoryClearResult:
       type: object
@@ -1668,6 +1676,17 @@ components:
           type: string
           nullable: true
           description: "Execution path actually used for this fire: maker or taker (set when executionStyle=adaptive or taker)"
+        latency:
+          type: object
+          nullable: true
+          description: "Execution pipeline latency breakdown (ms): market update → decision → order submitted → exchange acknowledgement"
+          properties:
+            quoteAgeMs: { type: number, nullable: true, description: "Age of the cached book snapshot when the decision was made" }
+            marketToDecisionMs: { type: number, nullable: true, description: "Last relevant book update → all gates passed" }
+            requestToDecisionMs: { type: number, nullable: true, description: "Execute request received → decision" }
+            decisionToSubmitMs: { type: number, nullable: true, description: "Decision → first order request sent to Kraken" }
+            submitToAckMs: { type: number, nullable: true, description: "Order sent → Kraken acknowledgement (accept or reject)" }
+            totalMs: { type: number, nullable: true, description: "Market update → exchange acknowledgement" }
 
     ExecPreviewRequest:
       type: object
@@ -1697,6 +1716,8 @@ components:
         makerEvUsd: { type: number, nullable: true, description: "Maker expected realized P&L = maker net × historical full-cycle fill probability − expected unwind cost" }
         makerFillProbability: { type: number, nullable: true, description: "Historical full-cycle fill probability used in the maker EV (0-1); conservative default when history is thin" }
         adaptiveChoice: { type: string, nullable: true, description: "Which path adaptive mode would fire right now: taker (fresh taker net ≥ floor), maker (maker expected realized ≥ floor), or skip" }
+        quoteAgeMs: { type: number, nullable: true, description: "Age (ms) of the streamed book snapshot this preview was computed from; null when REST books were used" }
+        asOf: { type: string, nullable: true, description: "ISO timestamp of the snapshot used for this preview (scanner timestamp)" }
         error: { type: string, nullable: true }
 
     ObExecuteResult:

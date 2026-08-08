@@ -25,6 +25,8 @@ import {
   krakenCancelAllOrders,
   setPrivateCallHeartbeat,
   krakenPairMeta,
+  armLatencyProbe,
+  disarmLatencyProbe,
   krakenMarketOrder,
   krakenLimitOrder,
   krakenRawMarketOrder,
@@ -55,7 +57,7 @@ import {
   type Pair,
 } from "../lib/exchange";
 import { getBestPairPrices, getTriPrices, getBtcTriPrices, scanAllPairs, getPairPrices, getAllPairSnapshots } from "../lib/price-cache";
-import { scanOrderBookCycles, preflightObCycle, discoverCrossPairs, freshJoinPrice, makerQuote, takerCycleBreakdown, OB_ASSETS, OB_USD_PAIRS, CROSS_LOOKUP, type ObAsset } from "../lib/order-book";
+import { scanOrderBookCycles, preflightObCycle, discoverCrossPairs, freshJoinPrice, makerQuote, takerCycleBreakdown, cachedTakerCycleBreakdown, getEventScan, krakenStreamStats, getStreamBook, OB_ASSETS, OB_USD_PAIRS, CROSS_LOOKUP, type ObAsset } from "../lib/order-book";
 import { scanGraphOpportunities } from "../lib/graph-engine";
 import { createPairHistory, updatePairHistory, type PairHistory } from "../lib/kalman";
 import { waitForTriLimitFill } from "../lib/tri-fill.js";
@@ -2024,6 +2026,10 @@ router.post("/arb/graph-execute", async (req, res): Promise<void> => {
   }
   const { krakenKey, krakenSecret, coinbaseKey, coinbaseSecret, routeDescription, isDryRun } = parsed.data;
   const forceMode = parsed.data.forceMode === true;
+  const tRequestMs = Date.now(); // latency: request in (≈ opportunity handed to executor)
+  // Micro-check freshness threshold — cached quotes older than this SKIP the
+  // fire instead of executing blind. Clamped 50ms..5s; default 250ms.
+  const maxQuoteAgeMs = Math.min(5_000, Math.max(50, Math.round(parsed.data.maxQuoteAgeMs ?? 250)));
   // Server-side safety bounds — never trust client numbers for live orders:
   // finite positive size, non-negative fees, and (live only) a non-negative
   // profit floor so a negative minProfitUsd can't push a losing route through.
@@ -2131,10 +2137,35 @@ router.post("/arb/graph-execute", async (req, res): Promise<void> => {
     let effNetProfitUsd = route.netProfitUsd;
     let effSlippagePct = route.slippagePct;
     let adaptiveResolved = false; // adaptive decision is TERMINAL — generic floor gate below must not re-reject it
+    let quoteAgeMs: number | null = null;      // age of the snapshot the decision used
+    let marketUpdateMs: number | null = null;  // latency: last book update in that snapshot
+    let adaptiveBufferUsd: number | null = null; // scaled buffer the adaptive approval used — MUST be enforced by the executor too
     if (executionStyleReq === "adaptive" && isKrakenTriangle) {
       const takerFeePct = tiers?.takerFeePct ?? krakenFeesPct;
-      const bufferUsd = Math.max(0.02, tradeSizeUsd * 0.0005);
-      const bd = await takerCycleBreakdown(asset(route.hops[0]!.to) as ObAsset, asset(route.hops[1]!.to) as ObAsset, tradeSizeUsd, takerFeePct);
+      // Safety buffer scales with the SCANNER edge: a large stale edge earns a
+      // larger margin (10% of it), never a bypass of profitability validation.
+      const bufferUsd = Math.max(0.02, tradeSizeUsd * 0.0005, route.netProfitUsd * 0.10);
+      adaptiveBufferUsd = bufferUsd;
+      // MICRO-CHECK: read the same timestamped in-memory stream snapshot the
+      // scanner sees — zero network. Stale (> maxQuoteAgeMs) → SKIP, never a
+      // blind fire. Stream unavailable (WS down) → REST fallback, logged.
+      let bd: import("../lib/order-book").TakerCycleBreakdown | null = null;
+      const cachedRes = await cachedTakerCycleBreakdown(asset(route.hops[0]!.to) as ObAsset, asset(route.hops[1]!.to) as ObAsset, tradeSizeUsd, takerFeePct, maxQuoteAgeMs);
+      if (cachedRes?.ok) {
+        bd = cachedRes.bd;
+        quoteAgeMs = cachedRes.quoteAgeMs;
+        marketUpdateMs = cachedRes.marketUpdateMs;
+      } else if (cachedRes && !cachedRes.ok && cachedRes.reason === "stale") {
+        req.log.info({ route: route.description, oldestAgeMs: cachedRes.oldestAgeMs, maxQuoteAgeMs }, "ADAPTIVE → SKIP (cached quotes stale — refusing to fire on old data)");
+        res.json({ success: false, isDryRun, executed: false, route: route.description, preflightProfitUsd: null, error: `Pre-flight failed — adaptive SKIP: cached quotes are ${cachedRes.oldestAgeMs}ms old (max ${maxQuoteAgeMs}ms). Stale data never fires — waiting for a fresh book update.` });
+        return;
+      } else {
+        // Stream has no book for a leg (WS down or warming up) — REST
+        // fallback keeps the bot functional at REST latency, logged loudly.
+        req.log.warn({ route: route.description, stream: krakenStreamStats() }, "Stream snapshot unavailable — falling back to REST taker pre-flight (slow path)");
+        bd = await takerCycleBreakdown(asset(route.hops[0]!.to) as ObAsset, asset(route.hops[1]!.to) as ObAsset, tradeSizeUsd, takerFeePct);
+        if (bd) { quoteAgeMs = 0; marketUpdateMs = Date.now(); }
+      }
       if (!bd) {
         // No fresh taker breakdown (books unavailable or depth can't absorb the
         // size) → SKIP. A maker order must never be authorized without the
@@ -2265,7 +2296,11 @@ router.post("/arb/graph-execute", async (req, res): Promise<void> => {
     // 3a. Kraken-only triangle → same machinery as ob-execute (incl. its own
     //     fresh order-book pre-flight, actual fee tier, fill confirm, unwind).
     if (isKrakenTriangle) {
-      const out = await runKrakenTriangle({
+      const tDecisionMs = Date.now(); // all gates passed — decision made
+      const probe = isDryRun ? null : armLatencyProbe(); // first AddOrder stamps submit/ack
+      let out: Awaited<ReturnType<typeof runKrakenTriangle>>;
+      try {
+      out = await runKrakenTriangle({
         krakenKey, krakenSecret,
         assetA: asset(route.hops[0]!.to),
         assetB: asset(route.hops[1]!.to),
@@ -2281,8 +2316,15 @@ router.post("/arb/graph-execute", async (req, res): Promise<void> => {
         // TAKER path (requested or adaptive-chosen): market/IOC all 3 legs,
         // gated by the fresh taker pre-flight + safety buffer inside.
         takerOnly: executionStyle === "taker",
+        // Enforce the SAME scaled buffer the adaptive approval used — the
+        // executor's own preflight and taker-fallback gates must not be
+        // looser than the decision that authorized this fire.
+        safetyBufferUsd: adaptiveBufferUsd ?? undefined,
         heldLockGen: lockGen ?? undefined, // graph-execute already holds the live lock
       }, req.log);
+      } finally {
+        disarmLatencyProbe(); // exception-safe — a leaked armed probe would contaminate a later order's telemetry
+      }
       if (out.badRequest) { res.status(400).json({ error: out.badRequest }); return; }
       const b = out.body!;
       const errText = typeof b["error"] === "string" ? b["error"] : "";
@@ -2312,7 +2354,21 @@ router.post("/arb/graph-execute", async (req, res): Promise<void> => {
       if (isLiveTri && !wasPreflightReject) {
         await snapshotAccountValue({ krakenKey: parsed.data.krakenKey, krakenSecret: parsed.data.krakenSecret, coinbaseKey: parsed.data.coinbaseKey, coinbaseSecret: parsed.data.coinbaseSecret }, "post_trade", req.log);
       }
-      res.json({ success: b["success"], isDryRun: b["isDryRun"], executed: b["executed"], route: route.description, preflightProfitUsd: b["preflightProfitUsd"], realizedProfitUsd: realizedTri, orderIds: [b["leg1OrderId"], b["leg2OrderId"], b["leg3OrderId"]].filter(Boolean), error: b["error"] ?? null, chosenMode: executionStyle });
+      // Total pipeline latency: market update → detected/decided → submitted →
+      // exchange acknowledgement. Pinpoints whether the bottleneck is
+      // detection, processing, API submission, or the exchange itself.
+      const latency = {
+        quoteAgeMs,
+        marketToDecisionMs: marketUpdateMs != null ? tDecisionMs - marketUpdateMs : null,
+        requestToDecisionMs: tDecisionMs - tRequestMs,
+        decisionToSubmitMs: probe?.submitAtMs != null ? probe.submitAtMs - tDecisionMs : null,
+        submitToAckMs: probe?.submitAtMs != null && probe.ackAtMs != null ? probe.ackAtMs - probe.submitAtMs : null,
+        totalMs: marketUpdateMs != null && probe?.ackAtMs != null ? probe.ackAtMs - marketUpdateMs : null,
+      };
+      if (b["executed"] === true) {
+        req.log.info({ route: route.description, ...latency }, "[LATENCY] market update → decision → submit → exchange ack");
+      }
+      res.json({ success: b["success"], isDryRun: b["isDryRun"], executed: b["executed"], route: route.description, preflightProfitUsd: b["preflightProfitUsd"], realizedProfitUsd: realizedTri, orderIds: [b["leg1OrderId"], b["leg2OrderId"], b["leg3OrderId"]].filter(Boolean), error: b["error"] ?? null, chosenMode: executionStyle, latency });
       return;
     }
 
@@ -3619,10 +3675,18 @@ router.post("/arb/exec-preview", async (req, res): Promise<void> => {
     const takerFeePct = tiers?.takerFeePct ?? 0.40; // conservative public assumption
     const makerFeePct = tiers?.makerFeePct ?? 0.25;
     const safetyBufferUsd = Math.max(0.02, tradeSizeUsd * 0.0005);
-    const [bd, makerPf] = await Promise.all([
-      takerCycleBreakdown(assetA as ObAsset, assetB as ObAsset, tradeSizeUsd, takerFeePct),
+    // Stream-first: same in-memory snapshot the executor micro-check reads.
+    const [cachedBd, makerPf] = await Promise.all([
+      cachedTakerCycleBreakdown(assetA as ObAsset, assetB as ObAsset, tradeSizeUsd, takerFeePct, 30_000),
       preflightObCycle(assetA as ObAsset, assetB as ObAsset, tradeSizeUsd, makerFeePct, "maker"),
     ]);
+    let bd = cachedBd?.ok ? cachedBd.bd : null;
+    let quoteAgeMs: number | null = cachedBd?.ok ? cachedBd.quoteAgeMs : null;
+    let asOf: string | null = cachedBd?.ok ? new Date(cachedBd.marketUpdateMs).toISOString() : null;
+    if (!bd) {
+      bd = await takerCycleBreakdown(assetA as ObAsset, assetB as ObAsset, tradeSizeUsd, takerFeePct);
+      if (bd) { quoteAgeMs = null; asOf = new Date().toISOString(); } // REST fetch — fresh but not streamed
+    }
     if (!bd) { fail("Could not fetch fresh order books (or depth can't absorb the size)."); return; }
     const netEdgeUsd = bd.netProfitUsd - safetyBufferUsd;
     const makerNetUsd = makerPf?.profitUsd ?? null;
@@ -3643,11 +3707,22 @@ router.post("/arb/exec-preview", async (req, res): Promise<void> => {
       rawEdgeUsd: bd.rawEdgeUsd, takerFeesUsd: bd.feesUsd, takerFeePct,
       slippageUsd: bd.slippageUsd, safetyBufferUsd, netEdgeUsd,
       expectedProfitUsd: bd.netProfitUsd, makerNetUsd, makerEvUsd, makerFillProbability, adaptiveChoice,
+      quoteAgeMs, asOf,
       error: null,
     });
   } catch (e) {
     fail((e as Error).message);
   }
+});
+
+// ── GET /stream-stats (diagnostics: WS book stream health) ───────────────────
+router.get("/arb/stream-stats", (_req, res) => {
+  const es = getEventScan();
+  res.json({
+    kraken: krakenStreamStats(),
+    eventScan: es ? { ...es, topRoutes: es.topRoutes.slice(0, 3) } : null,
+    sampleEthAgeMs: getStreamBook(OB_USD_PAIRS.ETH)?.ageMs ?? null,
+  });
 });
 
 // ── POST /fee-tier ────────────────────────────────────────────────────────────

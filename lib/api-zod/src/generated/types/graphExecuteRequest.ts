@@ -31,4 +31,6 @@ export interface GraphExecuteRequest {
   partialFillTolerancePct?: number;
   /** Trader-directed — when the leg-1 maker order doesn't fill in its window, fire the taker fallback immediately WITHOUT the taker-priced profit-floor gate. A decayed edge will execute at the fresh taker price, possibly at a loss. Still requires a readable fresh order book. */
   alwaysTakerFallback?: boolean;
+  /** Micro-check freshness threshold (ms, clamped 50–5000): the cached in-memory book snapshot used for the adaptive pre-fire decision must be at most this old, otherwise the fire is SKIPPED (stale data never executes blind). */
+  maxQuoteAgeMs?: number;
 }

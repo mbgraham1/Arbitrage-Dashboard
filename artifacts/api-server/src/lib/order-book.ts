@@ -13,6 +13,8 @@
  * OP, NEAR) have NO cross pairs on Kraken — they can't form cycles yet.
  */
 
+import { getStreamBook, onBookUpdate, startKrakenBookStream, startCoinbaseTickerStream, krakenStreamStats } from "./book-stream";
+
 // ── Asset definitions ─────────────────────────────────────────────────────────
 
 export const OB_ASSETS = [
@@ -276,21 +278,141 @@ export function startCrossPairsAutoRefresh(): void {
   console.log(`[OB] Cross-pair auto-refresh started (every ${CROSS_REFRESH_INTERVAL_MS / 3_600_000}h)`);
 }
 
+// ── Live stream layer + event-driven scanning ─────────────────────────────────
+
+/** Latest event-driven scan result — recomputed from in-memory stream books
+ *  whenever a relevant bid/ask changes (debounced), NOT on a poll timer. */
+export interface EventScan {
+  computedAtMs: number;
+  /** Timestamp of the book update that triggered this recompute. */
+  marketUpdateMs: number;
+  /** market update → routes recomputed (detection latency). */
+  detectLatencyMs: number;
+  updatesSeen: number;
+  scansRun: number;
+  topRoutes: Array<{ assetA: ObAsset; assetB: ObAsset; netProfitUsd: number }>;
+}
+let latestEventScan: EventScan | null = null;
+export function getEventScan(): EventScan | null { return latestEventScan; }
+export { getStreamBook, krakenStreamStats };
+
+const EVENT_SCAN_SIZE_USD = Number(process.env.STREAM_SCAN_SIZE_USD ?? 10);
+const EVENT_SCAN_FEE_PCT = 0.40;   // conservative taker tier for detection ranking
+const EVENT_SCAN_DEBOUNCE_MS = 100; // coalesce bursts; recompute ≤10×/s
+
+let eventScanDirty = false;
+let eventScanTriggerMs = 0;
+let eventUpdatesSeen = 0;
+let eventScansRun = 0;
+let eventScanTimer: NodeJS.Timeout | null = null;
+let eventScanRunning = false;
+
+/** Recompute all Kraken triangle cycles from IN-MEMORY stream books only. */
+async function runEventScan(): Promise<void> {
+  if (eventScanRunning) { eventScanDirty = true; return; }
+  eventScanRunning = true;
+  const trigger = eventScanTriggerMs;
+  try {
+    const { lookup, crossMap } = await discoverCrossPairs(); // cached; no network in steady state
+    const books = new Map<string, OrderBook>();
+    const routes: EventScan["topRoutes"] = [];
+    for (const [a, b] of crossMap) {
+      const cross = lookup.get(`${a}-${b}`);
+      if (!cross) continue;
+      for (const p of [OB_USD_PAIRS[a], cross.pair, OB_USD_PAIRS[b]]) {
+        if (!books.has(p)) {
+          const sb = getStreamBook(p);
+          if (sb) books.set(p, { asks: sb.asks, bids: sb.bids });
+        }
+      }
+      const sim = simulateCycle(a, b, EVENT_SCAN_SIZE_USD, books, EVENT_SCAN_FEE_PCT, lookup);
+      if (sim) routes.push({ assetA: a, assetB: b, netProfitUsd: sim.profitUsd });
+    }
+    routes.sort((x, y) => y.netProfitUsd - x.netProfitUsd);
+    const now = Date.now();
+    eventScansRun++;
+    latestEventScan = {
+      computedAtMs: now,
+      marketUpdateMs: trigger,
+      detectLatencyMs: trigger ? now - trigger : 0,
+      updatesSeen: eventUpdatesSeen,
+      scansRun: eventScansRun,
+      topRoutes: routes.slice(0, 5),
+    };
+    const best = routes[0];
+    if (best && best.netProfitUsd > 0) {
+      console.log(`[LATENCY] market update → opportunity detected: ${latestEventScan.detectLatencyMs}ms — USD→${best.assetA}→${best.assetB}→USD net $${best.netProfitUsd.toFixed(4)} @ $${EVENT_SCAN_SIZE_USD}`);
+    }
+  } catch { /* event scan must never crash the stream */ }
+  eventScanRunning = false;
+  if (eventScanDirty) { eventScanDirty = false; scheduleEventScan(); }
+}
+
+function scheduleEventScan(): void {
+  if (eventScanTimer) return;
+  eventScanTimer = setTimeout(() => { eventScanTimer = null; void runEventScan(); }, EVENT_SCAN_DEBOUNCE_MS);
+  eventScanTimer.unref?.();
+}
+
+/**
+ * Starts the WebSocket book streams (Kraken depth-10 books for every scanner
+ * pair, Coinbase public ticker for streaming bid/ask) and the event-driven
+ * scanner that recalculates routes the moment a relevant bid/ask changes.
+ */
+export async function startBookStreamLayer(): Promise<void> {
+  const pairs = new Set<string>(Object.values(OB_USD_PAIRS));
+  try {
+    const { lookup } = await discoverCrossPairs();
+    for (const c of lookup.values()) pairs.add(c.pair);
+  } catch { /* fall back to USD pairs only; cross refresh will extend later */ }
+  onBookUpdate(() => {
+    eventUpdatesSeen++;
+    eventScanTriggerMs = Date.now();
+    scheduleEventScan();
+  });
+  await startKrakenBookStream([...pairs]);
+  startCoinbaseTickerStream(OB_ASSETS.map(a => `${a}-USD`));
+}
+
 // ── Order book fetch with short cache ─────────────────────────────────────────
 
 type Level = [number, number]; // [price, volume]
 
 interface OrderBook { asks: Level[]; bids: Level[]; }
 
-const OB_CACHE_TTL_MS = 5_000; // 5 s — fast enough for live dashboard
+const OB_CACHE_TTL_MS = 5_000; // 5 s — REST fallback cache when the stream is down
 const obCache = new Map<string, { book: OrderBook; fetchedAt: number }>();
+
+/** Max age for a STREAM book to be preferred over REST in general reads.
+ *  Kraken heartbeats ~1s; a quiet-but-connected book older than this falls
+ *  back to REST out of caution. */
+const STREAM_READ_MAX_AGE_MS = 2_000;
+
+/** One timestamped snapshot — scanner and executor read the SAME object. */
+export interface BookSnapshot { book: OrderBook; updatedAtMs: number; ageMs: number; source: "stream" | "rest"; }
+
+/** Stream-first snapshot for one pair. `streamMaxAgeMs` bounds acceptable
+ *  stream age; when the stream can't serve it and `allowRest` is true, falls
+ *  back to a REST fetch (cache-bypassing). Returns null otherwise. */
+export async function bookSnapshot(pair: string, streamMaxAgeMs: number, allowRest: boolean): Promise<BookSnapshot | null> {
+  const sb = getStreamBook(pair);
+  if (sb && sb.ageMs <= streamMaxAgeMs) return { book: { asks: sb.asks, bids: sb.bids }, updatedAtMs: sb.updatedAtMs, ageMs: sb.ageMs, source: "stream" };
+  if (!allowRest) return null;
+  obCache.delete(pair);
+  const book = await fetchOrderBook(pair, 10);
+  if (!book) return null;
+  return { book, updatedAtMs: Date.now(), ageMs: 0, source: "rest" };
+}
 
 /**
  * Fetches Kraken public L2 order book (up to `count` levels per side).
- * Port of Python v14 fetch_order_book().
+ * Stream-first: a live WebSocket book fresher than 2s is returned with zero
+ * network cost; REST (with a 5s cache) is the fallback.
  * Returns null on any network/parse error so callers can skip missing pairs.
  */
 export async function fetchOrderBook(pair: string, count = 8): Promise<OrderBook | null> {
+  const sb = getStreamBook(pair);
+  if (sb && sb.ageMs <= STREAM_READ_MAX_AGE_MS) return { asks: sb.asks, bids: sb.bids };
   const cached = obCache.get(pair);
   if (cached && Date.now() - cached.fetchedAt < OB_CACHE_TTL_MS) return cached.book;
   try {
@@ -663,12 +785,12 @@ export async function preflightObCycle(
   const pairA = OB_USD_PAIRS[assetA];
   const pairB = OB_USD_PAIRS[assetB];
 
-  // Bypass the shared 5s cache — execution needs the freshest books.
-  for (const p of [pairA, cross.pair, pairB]) obCache.delete(p);
-  const [obA, obX, obB] = await Promise.all([
-    fetchOrderBook(pairA, 10), fetchOrderBook(cross.pair, 10), fetchOrderBook(pairB, 10),
+  // Freshest books: live stream snapshot (<400ms) or cache-bypassing REST.
+  const [sA, sX, sB] = await Promise.all([
+    bookSnapshot(pairA, 400, true), bookSnapshot(cross.pair, 400, true), bookSnapshot(pairB, 400, true),
   ]);
-  if (!obA || !obX || !obB) return null;
+  if (!sA || !sX || !sB) return null;
+  const [obA, obX, obB] = [sA.book, sX.book, sB.book];
 
   const books = new Map<string, OrderBook>([[pairA, obA], [cross.pair, obX], [pairB, obB]]);
   const sim = simulateCycle(assetA, assetB, sizeUsd, books, feesPct, activeLookup);
@@ -745,11 +867,11 @@ export async function takerCycleBreakdown(
   if (!cross) return null;
   const pairA = OB_USD_PAIRS[assetA];
   const pairB = OB_USD_PAIRS[assetB];
-  for (const p of [pairA, cross.pair, pairB]) obCache.delete(p);
-  const [obA, obX, obB] = await Promise.all([
-    fetchOrderBook(pairA, 10), fetchOrderBook(cross.pair, 10), fetchOrderBook(pairB, 10),
+  const [sA, sX, sB] = await Promise.all([
+    bookSnapshot(pairA, 400, true), bookSnapshot(cross.pair, 400, true), bookSnapshot(pairB, 400, true),
   ]);
-  if (!obA || !obX || !obB) return null;
+  if (!sA || !sX || !sB) return null;
+  const [obA, obX, obB] = [sA.book, sX.book, sB.book];
   const books = new Map<string, OrderBook>([[pairA, obA], [cross.pair, obX], [pairB, obB]]);
   const sim = simulateCycle(assetA, assetB, sizeUsd, books, takerFeePct, activeLookup);
   if (!sim) return null;
@@ -766,15 +888,66 @@ export async function takerCycleBreakdown(
   return { rawEdgeUsd, slippageUsd, feesUsd: sim.feeUsd, netProfitUsd: sim.profitUsd, volumeA: sim.volA };
 }
 
+/** Micro-check result: the same taker breakdown computed purely from the
+ *  in-memory stream snapshot — zero network requests. */
+export type CachedBreakdownResult =
+  | { ok: true; bd: TakerCycleBreakdown; quoteAgeMs: number; marketUpdateMs: number }
+  | { ok: false; reason: "stale" | "unavailable"; oldestAgeMs: number | null };
+
+/**
+ * Executor micro-check: taker breakdown for USD→A→B→USD read from the SAME
+ * timestamped in-memory stream books the scanner sees. Never touches the
+ * network. Fails with reason "stale" when any leg's book is older than
+ * `maxQuoteAgeMs`, "unavailable" when the stream has no book for a leg.
+ */
+export async function cachedTakerCycleBreakdown(
+  assetA: ObAsset,
+  assetB: ObAsset,
+  sizeUsd: number,
+  takerFeePct: number,
+  maxQuoteAgeMs: number,
+): Promise<CachedBreakdownResult | null> {
+  const { lookup: activeLookup } = await discoverCrossPairs(); // cached in steady state
+  const cross = activeLookup.get(`${assetA}-${assetB}`);
+  if (!cross) return null;
+  const pairA = OB_USD_PAIRS[assetA];
+  const pairB = OB_USD_PAIRS[assetB];
+  const snaps = [pairA, cross.pair, pairB].map(p => getStreamBook(p));
+  if (snaps.some(s => !s)) return { ok: false, reason: "unavailable", oldestAgeMs: null };
+  const oldestAgeMs = Math.max(...snaps.map(s => s!.ageMs));
+  if (oldestAgeMs > maxQuoteAgeMs) return { ok: false, reason: "stale", oldestAgeMs };
+  const [sA, sX, sB] = snaps as [NonNullable<typeof snaps[0]>, NonNullable<typeof snaps[0]>, NonNullable<typeof snaps[0]>];
+  const books = new Map<string, OrderBook>([
+    [pairA, { asks: sA.asks, bids: sA.bids }],
+    [cross.pair, { asks: sX.asks, bids: sX.bids }],
+    [pairB, { asks: sB.asks, bids: sB.bids }],
+  ]);
+  const sim = simulateCycle(assetA, assetB, sizeUsd, books, takerFeePct, activeLookup);
+  if (!sim) return { ok: false, reason: "unavailable", oldestAgeMs }; // depth can't absorb the size
+  const askA = sA.asks[0]?.[0]; const bidB = sB.bids[0]?.[0];
+  const crossPx = cross.aIsQuote ? sX.asks[0]?.[0] : sX.bids[0]?.[0];
+  if (!askA || !bidB || !crossPx) return { ok: false, reason: "unavailable", oldestAgeMs };
+  const volA = sizeUsd / askA;
+  const volB = cross.aIsQuote ? volA / crossPx : volA * crossPx;
+  const rawEdgeUsd = volB * bidB - sizeUsd;
+  const slippageUsd = Math.max(0, rawEdgeUsd - sim.grossProfitUsd);
+  return {
+    ok: true,
+    bd: { rawEdgeUsd, slippageUsd, feesUsd: sim.feeUsd, netProfitUsd: sim.profitUsd, volumeA: sim.volA },
+    quoteAgeMs: oldestAgeMs,
+    marketUpdateMs: Math.max(...snaps.map(s => s!.updatedAtMs)),
+  };
+}
+
 /**
  * Fresh post-only join price for one pair (cache bypassed): buys rest at the
  * best bid, sells at the best ask. Used to re-price a maker leg after a
  * fill-timer expiry. Returns null when the book can't be fetched.
  */
 export async function freshJoinPrice(pair: string, side: "buy" | "sell"): Promise<number | null> {
-  obCache.delete(pair);
-  const ob = await fetchOrderBook(pair, 10);
-  if (!ob) return null;
+  const snap = await bookSnapshot(pair, 400, true);
+  if (!snap) return null;
+  const ob = snap.book;
   return (side === "buy" ? ob.bids[0]?.[0] : ob.asks[0]?.[0]) ?? null;
 }
 
@@ -816,8 +989,8 @@ export interface MakerQuote {
 
 /** Fresh (cache-bypassed) aggressive maker quote for one pair+side. */
 export async function makerQuote(pair: string, side: "buy" | "sell"): Promise<MakerQuote | null> {
-  obCache.delete(pair);
-  const [ob, ticks] = await Promise.all([fetchOrderBook(pair, 10), pairTickSizes()]);
+  const [bsnap, ticks] = await Promise.all([bookSnapshot(pair, 400, true), pairTickSizes()]);
+  const ob = bsnap?.book;
   const bestBid = ob?.bids[0]?.[0];
   const bestAsk = ob?.asks[0]?.[0];
   if (!ob || bestBid == null || bestAsk == null) return null;

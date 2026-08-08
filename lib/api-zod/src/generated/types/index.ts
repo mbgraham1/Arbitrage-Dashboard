@@ -39,6 +39,7 @@ export * from './getObScanParams';
 export * from './graphExecuteRequest';
 export * from './graphExecuteRequestExecutionStyle';
 export * from './graphExecuteResult';
+export * from './graphExecuteResultLatency';
 export * from './graphRoute';
 export * from './graphRouteHop';
 export * from './graphRouteHopExchange';

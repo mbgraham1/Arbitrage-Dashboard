@@ -706,6 +706,8 @@ export interface GraphExecuteRequest {
   partialFillTolerancePct?: number;
   /** Trader-directed — when the leg-1 maker order doesn't fill in its window, fire the taker fallback immediately WITHOUT the taker-priced profit-floor gate. A decayed edge will execute at the fresh taker price, possibly at a loss. Still requires a readable fresh order book. */
   alwaysTakerFallback?: boolean;
+  /** Micro-check freshness threshold (ms, clamped 50–5000): the cached in-memory book snapshot used for the adaptive pre-fire decision must be at most this old, otherwise the fire is SKIPPED (stale data never executes blind). */
+  maxQuoteAgeMs?: number;
 }
 
 export interface RouteHistoryClearResult {
@@ -728,6 +730,24 @@ export interface ExecLockClearResult {
   cancelledOrders?: number;
 }
 
+/**
+ * Execution pipeline latency breakdown (ms): market update → decision → order submitted → exchange acknowledgement
+ */
+export type GraphExecuteResultLatency = {
+  /** Age of the cached book snapshot when the decision was made */
+  quoteAgeMs?: number | null;
+  /** Last relevant book update → all gates passed */
+  marketToDecisionMs?: number | null;
+  /** Execute request received → decision */
+  requestToDecisionMs?: number | null;
+  /** Decision → first order request sent to Kraken */
+  decisionToSubmitMs?: number | null;
+  /** Order sent → Kraken acknowledgement (accept or reject) */
+  submitToAckMs?: number | null;
+  /** Market update → exchange acknowledgement */
+  totalMs?: number | null;
+} | null;
+
 export interface GraphExecuteResult {
   success: boolean;
   isDryRun: boolean;
@@ -740,6 +760,8 @@ export interface GraphExecuteResult {
   error?: string | null;
   /** Execution path actually used for this fire: maker or taker (set when executionStyle=adaptive or taker) */
   chosenMode?: string | null;
+  /** Execution pipeline latency breakdown (ms): market update → decision → order submitted → exchange acknowledgement */
+  latency?: GraphExecuteResultLatency;
 }
 
 export type ExecPreviewRequestExecutionStyle = typeof ExecPreviewRequestExecutionStyle[keyof typeof ExecPreviewRequestExecutionStyle];
@@ -789,6 +811,10 @@ export interface ExecPreviewResult {
   makerFillProbability?: number | null;
   /** Which path adaptive mode would fire right now: taker (fresh taker net ≥ floor), maker (maker expected realized ≥ floor), or skip */
   adaptiveChoice?: string | null;
+  /** Age (ms) of the streamed book snapshot this preview was computed from; null when REST books were used */
+  quoteAgeMs?: number | null;
+  /** ISO timestamp of the snapshot used for this preview (scanner timestamp) */
+  asOf?: string | null;
   error?: string | null;
 }
 

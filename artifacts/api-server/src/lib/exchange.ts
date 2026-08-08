@@ -3,6 +3,7 @@
  * Uses only Node.js built-in crypto + fetch (Node 24+).
  */
 import crypto from "node:crypto";
+import { getStreamTicker } from "./book-stream";
 
 // ---------------------------------------------------------------------------
 // Pair symbol mappings
@@ -249,7 +250,36 @@ async function withPrivateLimiter<T>(key: string, fn: () => Promise<T>, retryOnR
   }
 }
 
+/** Latency probe: armed by the executor just before a fire; the FIRST
+ *  AddOrder after arming stamps submit (request out) and ack (Kraken response
+ *  in). Live executions are serialized by the execution lock, so one
+ *  module-scoped probe is safe. */
+export interface LatencyProbe { submitAtMs?: number; ackAtMs?: number; }
+let activeLatencyProbe: LatencyProbe | null = null;
+export function armLatencyProbe(): LatencyProbe {
+  const p: LatencyProbe = {};
+  activeLatencyProbe = p;
+  return p;
+}
+export function disarmLatencyProbe(): void { activeLatencyProbe = null; }
+
 export async function krakenPrivateRequest<T>(path: string, data: Record<string, string>, creds: KrakenCreds): Promise<T> {
+  const probe = path.includes("AddOrder") && activeLatencyProbe && activeLatencyProbe.submitAtMs == null ? activeLatencyProbe : null;
+  if (probe) {
+    probe.submitAtMs = Date.now();
+    try {
+      const out = await krakenPrivateRequestInner<T>(path, data, creds);
+      probe.ackAtMs = Date.now();
+      return out;
+    } catch (e) {
+      probe.ackAtMs = Date.now(); // rejection is still an exchange acknowledgement
+      throw e;
+    }
+  }
+  return krakenPrivateRequestInner<T>(path, data, creds);
+}
+
+async function krakenPrivateRequestInner<T>(path: string, data: Record<string, string>, creds: KrakenCreds): Promise<T> {
   // Reads are safe to retry after a rate-limit backoff; order mutations are not.
   const isRead = !/AddOrder|CancelOrder/.test(path);
   const call = () => withPrivateLimiter(creds.krakenKey, () => krakenPrivateRequestRaw<T>(path, data, creds), isRead);
@@ -801,6 +831,9 @@ export async function getCoinbasePrice(pair: Pair = "SOL/USD"): Promise<number> 
 /** Public endpoint — returns best bid AND ask for building graph edges. */
 export async function getCoinbaseBidAsk(pair: Pair = "SOL/USD"): Promise<{ bid: number; ask: number; mid: number }> {
   const product = COINBASE_PRODUCTS[pair];
+  // Stream-first: live Coinbase ticker WS quote fresher than 2s — no REST.
+  const st = getStreamTicker(product);
+  if (st && st.ageMs <= 2_000) return { bid: st.bid, ask: st.ask, mid: (st.bid + st.ask) / 2 };
   const resp = await fetch(`https://api.exchange.coinbase.com/products/${product}/ticker`, {
     signal: AbortSignal.timeout(10_000),
   });

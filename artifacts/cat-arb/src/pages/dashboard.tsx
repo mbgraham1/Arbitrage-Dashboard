@@ -1734,7 +1734,7 @@ function GraphEngineCard() {
     executionStyle:  scanStyle,
   };
   const { data, isLoading, dataUpdatedAt } = useGetGraphScan(params, {
-    query: { queryKey: getGetGraphScanQueryKey(params), refetchInterval: 8_000, staleTime: 7_000 },
+    query: { queryKey: getGetGraphScanQueryKey(params), refetchInterval: 2_000, staleTime: 1_500 },
   });
 
   const routes: GraphRoute[] = data?.routes ?? [];
@@ -1754,8 +1754,8 @@ function GraphEngineCard() {
   const { data: preview } = useQuery({
     queryKey: ["exec-preview", previewRoute, tradeSize, minProfit],
     enabled: !!previewRoute,
-    refetchInterval: 8_000,
-    staleTime: 7_000,
+    refetchInterval: 2_000,
+    staleTime: 1_500,
     queryFn: () => execPreview({
       routeDescription: previewRoute!,
       tradeSizeUsd: tradeSize,
@@ -1811,7 +1811,11 @@ function GraphEngineCard() {
           // realized number is positive; red when the cycle completed at a loss.
           const lost = r.realizedProfitUsd != null && r.realizedProfitUsd < 0;
           const modeTag = r.chosenMode ? ` [${r.chosenMode.toUpperCase()}]` : "";
-          addLog(lost ? "warning" : "success", `[GRAPH·EXEC] ${lost ? "🔻" : "✅"} Cycle Completed${modeTag} ${r.route} | ${label} $${profit.toFixed(4)}${r.isDryRun ? " (dry run)" : ` | orders ${(r.orderIds ?? []).join(", ")}`}`);
+          const lat = r.latency;
+          const latTag = lat && (lat.totalMs != null || lat.submitToAckMs != null)
+            ? ` | latency: quote ${lat.quoteAgeMs ?? "?"}ms → decision ${lat.marketToDecisionMs ?? lat.requestToDecisionMs ?? "?"}ms → submit +${lat.decisionToSubmitMs ?? "?"}ms → ack +${lat.submitToAckMs ?? "?"}ms${lat.totalMs != null ? ` (total ${lat.totalMs}ms)` : ""}`
+            : "";
+          addLog(lost ? "warning" : "success", `[GRAPH·EXEC] ${lost ? "🔻" : "✅"} Cycle Completed${modeTag} ${r.route} | ${label} $${profit.toFixed(4)}${r.isDryRun ? " (dry run)" : ` | orders ${(r.orderIds ?? []).join(", ")}`}${latTag}`);
           setExecResult(`${lost ? "🔻" : "✅"} Cycle Completed${modeTag} ${r.route} — ${label} $${profit.toFixed(4)}${lost ? " LOSS" : ""}${r.isDryRun ? " (dry run, recorded to ledger)" : ""}`);
           return;
         }
@@ -2033,6 +2037,11 @@ function GraphEngineCard() {
         <div data-testid="panel-exec-preview" className="px-3 py-1.5 border-b border-border/50 text-[10px] font-mono space-y-0.5">
           <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5">
             <span className="text-muted-foreground font-bold">PRE-FIRE ({style.toUpperCase()})</span>
+            {preview.asOf && (
+              <span title="Timestamp of the streamed book snapshot this preview was computed from">SCAN <span className="text-foreground">{new Date(preview.asOf).toLocaleTimeString()}</span></span>
+            )}
+            <span title="Age of the streamed quotes when this preview was computed — the executor micro-check skips fires when quotes exceed your freshness threshold" className={cn(preview.quoteAgeMs != null && preview.quoteAgeMs > 1000 ? "text-amber-500" : undefined)}>AGE <span className="text-foreground">{preview.quoteAgeMs != null ? `${preview.quoteAgeMs}ms` : "REST"}</span></span>
+            <span className="text-muted-foreground">→</span>
             <span title="Gross edge at fresh top-of-book taker prices, before fees and slippage">RAW <span className="text-foreground">${(preview.rawEdgeUsd ?? 0).toFixed(4)}</span></span>
             <span className="text-muted-foreground">→</span>
             <span title={`Total taker fees, 3 legs at ${preview.takerFeePct?.toFixed(2) ?? "?"}%/leg (your real tier when keys are set)`}>TAKER FEES <span className="text-foreground">−${(preview.takerFeesUsd ?? 0).toFixed(4)}</span></span>
