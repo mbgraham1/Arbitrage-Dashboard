@@ -22,6 +22,8 @@ import {
 } from "@workspace/api-client-react";
 import type { ExchangeCredentials, PriceData, BalanceData, TriangularOpportunity, CointegrationSignal, ObCycleEntry } from "@workspace/api-client-react";
 import { useQueryClient } from "@tanstack/react-query";
+import { maybeAutoExecuteOb } from "./ob-auto-execute";
+import { withExecutionLock } from "./execution-locks";
 
 export interface LogEntry {
   id: string;
@@ -425,25 +427,19 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
     // Auto-execute gate: bot running, no other executor in-flight, cooldown elapsed.
     // Use refs (not React state) for all lock checks so the gate never reads stale
     // closure values when multiple scan callbacks arrive in rapid succession.
-    if (
-      !isRunning ||
-      emergencyStopRef.current ||
-      isExecutingRef.current ||
-      isAutoExecutingTriRef.current ||
-      isAutoExecutingObRef.current ||
-      now - lastObTradeTimeRef.current < cooldownMs
-    ) return;
-
-    // Pick the best READY cycle above the profit floor. cycles[] is sorted by
-    // estimatedProfitUsd descending, but the #1 entry may be HIGH_SLIPPAGE or
-    // LOW_PROFIT — filter first, then take the highest-profit READY one.
-    // Only 3-leg routes are executable — the OB executor places exactly three
-    // orders from (assetA, assetB); a 4-leg route would skip the middle hop.
-    const top = cycles
-      .filter(c => (c.legs ?? 3) === 3 && c.status === "READY" && c.estimatedProfitUsd > s.obMinProfitUsd)
-      .sort((a, b) => b.estimatedProfitUsd - a.estimatedProfitUsd)[0];
-    if (!top) return;
-
+    // Gate + cycle selection live in maybeAutoExecuteOb so they can be unit-tested.
+    maybeAutoExecuteOb({
+      cycles,
+      isRunning,
+      emergencyStop: emergencyStopRef.current,
+      isExecuting: isExecutingRef.current,
+      isAutoExecutingTri: isAutoExecutingTriRef.current,
+      isAutoExecutingOb: isAutoExecutingObRef.current,
+      now,
+      lastObTradeTime: lastObTradeTimeRef.current,
+      cooldownMs,
+      obMinProfitUsd: s.obMinProfitUsd,
+      execute: (top) => {
     const isDryRun = !liveModeRef.current;
     const tag = isDryRun ? "OB·AUTO·DRY" : "OB·AUTO";
     lastObTradeTimeRef.current = now;
@@ -491,6 +487,8 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
         },
       },
     );
+      },
+    });
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [obScan.data]);
 
@@ -631,6 +629,10 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
       addLog("warning", "[TRI·FORCE] Blocked — ETH/SOL direct market unavailable on Kraken (synthetic cross-rate). Live triangular trades disabled until the direct market returns.");
       return;
     }
+    // Acquire the shared triangular execution lock — the same ref the OB and
+    // TRI auto-executors gate on — so a forced triangular trade blocks
+    // auto-fires for its whole duration. No-op if a TRI trade is in flight.
+    await withExecutionLock(isAutoExecutingTriRef, async () => {
     setIsForcingTriangular(true);
     try {
       const creds = credentialsRef.current;
@@ -659,6 +661,7 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
     } finally {
       setIsForcingTriangular(false);
     }
+    });
   }, [addLog, executeTriangularMutation, triOpportunities, triPriceSource]);
 
   // ── Force Trade ───────────────────────────────────────────────────────────────
@@ -666,7 +669,10 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
   // execution to that pair. Falls back to the cached/fetched SOL/USD price if
   // the scan returns no valid pairs.
   const forceTrade = useCallback(async () => {
-    if (isExecutingRef.current) return;
+    // Acquire the shared cross-exchange execution lock (isExecutingRef) — the
+    // same ref the OB and TRI auto-executors gate on — so a forced trade
+    // blocks auto-fires for its whole duration. No-op if a trade is in flight.
+    await withExecutionLock(isExecutingRef, async () => {
     setIsForcingTrade(true);
     try {
       // ── Step 1: try the multi-pair ranker ─────────────────────────────────
@@ -811,6 +817,7 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
     } finally {
       setIsForcingTrade(false);
     }
+    });
   }, [addLog, fetchPricesMutation, runExecuteTrade]);
 
   // ── Polling loop — only re-runs when isRunning changes ───────────────────────
