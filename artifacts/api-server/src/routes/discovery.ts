@@ -45,11 +45,17 @@ type VenueLeg = {
   id: string; name: string; quote: "USD" | "USDT";
   takerPct: number; feeSource: "detected" | "assumed";
   basisHaircutPct: number;
+  /** False = venue reported unavailable in the user's region (Puerto Rico) — context only, never actionable. */
+  regionOk: boolean;
+  /** True = PR-accessible candidate venue (Gemini, Crypto.com) worth a lower-fee account. */
+  candidate: boolean;
+  /** Published entry-tier maker fee assumption (for "would it flip attractive at entry maker tiers"). */
+  assumedMakerPct: number;
   book: { bids: [number, number][]; asks: [number, number][] };
 };
 
 type SizeNet = { sizeUsd: number; grossEdgeUsd: number | null; feesUsd: number | null; slippageUsd: number | null; basisHaircutUsd: number | null; netUsd: number | null };
-type BlockedBy = "NONE" | "NO_EDGE" | "BLOCKED_BY_FEES" | "INSUFFICIENT_INVENTORY" | "NEEDS_KEYS" | "NEEDS_ACCOUNT";
+type BlockedBy = "NONE" | "NO_EDGE" | "BLOCKED_BY_FEES" | "INSUFFICIENT_INVENTORY" | "NEEDS_KEYS" | "NEEDS_ACCOUNT" | "REGION_UNAVAILABLE";
 type DiscRow = {
   asset: Asset; buyVenue: string; sellVenue: string;
   structure: "taker-taker" | "cb-maker-hedge" | "kraken-maker-hedge";
@@ -64,6 +70,10 @@ type DiscRow = {
   blockedBy: BlockedBy;
   requirement: string;
   coinbaseFeeIsBlocker: boolean;
+  /** True = a leg is on a venue unavailable in the user's region — market context only, never actionable. */
+  regionUnavailable: boolean;
+  /** For candidate venues (Gemini, Crypto.com): buffer-inclusive $10 net IF their legs paid entry-tier MAKER fees instead of taker. Assumption-based — shows whether the route would become attractive, never marks it executable. */
+  entryTierMakerNet10: number | null;
   seenPositiveScans: number;
 };
 
@@ -134,15 +144,15 @@ router.post("/arb/discovery", async (req, res): Promise<void> => {
     const legs: VenueLeg[] = [];
     for (const v of VENUES) {
       const b = books.get(`${v.id}:${asset}`);
-      if (b) legs.push({ id: v.id, name: v.name, quote: v.quote, takerPct: v.assumedTakerPct, feeSource: "assumed", basisHaircutPct: v.basisHaircutPct, book: b });
+      if (b) legs.push({ id: v.id, name: v.name, quote: v.quote, takerPct: v.assumedTakerPct, feeSource: "assumed", basisHaircutPct: v.basisHaircutPct, regionOk: v.regionOk, candidate: v.candidate, assumedMakerPct: v.assumedMakerPct, book: b });
     }
     const kBook = getStreamBook(OB_USD_PAIRS[asset]);
     if (kBook && kBook.ageMs < MAX_STREAM_AGE_MS && kBook.bids.length && kBook.asks.length) {
-      legs.push({ id: "kraken", name: "Kraken", quote: "USD", takerPct: fees ? fees.kTakerPct : 0.40, feeSource: fees ? "detected" : "assumed", basisHaircutPct: 0, book: { bids: kBook.bids, asks: kBook.asks } });
+      legs.push({ id: "kraken", name: "Kraken", quote: "USD", takerPct: fees ? fees.kTakerPct : 0.40, feeSource: fees ? "detected" : "assumed", basisHaircutPct: 0, regionOk: true, candidate: false, assumedMakerPct: 0.16, book: { bids: kBook.bids, asks: kBook.asks } });
     }
     const cBook = getCoinbaseStreamBook(`${asset}-USD`);
     if (cBook && cBook.ageMs < MAX_STREAM_AGE_MS && cBook.bids.length && cBook.asks.length) {
-      legs.push({ id: "coinbase", name: "Coinbase", quote: "USD", takerPct: fees ? fees.cbTakerPct : 1.20, feeSource: fees ? "detected" : "assumed", basisHaircutPct: 0, book: { bids: cBook.bids, asks: cBook.asks } });
+      legs.push({ id: "coinbase", name: "Coinbase", quote: "USD", takerPct: fees ? fees.cbTakerPct : 1.20, feeSource: fees ? "detected" : "assumed", basisHaircutPct: 0, regionOk: true, candidate: false, assumedMakerPct: 0.60, book: { bids: cBook.bids, asks: cBook.asks } });
     }
     legsByAsset.set(asset, legs);
   }
@@ -154,7 +164,7 @@ router.post("/arb/discovery", async (req, res): Promise<void> => {
     for (const buy of legs) for (const sell of legs) {
       if (buy.id === sell.id) continue;
       const nets = SIZES.map(sz => projectRoute(buy, sell, sz));
-      const net10 = nets[0].netUsd;
+      const net10 = nets.find(n => n.sizeUsd === EXEC_SIZE)?.netUsd ?? null;
       if (net10 == null) continue;
       const key = `${asset}:${buy.id}>${sell.id}`;
       const streak = net10 > 0 ? (positiveStreak.get(key) ?? 0) + 1 : 0;
@@ -186,10 +196,15 @@ router.post("/arb/discovery", async (req, res): Promise<void> => {
       } else if (liveOnly) {
         category = "requires_setup";
         requirement = "connect Kraken + Coinbase API keys to verify fees and inventory";
+      } else if (!buy.regionOk || !sell.regionOk) {
+        // Route touches a venue the user's app reports as region-blocked
+        // (Binance.US in Puerto Rico) — market context ONLY, never actionable.
+        category = "not_profitable";
+        requirement = `${[buy, sell].filter(l => !l.regionOk).map(l => l.name).join(" + ")} UNAVAILABLE in your region — shown as market context only`;
       } else {
         category = "requires_setup";
         const foreign = [buy, sell].filter(l => l.id !== "kraken" && l.id !== "coinbase");
-        requirement = `needs a funded account on ${foreign.map(l => `${l.name} (assumed ${l.takerPct}% taker${l.quote === "USDT" ? ", USDT-quoted" : ""})`).join(" + ")} — verify their real fees/withdrawal costs before funding`;
+        requirement = `needs a funded account on ${foreign.map(l => `${l.name} (assumed ${l.takerPct}% taker${l.quote === "USDT" ? ", USDT-quoted" : ""}${l.candidate ? ", PR-accessible candidate" : ""})`).join(" + ")} — public data only until API access is connected + verified; verify real fees/withdrawal costs before funding`;
       }
 
       // Is Coinbase's taker tier specifically what kills this route?
@@ -197,6 +212,17 @@ router.post("/arb/discovery", async (req, res): Promise<void> => {
       if (net10 <= 0 && (buy.id === "coinbase" || sell.id === "coinbase") && fees) {
         const cbLegFee10 = (buy.id === "coinbase" ? EXEC_SIZE * (buy.takerPct / 100) : 0) + (sell.id === "coinbase" ? EXEC_SIZE * (sell.takerPct / 100) : 0);
         coinbaseFeeIsBlocker = net10 + cbLegFee10 - EXEC_SIZE * 0.001 > 0; // would flip positive at a 0.10% tier
+      }
+
+      // Candidate-venue upside: what would the $10 net be if candidate-venue
+      // legs (Gemini / Crypto.com) paid their published ENTRY-TIER MAKER fee
+      // instead of taker? Pure assumption analysis — never marks executable.
+      const regionUnavailable = !buy.regionOk || !sell.regionOk;
+      let entryTierMakerNet10: number | null = null;
+      if (!regionUnavailable && (buy.candidate || sell.candidate)) {
+        const mb = buy.candidate ? { ...buy, takerPct: buy.assumedMakerPct } : buy;
+        const ms = sell.candidate ? { ...sell, takerPct: sell.assumedMakerPct } : sell;
+        entryTierMakerNet10 = projectRoute(mb, ms, EXEC_SIZE).netUsd;
       }
 
       const sweep = bestOfSweep(nets);
@@ -208,7 +234,8 @@ router.post("/arb/discovery", async (req, res): Promise<void> => {
         feeSource: buy.feeSource === "detected" && sell.feeSource === "detected" ? "detected" : buy.feeSource === "assumed" && sell.feeSource === "assumed" ? "assumed" : "mixed",
         nets, net10,
         bestSizeUsd: sweep.size, bestNetUsd: sweep.net, costsAtBest: sweep.costs,
-        category, blockedBy: blockedByOf(net10, nets, category, liveOnly, !!fees), requirement, coinbaseFeeIsBlocker,
+        category, blockedBy: regionUnavailable ? "REGION_UNAVAILABLE" : blockedByOf(net10, nets, category, liveOnly, !!fees), requirement, coinbaseFeeIsBlocker,
+        regionUnavailable, entryTierMakerNet10,
         seenPositiveScans: streak,
       });
     }
@@ -277,6 +304,7 @@ router.post("/arb/discovery", async (req, res): Promise<void> => {
           bestSizeUsd: sweep.size, bestNetUsd: sweep.net, costsAtBest: sweep.costs,
           category, blockedBy: blockedByOf(net10, nets, category, true, !!fees), requirement,
           coinbaseFeeIsBlocker: false,
+          regionUnavailable: false, entryTierMakerNet10: null,
           seenPositiveScans: streak,
         });
       }
@@ -294,6 +322,15 @@ router.post("/arb/discovery", async (req, res): Promise<void> => {
   const executable = rows.filter(r => r.category === "executable_now").sort(rankExec).slice(0, 10);
   const setup = rows.filter(r => r.category === "requires_setup").sort(rank).slice(0, 15);
   const notProf = rows.filter(r => r.category === "not_profitable").sort(rank).slice(0, 10);
+  // Dedicated candidate-venue section: the user's realistically-accessible
+  // lower-fee venues (Gemini, Crypto.com) must stay visible even when other
+  // public venues crowd the top-10 lists. Public-data-only until API access
+  // is connected + verified — never executable from here.
+  const candidateRoutes = rows
+    .filter(r => !r.regionUnavailable && r.entryTierMakerNet10 != null)
+    .sort((a, b) => (b.entryTierMakerNet10 ?? -1e9) - (a.entryTierMakerNet10 ?? -1e9) || (b.net10 ?? -1e9) - (a.net10 ?? -1e9))
+    .slice(0, 8);
+
   const errors = getVenueErrors();
 
   // Verdicts: the single best executable route, and the best near-miss on the
@@ -314,8 +351,9 @@ router.post("/arb/discovery", async (req, res): Promise<void> => {
       : "No keys connected — ALL fees are published entry-tier assumptions. Connect keys for real Kraken/Coinbase tiers.",
     credNote,
     venues: VENUES.map(v => ({
-      id: v.id, name: v.name, quote: v.quote, assumedTakerPct: v.assumedTakerPct,
-      status: errors[v.id] ? `error: ${errors[v.id]}` : "ok",
+      id: v.id, name: v.name, quote: v.quote, assumedTakerPct: v.assumedTakerPct, assumedMakerPct: v.assumedMakerPct,
+      regionOk: v.regionOk, candidate: v.candidate, accessNote: v.accessNote ?? null,
+      status: !v.regionOk ? "region-unavailable (context only)" : errors[v.id] ? `error: ${errors[v.id]}` : "ok",
       assetsCovered: ASSETS.filter(a => books.has(`${v.id}:${a}`)).length,
     })),
     coinbaseFeeDrag: rows.filter(r => r.coinbaseFeeIsBlocker).length,
@@ -327,6 +365,7 @@ router.post("/arb/discovery", async (req, res): Promise<void> => {
     executableNow: executable,
     requiresSetup: setup,
     notProfitable: notProf,
+    candidateRoutes,
   });
 });
 

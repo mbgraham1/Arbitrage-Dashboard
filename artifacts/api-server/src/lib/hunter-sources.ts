@@ -8,7 +8,7 @@
  */
 
 type Level = [number, number];
-export type StableBook = { venue: string; venueName: string; bids: Level[]; asks: Level[]; takerPct: number; feeSource: "assumed" };
+export type StableBook = { venue: string; venueName: string; bids: Level[]; asks: Level[]; takerPct: number; feeSource: "assumed"; regionOk: boolean };
 
 const lv = (rows: unknown[] | undefined, n = 25): Level[] =>
   (rows ?? []).slice(0, n).map(r => {
@@ -45,22 +45,40 @@ export async function fetchStableBooks(stable: "USDT" | "USDC"): Promise<StableB
       const j = await cached(`k:${stable}`, () => getJson(`https://api.kraken.com/0/public/Depth?pair=${stable === "USDT" ? "USDTZUSD" : "USDCUSD"}&count=25`));
       const res = (j as { result?: Record<string, { bids?: unknown[]; asks?: unknown[] }> } | null)?.result;
       const b = res ? Object.values(res)[0] : null;
-      if (b?.bids?.length && b?.asks?.length) out.push({ venue: "kraken", venueName: "Kraken", bids: lv(b.bids), asks: lv(b.asks), takerPct: 0.20, feeSource: "assumed" });
+      if (b?.bids?.length && b?.asks?.length) out.push({ venue: "kraken", venueName: "Kraken", bids: lv(b.bids), asks: lv(b.asks), takerPct: 0.20, feeSource: "assumed", regionOk: true });
     })(),
     (async () => {
       const j = await cached(`cb:${stable}`, () => getJson(`https://api.exchange.coinbase.com/products/${stable}-USD/book?level=2`));
       const d = j as { bids?: unknown[]; asks?: unknown[] } | null;
-      if (d?.bids?.length && d?.asks?.length) out.push({ venue: "coinbase", venueName: "Coinbase", bids: lv(d.bids), asks: lv(d.asks), takerPct: 0.60, feeSource: "assumed" });
+      if (d?.bids?.length && d?.asks?.length) out.push({ venue: "coinbase", venueName: "Coinbase", bids: lv(d.bids), asks: lv(d.asks), takerPct: 0.60, feeSource: "assumed", regionOk: true });
     })(),
     (async () => {
       const j = await cached(`bus:${stable}`, () => getJson(`https://api.binance.us/api/v3/depth?symbol=${stable}USD&limit=25`));
       const d = j as { bids?: unknown[]; asks?: unknown[] } | null;
-      if (d?.bids?.length && d?.asks?.length) out.push({ venue: "binanceus", venueName: "Binance.US", bids: lv(d.bids), asks: lv(d.asks), takerPct: 0.60, feeSource: "assumed" });
+      if (d?.bids?.length && d?.asks?.length) out.push({ venue: "binanceus", venueName: "Binance.US (region-unavailable)", bids: lv(d.bids), asks: lv(d.asks), takerPct: 0.60, feeSource: "assumed", regionOk: false });
     })(),
     (async () => {
       const j = await cached(`bs:${stable}`, () => getJson(`https://www.bitstamp.net/api/v2/order_book/${stable.toLowerCase()}usd/`));
       const d = j as { bids?: unknown[]; asks?: unknown[] } | null;
-      if (d?.bids?.length && d?.asks?.length) out.push({ venue: "bitstamp", venueName: "Bitstamp", bids: lv(d.bids), asks: lv(d.asks), takerPct: 0.40, feeSource: "assumed" });
+      if (d?.bids?.length && d?.asks?.length) out.push({ venue: "bitstamp", venueName: "Bitstamp", bids: lv(d.bids), asks: lv(d.asks), takerPct: 0.40, feeSource: "assumed", regionOk: true });
+    })(),
+    // Gemini stablecoin books — its STABLECOIN fee schedule (~0.03% taker,
+    // ASSUMED; verify before funding) is dramatically below its spot tiers,
+    // making it the most interesting PR-accessible candidate for stables.
+    (async () => {
+      if (stable !== "USDC") return; // Gemini lists USDC/USD; no USDT pair
+      const j = await cached(`gem:${stable}`, () => getJson(`https://api.gemini.com/v1/book/usdcusd?limit_bids=25&limit_asks=25`));
+      const d = j as { bids?: Array<{ price: string; amount: string }>; asks?: Array<{ price: string; amount: string }> } | null;
+      const cv = (rows: Array<{ price: string; amount: string }> | undefined) => (rows ?? []).map(r => [parseFloat(r.price), parseFloat(r.amount)] as Level).filter(([p2, q]) => p2 > 0 && q > 0);
+      const bids = cv(d?.bids), asks = cv(d?.asks);
+      if (bids.length && asks.length) out.push({ venue: "gemini", venueName: "Gemini (stablecoin schedule)", bids, asks, takerPct: 0.03, feeSource: "assumed", regionOk: true });
+    })(),
+    // Crypto.com Exchange — PR-accessible candidate; published entry-tier
+    // taker assumption until an account is connected.
+    (async () => {
+      const j = await cached(`cro:${stable}`, () => getJson(`https://api.crypto.com/exchange/v1/public/get-book?instrument_name=${stable}_USD&depth=25`));
+      const d = (j as { result?: { data?: Array<{ bids?: unknown[]; asks?: unknown[] }> } } | null)?.result?.data?.[0];
+      if (d?.bids?.length && d?.asks?.length) out.push({ venue: "cryptocom", venueName: "Crypto.com", bids: lv(d.bids), asks: lv(d.asks), takerPct: 0.50, feeSource: "assumed", regionOk: true });
     })(),
   ];
   await Promise.all(jobs);

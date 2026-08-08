@@ -164,7 +164,8 @@ function record(o: {
 }
 
 // ── sampling ─────────────────────────────────────────────────────────────────
-type Leg = { id: string; name: string; takerPct: number; basisPct: number; bids: [number, number][]; asks: [number, number][] };
+type Leg = {
+  regionOk?: boolean; candidate?: boolean; id: string; name: string; takerPct: number; basisPct: number; bids: [number, number][]; asks: [number, number][] };
 
 function crossNets(buy: Leg, sell: Leg): Array<number | null> {
   return SIZES.map(sz => {
@@ -208,7 +209,7 @@ async function sampleTick(): Promise<void> {
       const legs: Leg[] = [];
       for (const v of VENUES) {
         const b = books.get(`${v.id}:${asset}`);
-        if (b) legs.push({ id: v.id, name: v.name, takerPct: v.assumedTakerPct, basisPct: v.basisHaircutPct, bids: b.bids, asks: b.asks });
+        if (b) legs.push({ id: v.id, name: v.regionOk ? v.name : `${v.name} (region-unavailable)`, regionOk: v.regionOk, candidate: v.candidate, takerPct: v.assumedTakerPct, basisPct: v.basisHaircutPct, bids: b.bids, asks: b.asks });
       }
       const kB = getStreamBook(OB_USD_PAIRS[asset]);
       if (kB && kB.ageMs < 5000 && kB.bids.length) legs.push({ id: "kraken", name: "Kraken", takerPct: fees.kTakerPct, basisPct: 0, bids: kB.bids, asks: kB.asks });
@@ -219,15 +220,18 @@ async function sampleTick(): Promise<void> {
         const [n10, n50, n100] = crossNets(buy, sell);
         if (n10 == null) continue;
         const liveOnly = ["kraken", "coinbase"].includes(buy.id) && ["kraken", "coinbase"].includes(sell.id);
+        const regionBlocked = buy.regionOk === false || sell.regionOk === false;
         const qty10 = 10 / (buy.asks[0]?.[0] ?? 1);
-        const execNow = liveOnly ? invCheck(buy.id, sell.id, asset, qty10) : false;
+        const execNow = liveOnly && !regionBlocked ? invCheck(buy.id, sell.id, asset, qty10) : false;
         record({
           key: `x:${asset}:${buy.id}>${sell.id}`, strategy: "spot-cross", asset,
           venues: `${buy.name}→${sell.name}`,
           description: `buy ${asset} on ${buy.name}, sell on ${sell.name} (taker both)`,
-          requirement: liveOnly
-            ? `$10.20 USD on ${buy.name} + ${(qty10 * 1.02).toFixed(6)} ${asset} on ${sell.name}`
-            : `funded account on ${[buy, sell].filter(l => !["kraken", "coinbase"].includes(l.id)).map(l => l.name).join(" + ")}`,
+          requirement: regionBlocked
+            ? "venue UNAVAILABLE in your region — market context only, never actionable"
+            : liveOnly
+              ? `$10.20 USD on ${buy.name} + ${(qty10 * 1.02).toFixed(6)} ${asset} on ${sell.name}`
+              : `funded account on ${[buy, sell].filter(l => !["kraken", "coinbase"].includes(l.id)).map(l => `${l.name}${l.candidate ? " (PR-accessible candidate — public data only until API access verified)" : ""}`).join(" + ")}`,
           net10: n10, net50: n50, net100: n100, executableNow: execNow,
         });
       }
@@ -279,8 +283,10 @@ async function sampleTick(): Promise<void> {
         record({
           key: `s:${stable}:${buy.venue}>${sell.venue}`, strategy: "stablecoin", asset: stable,
           venues: `${buy.venueName}→${sell.venueName}`,
-          description: `buy ${stable} at ${buy.venueName}, sell at ${sell.venueName} (USD both sides)`,
-          requirement: `$10.20 USD on ${buy.venueName} + ~10.2 ${stable} on ${sell.venueName}${["kraken", "coinbase"].includes(buy.venue) && ["kraken", "coinbase"].includes(sell.venue) ? "" : " (needs account)"}`,
+          description: `buy ${stable} at ${buy.venueName}, sell at ${sell.venueName} (USD both sides)${[buy, sell].some(l => l.venue === "gemini") ? " — Gemini stablecoin fee schedule assumed (~0.03% taker), dramatically below its spot tiers" : ""}`,
+          requirement: buy.regionOk === false || sell.regionOk === false
+            ? "venue UNAVAILABLE in your region — market context only"
+            : `$10.20 USD on ${buy.venueName} + ~10.2 ${stable} on ${sell.venueName}${["kraken", "coinbase"].includes(buy.venue) && ["kraken", "coinbase"].includes(sell.venue) ? "" : " (needs account — public data only until API access verified)"}`,
           net10: n10, net50: n50, net100: n100,
           executableNow: false, // stables aren't wired to any live executor — evidence only
         });

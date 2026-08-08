@@ -2234,7 +2234,9 @@ components:
             slippageUsd: { type: number }
             basisHaircutUsd: { type: number }
             bufferUsd: { type: number }
-        blockedBy: { type: string, description: "NONE | NO_EDGE | BLOCKED_BY_FEES | INSUFFICIENT_INVENTORY | NEEDS_KEYS | NEEDS_ACCOUNT" }
+        blockedBy: { type: string, description: "NONE | NO_EDGE | BLOCKED_BY_FEES | INSUFFICIENT_INVENTORY | NEEDS_KEYS | NEEDS_ACCOUNT | REGION_UNAVAILABLE" }
+        regionUnavailable: { type: boolean, description: "a leg is on a venue unavailable in the user's region — market context only, never actionable" }
+        entryTierMakerNet10: { type: number, nullable: true, description: "for candidate venues (Gemini/Crypto.com): $10 net IF candidate legs paid published entry-tier MAKER fees — assumption analysis, never executable" }
         category: { type: string, description: "executable_now | requires_setup | not_profitable" }
         requirement: { type: string }
         coinbaseFeeIsBlocker: { type: boolean }
@@ -2264,10 +2266,18 @@ components:
               name: { type: string }
               quote: { type: string }
               assumedTakerPct: { type: number }
+              assumedMakerPct: { type: number }
+              regionOk: { type: boolean }
+              candidate: { type: boolean }
+              accessNote: { type: string, nullable: true }
               status: { type: string }
               assetsCovered: { type: integer }
         coinbaseFeeDrag: { type: integer }
         summary: { type: string }
+        candidateRoutes:
+          type: array
+          description: "routes touching PR-accessible candidate venues (Gemini, Crypto.com) — public-data discovery with entry-tier maker analysis; never executable until API access is connected + verified"
+          items: { $ref: "#/components/schemas/DiscoveryRow" }
         executableNow:
           type: array
           items: { $ref: "#/components/schemas/DiscoveryRow" }

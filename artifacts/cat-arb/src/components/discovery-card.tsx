@@ -21,6 +21,7 @@ const BLOCKER_LABEL: Record<string, string> = {
   INSUFFICIENT_INVENTORY: "positive net, blocked only by inventory",
   NEEDS_KEYS: "connect API keys to verify",
   NEEDS_ACCOUNT: "needs an account on another venue",
+  REGION_UNAVAILABLE: "venue unavailable in your region — context only",
 };
 
 function Verdict({ row, kind }: { row: DiscoveryRow; kind: "best" | "nearmiss" }) {
@@ -82,6 +83,10 @@ function RowTable({ rows, showRequirement }: { rows: DiscoveryRow[]; showRequire
                   {r.quoteNote !== "USD" && <span className="text-amber-500" title={r.quoteNote}> †</span>}
                   {r.feeSource !== "detected" && <span className="text-muted-foreground" title="fee tiers are published assumptions, not detected"> *</span>}
                   {r.coinbaseFeeIsBlocker && <span className="text-orange-500" title="This route would flip positive at a ~0.10% taker tier — Coinbase's fee tier is what kills it."> CB-fee</span>}
+                  {r.regionUnavailable && <span className="text-red-400" title="A leg is on a venue unavailable in your region — market context only, never actionable."> region✕</span>}
+                  {r.entryTierMakerNet10 != null && (r.entryTierMakerNet10 ?? -1) > 0 && (
+                    <span className="text-cyan-400" title={`Would project ${fmt(r.entryTierMakerNet10, 3)} net @ $10 if the candidate venue's legs paid its published ENTRY-TIER MAKER fee — assumption analysis, not executable until an account + API access is connected and verified.`}> maker-tier✓</span>
+                  )}
                 </td>
                 <td className="text-right pr-2 text-red-400">{r.buyTakerPct}+{r.sellTakerPct}</td>
                 {[10, 50, 100].map(sz => {
@@ -163,12 +168,26 @@ export function DiscoveryCard() {
               <div className="font-semibold text-amber-500 mb-1">Potentially profitable — requires another exchange/account or pre-positioned inventory</div>
               <RowTable rows={data.requiresSetup ?? []} showRequirement={true} />
             </div>
+            {(data.candidateRoutes?.length ?? 0) > 0 && (
+              <div>
+                <div className="font-semibold text-cyan-400 mb-1">★ Candidate venues — Gemini &amp; Crypto.com (PR-accessible, public data only until an account/API access is verified)</div>
+                <div className="text-muted-foreground mb-1">
+                  "maker-tier✓" = would project positive at the venue's published entry-tier MAKER fee (Gemini 0.20% spot / ~0.03% stablecoin schedule; Crypto.com 0.25%) — assumption analysis, never auto-traded.
+                </div>
+                <RowTable rows={data.candidateRoutes ?? []} showRequirement={true} />
+              </div>
+            )}
             <div>
               <div className="font-semibold text-muted-foreground mb-1">Best of the not-profitable (context — why nothing fires)</div>
               <RowTable rows={data.notProfitable ?? []} showRequirement={false} />
             </div>
             <div className="text-muted-foreground">
-              Venues: {(data.venues ?? []).map(v => `${v.name} ${v.status === "ok" ? `(${v.assetsCovered} assets${v.quote === "USDT" ? ", USDT†" : ""})` : "(unreachable)"}`).join(" · ")}.
+              Venues: {(data.venues ?? []).map(v =>
+                v.regionOk === false
+                  ? `${v.name} (UNAVAILABLE in your region — context only)`
+                  : `${v.candidate ? "★ " : ""}${v.name} ${v.status === "ok" ? `(${v.assetsCovered} assets${v.quote === "USDT" ? ", USDT†" : ""}${v.candidate ? ", PR-accessible candidate" : ""})` : "(unreachable)"}`
+              ).join(" · ")}.
+              {" "}★ = realistically accessible from Puerto Rico (Gemini, Crypto.com) — public-data discovery only until an account + API access is connected and verified; Gemini's stablecoin fee schedule (~0.03% taker assumed) is dramatically below its spot tiers.
               {" "}† USDT-quoted books carry a 0.10%/leg basis haircut. * fees are published entry-tier assumptions until an account is connected.
               Projections at $50/$100 are informational — live execution never exceeds the $10 validation cap.
             </div>

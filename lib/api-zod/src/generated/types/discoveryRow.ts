@@ -25,8 +25,12 @@ export interface DiscoveryRow {
   bestSizeUsd?: number | null;
   bestNetUsd?: number | null;
   costsAtBest?: DiscoveryRowCostsAtBest;
-  /** NONE | NO_EDGE | BLOCKED_BY_FEES | INSUFFICIENT_INVENTORY | NEEDS_KEYS | NEEDS_ACCOUNT */
+  /** NONE | NO_EDGE | BLOCKED_BY_FEES | INSUFFICIENT_INVENTORY | NEEDS_KEYS | NEEDS_ACCOUNT | REGION_UNAVAILABLE */
   blockedBy?: string;
+  /** a leg is on a venue unavailable in the user's region — market context only, never actionable */
+  regionUnavailable?: boolean;
+  /** for candidate venues (Gemini/Crypto.com): $10 net IF candidate legs paid published entry-tier MAKER fees — assumption analysis, never executable */
+  entryTierMakerNet10?: number | null;
   /** executable_now | requires_setup | not_profitable */
   category?: string;
   requirement?: string;

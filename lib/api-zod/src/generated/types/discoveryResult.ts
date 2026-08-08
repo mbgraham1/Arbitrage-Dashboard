@@ -19,6 +19,8 @@ export interface DiscoveryResult {
   venues?: DiscoveryResultVenuesItem[];
   coinbaseFeeDrag?: number;
   summary?: string;
+  /** routes touching PR-accessible candidate venues (Gemini, Crypto.com) — public-data discovery with entry-tier maker analysis; never executable until API access is connected + verified */
+  candidateRoutes?: DiscoveryRow[];
   executableNow?: DiscoveryRow[];
   requiresSetup?: DiscoveryRow[];
   notProfitable?: DiscoveryRow[];

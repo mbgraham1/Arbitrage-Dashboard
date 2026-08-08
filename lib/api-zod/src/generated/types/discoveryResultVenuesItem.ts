@@ -11,6 +11,10 @@ export type DiscoveryResultVenuesItem = {
   name?: string;
   quote?: string;
   assumedTakerPct?: number;
+  assumedMakerPct?: number;
+  regionOk?: boolean;
+  candidate?: boolean;
+  accessNote?: string | null;
   status?: string;
   assetsCovered?: number;
 };

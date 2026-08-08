@@ -27,6 +27,15 @@ export type VenueConfig = {
   quote: "USD" | "USDT";
   /** Published entry-tier taker fee, percent. ASSUMPTION — no account connected. */
   assumedTakerPct: number;
+  /** Published entry-tier maker fee, percent. ASSUMPTION — used only for "would this flip positive at entry maker tiers" analysis. */
+  assumedMakerPct: number;
+  /** False = the user's app reports this venue unavailable in their region (Puerto Rico) — market context ONLY, never actionable. */
+  regionOk: boolean;
+  /** True = realistically accessible from Puerto Rico and worth considering for a lower-fee account (still public-data-only until keys are connected + verified). */
+  candidate: boolean;
+  /** Published stablecoin-pair taker fee, percent (e.g. Gemini's stablecoin schedule), if dramatically lower than spot. ASSUMPTION. */
+  stablecoinTakerPct?: number;
+  accessNote?: string;
   /** Conservative haircut for USDT/USD basis + conversion friction, percent of notional per leg. */
   basisHaircutPct: number;
   buildUrl: (asset: string) => string;
@@ -41,22 +50,22 @@ const lv = (rows: unknown[] | undefined, n = 50): Level[] =>
 
 export const VENUES: VenueConfig[] = [
   {
-    id: "binanceus", name: "Binance.US", quote: "USD", assumedTakerPct: 0.60, basisHaircutPct: 0,
+    id: "binanceus", name: "Binance.US", quote: "USD", assumedTakerPct: 0.60, assumedMakerPct: 0.40, regionOk: false, candidate: false, accessNote: "UNAVAILABLE in your region (Puerto Rico) — market context only, never actionable", basisHaircutPct: 0,
     buildUrl: a => `https://api.binance.us/api/v3/depth?symbol=${a}USD&limit=50`,
     parse: j => { const d = j as { bids?: unknown[]; asks?: unknown[] }; return d.bids && d.asks ? { bids: lv(d.bids), asks: lv(d.asks) } : null; },
   },
   {
-    id: "okx", name: "OKX", quote: "USDT", assumedTakerPct: 0.10, basisHaircutPct: 0.10,
+    id: "okx", name: "OKX", quote: "USDT", assumedTakerPct: 0.10, assumedMakerPct: 0.08, regionOk: true, candidate: false, accessNote: "US/PR retail access restricted — verify eligibility before treating as actionable", basisHaircutPct: 0.10,
     buildUrl: a => `https://www.okx.com/api/v5/market/books?instId=${a}-USDT&sz=50`,
     parse: j => { const d = (j as { data?: Array<{ bids?: unknown[]; asks?: unknown[] }> }).data?.[0]; return d?.bids && d?.asks ? { bids: lv(d.bids), asks: lv(d.asks) } : null; },
   },
   {
-    id: "kucoin", name: "KuCoin", quote: "USDT", assumedTakerPct: 0.10, basisHaircutPct: 0.10,
+    id: "kucoin", name: "KuCoin", quote: "USDT", assumedTakerPct: 0.10, assumedMakerPct: 0.10, regionOk: true, candidate: false, accessNote: "not US-licensed — verify PR eligibility before treating as actionable", basisHaircutPct: 0.10,
     buildUrl: a => `https://api.kucoin.com/api/v1/market/orderbook/level2_20?symbol=${a}-USDT`,
     parse: j => { const d = (j as { data?: { bids?: unknown[]; asks?: unknown[] } }).data; return d?.bids && d?.asks ? { bids: lv(d.bids), asks: lv(d.asks) } : null; },
   },
   {
-    id: "gemini", name: "Gemini", quote: "USD", assumedTakerPct: 0.40, basisHaircutPct: 0,
+    id: "gemini", name: "Gemini", quote: "USD", assumedTakerPct: 0.40, assumedMakerPct: 0.20, regionOk: true, candidate: true, stablecoinTakerPct: 0.03, accessNote: "PR-accessible CANDIDATE venue — ActiveTrader entry tiers assumed; its stablecoin fee schedule (~0.03% taker assumed) is dramatically lower than spot; verify before funding", basisHaircutPct: 0,
     buildUrl: a => `https://api.gemini.com/v1/book/${a.toLowerCase()}usd?limit_bids=50&limit_asks=50`,
     parse: j => {
       const d = j as { bids?: Array<{ price: string; amount: string }>; asks?: Array<{ price: string; amount: string }> };
@@ -66,12 +75,12 @@ export const VENUES: VenueConfig[] = [
     },
   },
   {
-    id: "bitstamp", name: "Bitstamp", quote: "USD", assumedTakerPct: 0.40, basisHaircutPct: 0,
+    id: "bitstamp", name: "Bitstamp", quote: "USD", assumedTakerPct: 0.40, assumedMakerPct: 0.30, regionOk: true, candidate: false, basisHaircutPct: 0,
     buildUrl: a => `https://www.bitstamp.net/api/v2/order_book/${a.toLowerCase()}usd/`,
     parse: j => { const d = j as { bids?: unknown[]; asks?: unknown[] }; return d.bids && d.asks ? { bids: lv(d.bids), asks: lv(d.asks) } : null; },
   },
   {
-    id: "cryptocom", name: "Crypto.com", quote: "USD", assumedTakerPct: 0.50, basisHaircutPct: 0,
+    id: "cryptocom", name: "Crypto.com", quote: "USD", assumedTakerPct: 0.50, assumedMakerPct: 0.25, regionOk: true, candidate: true, accessNote: "PR-accessible CANDIDATE venue — published Exchange entry-tier assumptions (0.25% maker / 0.50% taker) until an account is connected", basisHaircutPct: 0,
     buildUrl: a => `https://api.crypto.com/exchange/v1/public/get-book?instrument_name=${a}_USD&depth=50`,
     parse: j => {
       const d = (j as { result?: { data?: Array<{ bids?: unknown[]; asks?: unknown[] }> } }).result?.data?.[0];
@@ -79,12 +88,12 @@ export const VENUES: VenueConfig[] = [
     },
   },
   {
-    id: "mexc", name: "MEXC", quote: "USDT", assumedTakerPct: 0.05, basisHaircutPct: 0.10,
+    id: "mexc", name: "MEXC", quote: "USDT", assumedTakerPct: 0.05, assumedMakerPct: 0.00, regionOk: true, candidate: false, accessNote: "not US-licensed — verify PR eligibility before treating as actionable", basisHaircutPct: 0.10,
     buildUrl: a => `https://api.mexc.com/api/v3/depth?symbol=${a}USDT&limit=50`,
     parse: j => { const d = j as { bids?: unknown[]; asks?: unknown[] }; return d.bids && d.asks ? { bids: lv(d.bids), asks: lv(d.asks) } : null; },
   },
   {
-    id: "gateio", name: "Gate.io", quote: "USDT", assumedTakerPct: 0.20, basisHaircutPct: 0.10,
+    id: "gateio", name: "Gate.io", quote: "USDT", assumedTakerPct: 0.20, assumedMakerPct: 0.20, regionOk: true, candidate: false, accessNote: "not US-licensed — verify PR eligibility before treating as actionable", basisHaircutPct: 0.10,
     buildUrl: a => `https://api.gateio.ws/api/v4/spot/order_book?currency_pair=${a}_USDT&limit=50`,
     parse: j => { const d = j as { bids?: unknown[]; asks?: unknown[] }; return d.bids && d.asks ? { bids: lv(d.bids), asks: lv(d.asks) } : null; },
   },
