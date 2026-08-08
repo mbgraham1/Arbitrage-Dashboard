@@ -13,6 +13,10 @@ import { cn } from "@/lib/utils";
 import { useToast } from "@/hooks/use-toast";
 import { useLocalStorage } from "@/hooks/use-local-storage";
 import { useQuery } from "@tanstack/react-query";
+import {
+  routeInventoryReqs, inventoryBalanceFor, missingInventory, formatInventoryReqs,
+  EX_LABEL, type InventoryRequirement,
+} from "@/store/route-inventory";
 import { execPreview, useGetTradeSummary, useListTrades, useScanAllPairs, useGetObScan, getGetObScanQueryKey, useObExecute, useGetAllPairSnapshots, getGetAllPairSnapshotsQueryKey, useGetGraphScan, getGetGraphScanQueryKey, useGraphExecute, useGetFeeTier, getGetFeeTierQueryKey, useGetExecutionQuality, getGetExecutionQualityQueryKey, useGetExecutionStatus, getGetExecutionStatusQueryKey, useGetAccountPnl, getGetAccountPnlQueryKey, useGetInventoryScan, getGetInventoryScanQueryKey, useInventoryExecute, TradeRecord, PairScanEntry, ObCycleEntry, AllPairSnapshot, GraphRoute, GraphRouteHop, InventoryOpportunity, InventoryRebalanceAlert } from "@workspace/api-client-react";
 
 // ── Small helpers ──────────────────────────────────────────────────────────────
@@ -1724,8 +1728,42 @@ function HopBadge({ hop }: { hop: GraphRouteHop }) {
   );
 }
 
+/** Compact per-requirement badge: "0.0002 BTC @ CB" — green when the cached
+ *  balance covers it, red when it falls short, neutral when balances aren't
+ *  loaded yet. Tooltip spells out the full requirement. */
+function InventoryReqBadge({ req, held }: { req: InventoryRequirement; held: number | null }) {
+  const met = held != null ? held >= req.amount : null;
+  const exTag = req.exchange === "kraken" ? "K" : "CB";
+  const amountStr = req.amount >= 1 ? req.amount.toFixed(4) : req.amount.toPrecision(3);
+  return (
+    <TooltipProvider>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <span
+            data-testid={`badge-inventory-req-${req.asset}-${req.exchange}`}
+            className={cn(
+              "text-[9px] font-mono font-bold px-1 border whitespace-nowrap cursor-default",
+              met === true && "text-success border-success",
+              met === false && "text-destructive border-destructive",
+              met == null && "text-muted-foreground border-border",
+            )}
+          >
+            {met === true ? "✓ " : met === false ? "✕ " : ""}{amountStr} {req.asset} @ {exTag}
+          </span>
+        </TooltipTrigger>
+        <TooltipContent side="top" className="max-w-[260px] text-xs">
+          Need {amountStr} {req.asset} on {EX_LABEL[req.exchange]} before this route can execute — cross-exchange routes trade from existing inventory (no mid-trade transfer).
+          {held != null
+            ? ` You hold ${held.toFixed(6)} ${req.asset} on ${EX_LABEL[req.exchange]} — requirement ${held >= req.amount ? "MET" : "NOT met"}.`
+            : " Start the bot to load balances and check whether you hold enough."}
+        </TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
+  );
+}
+
 function GraphEngineCard() {
-  const { settings, credentials, liveMode, forceMode, addLog } = useBotContext();
+  const { settings, credentials, liveMode, forceMode, addLog, cachedBalances } = useBotContext();
   const executeMutation = useGraphExecute();
   // Live per-leg fill status — polled at 1s only while an execution is in
   // flight (or the server still reports an active leg), idle otherwise.
@@ -1780,7 +1818,16 @@ function GraphEngineCard() {
   const breakEvenPct = topRoute
     ? ((topRoute.feeUsd / tradeSize) * 100).toFixed(3)
     : "—";
-  const canExecute = !!topRoute && !executeMutation.isPending;
+  // Cross-exchange inventory gate: when balances ARE loaded and the top route
+  // is a bridge route whose required inventory is missing, block EXECUTE —
+  // firing would fail (or worse, half-fill) without the asset on the venue.
+  // Unknown balances (bot idle) do NOT block: the server pre-flight re-checks.
+  const topRouteMissingInv = topRoute ? missingInventory(topRoute, cachedBalances) : [];
+  const canExecute = !!topRoute && !executeMutation.isPending && topRouteMissingInv.length === 0;
+  // Always-current balances for the async execution path (avoids stale closures
+  // when AUTO fires from an effect scheduled before a balance refresh landed).
+  const balancesRef = useRef(cachedBalances);
+  balancesRef.current = cachedBalances;
 
   // Pre-fire breakdown (Kraken triangles): fresh raw edge, taker fees at the
   // real tier, depth-walked slippage for THIS size, safety buffer, and the
@@ -1816,7 +1863,25 @@ function GraphEngineCard() {
     // scan instead of stalling until the next scan. Max 3 candidates per fire.
     // FORCE MODE lowers the effective floor to $0.01 — take any positive trade.
     const effMinProfit = forceMode && liveMode ? Math.min(minProfit, 0.01) : minProfit;
-    const candidates = [topRoute, ...viable.filter(r => r.description !== topRoute.description && r.netProfitUsd > effMinProfit)].slice(0, 3);
+    // Inventory gate on EVERY candidate (top route AND fallbacks): a
+    // cross-exchange route whose required destination-venue inventory is
+    // provably missing from cached balances can never be submitted from any
+    // path (manual, AUTO, or fallback). Unknown balances don't block — the
+    // server pre-flight re-validates.
+    const allCandidates = [topRoute, ...viable.filter(r => r.description !== topRoute.description && r.netProfitUsd > effMinProfit)].slice(0, 3);
+    const candidates = allCandidates.filter(r => {
+      const missing = missingInventory(r, balancesRef.current);
+      if (missing.length > 0) {
+        addLog("warning", `[GRAPH·EXEC] ⛔ Skipped ${r.description} — missing inventory: ${formatInventoryReqs(missing)} (cross-exchange routes trade from existing inventory).`);
+        return false;
+      }
+      return true;
+    });
+    if (candidates.length === 0) {
+      setExecResult(`❌ Blocked — missing inventory: ${formatInventoryReqs(missingInventory(topRoute, balancesRef.current))}. Deposit or buy the asset on that venue first.`);
+      execInFlight.current = false;
+      return;
+    }
     try {
       for (let ci = 0; ci < candidates.length; ci++) {
         const cand = candidates[ci];
@@ -1934,6 +1999,7 @@ function GraphEngineCard() {
     : executeMutation.isPending ? "execution in flight — waiting for it to finish"
     : routes.length === 0 ? "no routes in scan yet"
     : !topRoute ? "no executable route — every scanned route is a shape the live executor doesn't support (4+ hop / mixed)"
+    : topRouteMissingInv.length > 0 ? `missing inventory — need ${formatInventoryReqs(topRouteMissingInv)} before the top cross-exchange route can execute`
     : cooldownLeftMs > 0 ? `cooldown — ${Math.ceil(cooldownLeftMs / 1000)}s until next fire`
     : dataUpdatedAt !== 0 && dataUpdatedAt === lastFireScanAt.current ? "already attempted on this scan — waiting for the next fresh scan (~8s)"
     : topRoute.netProfitUsd <= 0 ? `fees exceed gross edge — best executable route nets ${topRoute.netProfitUsd < 0 ? "-" : ""}$${Math.abs(topRoute.netProfitUsd).toFixed(4)} after fees`
@@ -1942,6 +2008,7 @@ function GraphEngineCard() {
   /** Per-route reject reason for the table (pre-execution checks only). */
   const routeRejectReason = (r: (typeof routes)[number]): string | null =>
     !r.executable ? "Unsupported route shape — live executor handles Kraken triangles & 2-leg cross only"
+    : missingInventory(r, cachedBalances).length > 0 ? `Missing inventory — need ${formatInventoryReqs(missingInventory(r, cachedBalances))}`
     : r.netProfitUsd <= 0 ? "Fees exceed gross edge"
     : r.netProfitUsd <= minProfit ? `Edge below your $${minProfit.toFixed(2)} min-profit floor`
     : null;
@@ -1951,6 +2018,9 @@ function GraphEngineCard() {
   useEffect(() => {
     if (!autoArmed || !topRoute || executeMutation.isPending) return;
     if (topRoute.netProfitUsd <= minProfit) return;
+    // Inventory gate: never auto-fire a cross-exchange route whose required
+    // destination-venue inventory is provably missing (autoSkipReason shows why).
+    if (missingInventory(topRoute, balancesRef.current).length > 0) return;
     if (Date.now() - lastAutoFire.current < AUTO_COOLDOWN_MS) return;
     if (dataUpdatedAt !== 0 && dataUpdatedAt === lastFireScanAt.current) return; // one attempt per scan snapshot
     lastFireScanAt.current = dataUpdatedAt;
@@ -2061,7 +2131,11 @@ function GraphEngineCard() {
             className="h-6 px-2 text-[10px] font-mono font-bold"
             disabled={!canExecute}
             onClick={executeTopRoute}
-            title={topRoute ? `Pre-flight + execute ${topRoute.description} at $${tradeSize}${liveMode ? " (LIVE ORDERS)" : " (dry run)"}` : "No route available"}
+            title={!topRoute
+              ? "No route available"
+              : topRouteMissingInv.length > 0
+                ? `Blocked — missing inventory: ${topRouteMissingInv.map(m => `${m.amount >= 1 ? m.amount.toFixed(4) : m.amount.toPrecision(3)} ${m.asset} on ${EX_LABEL[m.exchange]}`).join(", ")}. Cross-exchange routes trade from existing inventory on both venues; deposit or buy the asset there first.`
+                : `Pre-flight + execute ${topRoute.description} at $${tradeSize}${liveMode ? " (LIVE ORDERS)" : " (dry run)"}`}
           >
             {executeMutation.isPending ? "EXECUTING…" : `🔴 EXECUTE TOP ROUTE${liveMode ? "" : " (DRY)"}`}
           </Button>
@@ -2251,7 +2325,7 @@ function GraphEngineCard() {
             <table className="w-full text-xs font-mono border-collapse">
               <thead>
                 <tr className="border-b-2 border-border bg-muted/50">
-                  {["#", "Route", "Hops", "Raw Edge", "Fees", "Net Profit", "Profit %", "Status"].map(h => (
+                  {["#", "Route", "Hops", "Inventory", "Raw Edge", "Fees", "Net Profit", "Profit %", "Status"].map(h => (
                     <th key={h} className="text-left px-3 py-2 text-[10px] uppercase font-bold text-muted-foreground whitespace-nowrap">{h}</th>
                   ))}
                 </tr>
@@ -2272,6 +2346,23 @@ function GraphEngineCard() {
                           <HopBadge key={j} hop={h} />
                         ))}
                       </span>
+                    </td>
+                    <td className="px-3 py-1.5">
+                      {(() => {
+                        const reqs = routeInventoryReqs(r);
+                        if (reqs.length === 0) return <span className="text-muted-foreground">—</span>;
+                        return (
+                          <span className="flex gap-1 items-center flex-wrap">
+                            {reqs.map((req, j) => (
+                              <InventoryReqBadge
+                                key={j}
+                                req={req}
+                                held={inventoryBalanceFor(cachedBalances, req.exchange, req.asset)}
+                              />
+                            ))}
+                          </span>
+                        );
+                      })()}
                     </td>
                     <td className={cn("px-3 py-1.5", r.grossProfitUsd > 0 ? "text-success" : "text-destructive")}>
                       ${r.grossProfitUsd.toFixed(4)}
