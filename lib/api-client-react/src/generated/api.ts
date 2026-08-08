@@ -27,6 +27,9 @@ import type {
   CoinbaseCredentials,
   CointegrationScanResult,
   ConnectionTestResult,
+  CrossMmExecuteRequest,
+  CrossMmExecuteResult,
+  CrossMmStats,
   ErrorResponse,
   ExchangeCredentials,
   ExecLockClearRequest,
@@ -66,7 +69,9 @@ import type {
   TradeSummary,
   TriExecuteRequest,
   TriExecuteResult,
-  TriangularScanResult
+  TriangularScanResult,
+  TwoExchangeTestRequest,
+  TwoExchangeTestResult
 } from './api.schemas';
 
 import { customFetch } from '../custom-fetch';
@@ -1561,6 +1566,227 @@ export function useGetInventoryImbalance<TData = Awaited<ReturnType<typeof getIn
 
 
 
+
+export const getExecuteCrossMmUrl = () => {
+
+
+
+
+  return `/api/arb/cross-mm-execute`
+}
+
+/**
+ * Rests a POST-ONLY limit order on Kraken sized for the given USD exposure, only when a confirmed fill could be hedged profitably at market on Coinbase against pre-positioned inventory. The hedge is never placed before the maker fill is confirmed; the resting order is cancelled if it does not fill inside the window or if the projected hedged net drops below the profit floor. Dry run returns the full projection without placing anything.
+ * @summary Run one maker-post + taker-hedge cross-exchange cycle
+ */
+export const executeCrossMm = async (crossMmExecuteRequest: CrossMmExecuteRequest, options?: RequestInit): Promise<CrossMmExecuteResult> => {
+
+  return customFetch<CrossMmExecuteResult>(getExecuteCrossMmUrl(),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(crossMmExecuteRequest)
+  }
+);}
+
+
+
+
+
+export const getExecuteCrossMmMutationOptions = <TError = ErrorType<ErrorResponse>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof executeCrossMm>>, TError,{data: BodyType<CrossMmExecuteRequest>}, TContext>, request?: SecondParameter<typeof customFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof executeCrossMm>>, TError,{data: BodyType<CrossMmExecuteRequest>}, TContext> => {
+
+const mutationKey = ['executeCrossMm'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof executeCrossMm>>, {data: BodyType<CrossMmExecuteRequest>}> = (props) => {
+          const {data} = props ?? {};
+
+          return  executeCrossMm(data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type ExecuteCrossMmMutationResult = NonNullable<Awaited<ReturnType<typeof executeCrossMm>>>
+    export type ExecuteCrossMmMutationBody = BodyType<CrossMmExecuteRequest>
+    export type ExecuteCrossMmMutationError = ErrorType<ErrorResponse>
+
+    /**
+ * @summary Run one maker-post + taker-hedge cross-exchange cycle
+ */
+export const useExecuteCrossMm = <TError = ErrorType<ErrorResponse>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof executeCrossMm>>, TError,{data: BodyType<CrossMmExecuteRequest>}, TContext>, request?: SecondParameter<typeof customFetch>}
+ ): UseMutationResult<
+        Awaited<ReturnType<typeof executeCrossMm>>,
+        TError,
+        {data: BodyType<CrossMmExecuteRequest>},
+        TContext
+      > => {
+      return useMutation(getExecuteCrossMmMutationOptions(options));
+    }
+
+export const getGetCrossMmStatsUrl = () => {
+
+
+
+
+  return `/api/arb/cross-mm-stats`
+}
+
+/**
+ * @summary Maker-post/taker-hedge strategy scoreboard (separate from triangles)
+ */
+export const getCrossMmStats = async ( options?: RequestInit): Promise<CrossMmStats> => {
+
+  return customFetch<CrossMmStats>(getGetCrossMmStatsUrl(),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getGetCrossMmStatsQueryKey = () => {
+    return [
+    `/api/arb/cross-mm-stats`
+    ] as const;
+    }
+
+
+export const getGetCrossMmStatsQueryOptions = <TData = Awaited<ReturnType<typeof getCrossMmStats>>, TError = ErrorType<ErrorResponse>>( options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getCrossMmStats>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getGetCrossMmStatsQueryKey();
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof getCrossMmStats>>> = ({ signal }) => getCrossMmStats({ signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof getCrossMmStats>>, TError, TData> & { queryKey: QueryKey }
+}
+
+export type GetCrossMmStatsQueryResult = NonNullable<Awaited<ReturnType<typeof getCrossMmStats>>>
+export type GetCrossMmStatsQueryError = ErrorType<ErrorResponse>
+
+
+/**
+ * @summary Maker-post/taker-hedge strategy scoreboard (separate from triangles)
+ */
+
+export function useGetCrossMmStats<TData = Awaited<ReturnType<typeof getCrossMmStats>>, TError = ErrorType<ErrorResponse>>(
+  options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getCrossMmStats>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+
+ ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+
+  const queryOptions = getGetCrossMmStatsQueryOptions(options)
+
+  const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+
+export const getRunTwoExchangeTestUrl = () => {
+
+
+
+
+  return `/api/arb/two-exchange-test`
+}
+
+/**
+ * Standalone diagnostic, fully separate from the arbitrage strategies. Buys ~$10 of ETH at market on Kraken, then sells the CONFIRMED filled quantity on Coinbase from pre-positioned ETH. Refuses to place any order when balances or credentials are insufficient. Records exact fills, fees, timestamps, order ids, and realized P&L. Never loops, never scales size.
+ * @summary One-shot two-exchange live test (Kraken market buy → Coinbase sell)
+ */
+export const runTwoExchangeTest = async (twoExchangeTestRequest: TwoExchangeTestRequest, options?: RequestInit): Promise<TwoExchangeTestResult> => {
+
+  return customFetch<TwoExchangeTestResult>(getRunTwoExchangeTestUrl(),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(twoExchangeTestRequest)
+  }
+);}
+
+
+
+
+
+export const getRunTwoExchangeTestMutationOptions = <TError = ErrorType<ErrorResponse>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof runTwoExchangeTest>>, TError,{data: BodyType<TwoExchangeTestRequest>}, TContext>, request?: SecondParameter<typeof customFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof runTwoExchangeTest>>, TError,{data: BodyType<TwoExchangeTestRequest>}, TContext> => {
+
+const mutationKey = ['runTwoExchangeTest'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof runTwoExchangeTest>>, {data: BodyType<TwoExchangeTestRequest>}> = (props) => {
+          const {data} = props ?? {};
+
+          return  runTwoExchangeTest(data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type RunTwoExchangeTestMutationResult = NonNullable<Awaited<ReturnType<typeof runTwoExchangeTest>>>
+    export type RunTwoExchangeTestMutationBody = BodyType<TwoExchangeTestRequest>
+    export type RunTwoExchangeTestMutationError = ErrorType<ErrorResponse>
+
+    /**
+ * @summary One-shot two-exchange live test (Kraken market buy → Coinbase sell)
+ */
+export const useRunTwoExchangeTest = <TError = ErrorType<ErrorResponse>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof runTwoExchangeTest>>, TError,{data: BodyType<TwoExchangeTestRequest>}, TContext>, request?: SecondParameter<typeof customFetch>}
+ ): UseMutationResult<
+        Awaited<ReturnType<typeof runTwoExchangeTest>>,
+        TError,
+        {data: BodyType<TwoExchangeTestRequest>},
+        TContext
+      > => {
+      return useMutation(getRunTwoExchangeTestMutationOptions(options));
+    }
 
 export const getGetFeeTierUrl = () => {
 

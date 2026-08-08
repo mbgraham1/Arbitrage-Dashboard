@@ -383,6 +383,162 @@ export interface ObExecuteRequest {
   isDryRun?: boolean;
 }
 
+/**
+ * Side of the Kraken maker order; auto picks the better projected direction
+ */
+export type CrossMmExecuteRequestDirection = typeof CrossMmExecuteRequestDirection[keyof typeof CrossMmExecuteRequestDirection];
+
+
+export const CrossMmExecuteRequestDirection = {
+  auto: 'auto',
+  buy: 'buy',
+  sell: 'sell',
+} as const;
+
+export interface CrossMmExecuteRequest {
+  krakenKey: string;
+  krakenSecret: string;
+  coinbaseKey: string;
+  coinbaseSecret: string;
+  /** Base asset traded on both venues (e.g. ETH, BTC, SOL) */
+  asset: string;
+  /**
+     * USD exposure of the maker order. Hard-capped at $10 until the strategy proves positive realized P&L.
+     * @maximum 10
+     */
+  tradeSizeUsd?: number;
+  /** Profit floor the projected hedged net must clear (clamped >= 0 for live runs) */
+  minProfitUsd?: number;
+  /** Freshness window for both venues' books at placement and hedge time */
+  maxQuoteAgeMs?: number;
+  /**
+     * How long the post-only order may rest before cancel
+     * @maximum 120000
+     */
+  restWindowMs?: number;
+  /** Side of the Kraken maker order; auto picks the better projected direction */
+  direction?: CrossMmExecuteRequestDirection;
+  /** Coinbase taker fee assumption (percent) for the hedge leg */
+  coinbaseFeesPct?: number;
+  isDryRun?: boolean;
+}
+
+export type CrossMmProjectionDirection = typeof CrossMmProjectionDirection[keyof typeof CrossMmProjectionDirection];
+
+
+export const CrossMmProjectionDirection = {
+  buy: 'buy',
+  sell: 'sell',
+} as const;
+
+export interface CrossMmProjection {
+  direction: CrossMmProjectionDirection;
+  makerPrice: number;
+  makerQty: number;
+  projectedNetUsd: number;
+  makerFeeUsd: number;
+  hedgeFeeUsd: number;
+  hedgeVwapPx: number;
+  hedgeTopPx?: number;
+  hedgeSlippageUsd?: number;
+  quoteAgeMs: number;
+  /** Human-readable per-leg book ages */
+  legAges?: string;
+}
+
+/**
+ * Millisecond marks (decide→place→fill→hedge)
+ */
+export type CrossMmExecuteResultLatency = {[key: string]: number} | null;
+
+export interface CrossMmExecuteResult {
+  success: boolean;
+  isDryRun: boolean;
+  /** True when a maker fill occurred (money moved) */
+  executed: boolean;
+  /** projection_only | gate_blocked | inventory_blocked | post_rejected | no_fill_cancel | gate_cancel | hedged | unhedged | indeterminate */
+  outcome: string;
+  asset?: string;
+  projection?: CrossMmProjection | null;
+  makerOrderId?: string | null;
+  makerFilledQty?: number | null;
+  makerAvgPrice?: number | null;
+  hedgeOrderId?: string | null;
+  hedgeFilledUsd?: number | null;
+  /** Fee-inclusive realized P&L from ACTUAL fills on both legs; null when nothing filled */
+  realizedProfitUsd?: number | null;
+  /** Millisecond marks (decide→place→fill→hedge) */
+  latency?: CrossMmExecuteResultLatency;
+  error?: string | null;
+}
+
+export type CrossMmStatsRecentItem = {
+  route?: string;
+  filled?: boolean;
+  expectedProfitUsd?: number | null;
+  realizedProfitUsd?: number | null;
+  note?: string | null;
+  createdAt?: string | null;
+};
+
+export interface CrossMmStats {
+  attempts: number;
+  postRejected?: number;
+  gateCancels?: number;
+  noFillCancels?: number;
+  makerFills: number;
+  hedged: number;
+  unhedged: number;
+  realizedTotalUsd: number;
+  avgRealizedUsd?: number | null;
+  fillRatePct?: number | null;
+  recent?: CrossMmStatsRecentItem[];
+}
+
+export interface TwoExchangeTestRequest {
+  krakenKey: string;
+  krakenSecret: string;
+  coinbaseKey: string;
+  coinbaseSecret: string;
+  /**
+     * USD size of the Kraken buy. Hard-capped at $10 — this is a diagnostic, not a strategy.
+     * @maximum 10
+     */
+  sizeUsd?: number;
+  /** When true, verifies balances and prices but places no orders. */
+  isDryRun?: boolean;
+}
+
+export interface TwoExchangeTestLeg {
+  exchange?: string;
+  side?: string;
+  orderId?: string | null;
+  status?: string | null;
+  filledQty?: number | null;
+  avgPrice?: number | null;
+  notionalUsd?: number | null;
+  feeUsd?: number | null;
+  placedAt?: string | null;
+  terminalAt?: string | null;
+  error?: string | null;
+}
+
+export interface TwoExchangeTestResult {
+  success: boolean;
+  isDryRun: boolean;
+  /** dry_run_ok | blocked | buy_failed | sell_failed | partial_sell | completed | indeterminate */
+  outcome: string;
+  blockReason?: string | null;
+  buyLeg?: TwoExchangeTestLeg | null;
+  sellLeg?: TwoExchangeTestLeg | null;
+  /** (Coinbase proceeds − Coinbase fees) − (Kraken cost + Kraken fees); null unless BOTH legs fully filled */
+  realizedProfitUsd?: number | null;
+  residualEthOpen?: number | null;
+  startedAt?: string | null;
+  finishedAt?: string | null;
+  error?: string | null;
+}
+
 export interface FeeTierRequest {
   krakenKey: string;
   krakenSecret: string;

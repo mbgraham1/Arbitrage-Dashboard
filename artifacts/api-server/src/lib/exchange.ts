@@ -1017,6 +1017,38 @@ export async function getCoinbaseProductIncrements(pair: Pair): Promise<Coinbase
   return val;
 }
 
+/**
+ * Immediate-or-cancel LIMIT order on Coinbase — the bounded hedge primitive.
+ * Crosses the spread like a taker but with an EXACT base size and a hard
+ * worst-case price; any unfilled remainder cancels instead of resting or
+ * spending unbounded quote. Uses smart-order-router IOC config.
+ */
+export async function coinbaseIocLimitOrder(
+  creds: CoinbaseCreds,
+  side: "BUY" | "SELL",
+  volume: number,
+  limitPrice: number,
+  pair: Pair = "SOL/USD",
+  increments?: CoinbaseIncrements,
+): Promise<{ orderId?: string; success?: boolean }> {
+  const clientOrderId = crypto.randomUUID();
+  const productId = COINBASE_PRODUCTS[pair];
+  const orderConfig = {
+    sor_limit_ioc: {
+      base_size:   increments ? quantizeDown(volume, increments.baseIncrement).text : volume.toFixed(8),
+      limit_price: increments ? quantizeDown(limitPrice, increments.quoteIncrement).text : limitPrice.toFixed(2),
+    },
+  };
+  const data = await coinbaseRequest<{ order_id?: string; success?: boolean; success_response?: { order_id: string }; error_response?: { message?: string } }>(
+    creds,
+    "POST",
+    "/api/v3/brokerage/orders",
+    { client_order_id: clientOrderId, product_id: productId, side, order_configuration: orderConfig }
+  );
+  if (data.success === false) throw new Error(`Coinbase IOC order rejected: ${data.error_response?.message ?? "unknown"}`);
+  return { orderId: data.success_response?.order_id ?? data.order_id, success: data.success };
+}
+
 export async function coinbaseLimitOrder(
   creds: CoinbaseCreds,
   side: "BUY" | "SELL",

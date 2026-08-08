@@ -18,6 +18,7 @@ import {
   GraphExecuteBody,
   ExecPreviewBody,
   ListTradesQueryParams,
+  ExecuteCrossMmBody,
 } from "@workspace/api-zod";
 import {
   getKrakenPrice,
@@ -43,6 +44,7 @@ import {
   coinbaseAccountValueUsd,
   getCoinbaseBalances,
   coinbaseMarketOrder,
+  coinbaseIocLimitOrder,
   coinbaseLimitOrder,
   coinbaseOrderFilled,
   coinbaseOrderDetails,
@@ -60,6 +62,7 @@ import { getBestPairPrices, getTriPrices, getBtcTriPrices, scanAllPairs, getPair
 import { scanOrderBookCycles, preflightObCycle, discoverCrossPairs, freshJoinPrice, makerQuote, takerCycleBreakdown, cachedTakerCycleBreakdown, getEventScan, krakenStreamStats, getStreamBook, waitForBookTouch, formatLegAges, OB_ASSETS, OB_USD_PAIRS, CROSS_LOOKUP, type ObAsset } from "../lib/order-book";
 import { scanGraphOpportunities } from "../lib/graph-engine";
 import { crossTakerBreakdown } from "../lib/cross-pricing";
+import { projectMakerHedge, bestMakerHedgeProjection, type MmProjection, type MmDirection } from "../lib/cross-mm";
 import { coinbaseBookKey, coinbaseStreamStats, getCoinbaseStreamBook } from "../lib/book-stream";
 import { createPairHistory, updatePairHistory, type PairHistory } from "../lib/kalman";
 import { waitForTriLimitFill } from "../lib/tri-fill.js";
@@ -4029,6 +4032,324 @@ router.get("/arb/inventory-imbalance", async (_req, res): Promise<void> => {
     res.json({
       assets: [...byAsset.entries()].map(([assetName, e]) => ({ asset: assetName, krakenDelta: e.kraken, coinbaseDelta: e.coinbase, trades: e.trades, lastTradeAt: e.lastAt })),
       note: "Deltas are base units moved by live cross-exchange inventory trades since ledger start. Positive = accumulated on that venue; negative = drawn down. Rebalance by transferring or trading back when deltas grow.",
+    });
+  } catch (err) {
+    res.status(500).json({ error: (err as Error).message });
+  }
+});
+
+// ── POST /arb/cross-mm-execute ───────────────────────────────────────────────
+// MAKER-POST + TAKER-HEDGE cross-exchange strategy (one cycle per call).
+// Rest a post-only limit on Kraken; hedge on Coinbase ONLY after a confirmed
+// fill, sized from the ACTUAL fill. No fill → cancel, nothing spent. Tracked
+// under execution_quality style "cross-mm" and trades pair prefix "MM:" —
+// fully separate from the triangle strategy's scoreboard.
+const CROSS_MM_POLL_MS = 700;
+const CROSS_MM_CANCEL_CONFIRM_MS = 20_000;
+router.post("/arb/cross-mm-execute", async (req, res): Promise<void> => {
+  const parsed = ExecuteCrossMmBody.safeParse(req.body);
+  if (!parsed.success) { res.status(400).json({ error: parsed.error.message }); return; }
+  const b = parsed.data;
+  const isDryRun = b.isDryRun ?? true;
+  const assetName = (b.asset || "").toUpperCase() as ObAsset;
+  const mmPair = `${assetName}/USD`;
+  if (!(assetName in OB_USD_PAIRS) || !(PAIRS as readonly string[]).includes(mmPair) || !getStreamBook(OB_USD_PAIRS[assetName]) || !getCoinbaseStreamBook(`${assetName}-USD`)) {
+    res.json({ success: false, isDryRun, executed: false, outcome: "gate_blocked", asset: assetName, projection: null, realizedProfitUsd: null, error: `No live depth books on both venues for ${assetName} — pick an asset streaming on Kraken AND Coinbase.` });
+    return;
+  }
+  // VALIDATION-PHASE EXPOSURE CAP: hard $10 until realized P&L proves out.
+  const tradeSizeUsd = Math.min(10, Math.max(1, b.tradeSizeUsd ?? 10));
+  const minProfitUsd = isDryRun ? (b.minProfitUsd ?? 0.01) : Math.max(0, b.minProfitUsd ?? 0.01);
+  const maxQuoteAgeMs = Math.min(5_000, Math.max(50, Math.round(b.maxQuoteAgeMs ?? 200)));
+  const restWindowMs = Math.min(120_000, Math.max(3_000, Math.round(b.restWindowMs ?? 30_000)));
+  const coinbaseFeesPct = Math.max(0, b.coinbaseFeesPct ?? 0.4);
+  const kCreds = { krakenKey: b.krakenKey, krakenSecret: b.krakenSecret };
+  const cbCreds = { coinbaseKey: b.coinbaseKey, coinbaseSecret: b.coinbaseSecret };
+  const kPair = OB_USD_PAIRS[assetName];
+  const cbKey = coinbaseBookKey(`${assetName}-USD`);
+  const accountId = accountIdFromKey(b.krakenKey);
+  const routeTag = (d: MmDirection) => `MM:${assetName} K-${d}→CB-hedge`;
+
+  const projOut = (p: MmProjection | null) => p && ({
+    direction: p.direction, makerPrice: p.makerPrice, makerQty: p.makerQty,
+    projectedNetUsd: p.projectedNetUsd, makerFeeUsd: p.makerFeeUsd, hedgeFeeUsd: p.hedgeFeeUsd,
+    hedgeVwapPx: p.hedgeVwapPx, hedgeTopPx: p.hedgeTopPx, hedgeSlippageUsd: p.hedgeSlippageUsd,
+    quoteAgeMs: p.quoteAgeMs, legAges: formatLegAges(p.legAges),
+  });
+
+  // Same buffer scale as every other live executor — NOT loosened.
+  const bufferUsd = Math.min(tradeSizeUsd * 0.05, Math.max(0.02, tradeSizeUsd * 0.0005));
+
+  let lockGen: number | null = null;
+  if (!isDryRun) {
+    if (pendingIndeterminate) {
+      const out = await resolvePendingIndeterminate(kCreds, cbCreds, req.log);
+      if (!out.cleared || out.message) {
+        res.json({ success: false, isDryRun, executed: false, outcome: "gate_blocked", asset: assetName, projection: null, realizedProfitUsd: null, error: out.message ?? pendingIndeterminateMsg() });
+        return;
+      }
+    }
+    if (liveLockBusy()) {
+      res.json({ success: false, isDryRun, executed: false, outcome: "gate_blocked", asset: assetName, projection: null, realizedProfitUsd: null, error: "Another LIVE execution is already in progress — refused to run concurrently." });
+      return;
+    }
+    lockGen = acquireLiveLock();
+  }
+  try {
+    // 1. REAL Kraken maker fee tier for this pair (never assume).
+    const tiers = await krakenFeeTiers(kCreds, [kPair]);
+    const makerFeePct = tiers?.makerFeePct;
+    if (makerFeePct == null) {
+      res.json({ success: false, isDryRun, executed: false, outcome: "gate_blocked", asset: assetName, projection: null, realizedProfitUsd: null, error: "Could not fetch your real Kraken maker fee tier — refusing to project with a guess." });
+      return;
+    }
+
+    // 2. Fresh projection (wait-a-tick when stale — same rule as triangles).
+    const project = (): MmProjection | null => b.direction === "buy" || b.direction === "sell"
+      ? projectMakerHedge(assetName, b.direction, tradeSizeUsd, makerFeePct, coinbaseFeesPct)
+      : bestMakerHedgeProjection(assetName, tradeSizeUsd, makerFeePct, coinbaseFeesPct);
+    let proj = project();
+    if (!proj || proj.quoteAgeMs > maxQuoteAgeMs) {
+      const deadline = Date.now() + Math.min(2_000, 4 * maxQuoteAgeMs);
+      while (Date.now() < deadline) {
+        if (!(await waitForBookTouch([kPair, cbKey], deadline - Date.now()))) break;
+        proj = project();
+        if (proj && proj.quoteAgeMs <= maxQuoteAgeMs) break;
+      }
+    }
+    if (!proj || proj.quoteAgeMs > maxQuoteAgeMs) {
+      res.json({ success: false, isDryRun, executed: false, outcome: "gate_blocked", asset: assetName, projection: projOut(proj), realizedProfitUsd: null, error: proj ? `Books still ${proj.quoteAgeMs}ms old (max ${maxQuoteAgeMs}ms) after waiting for fresh updates.` : "Hedge depth insufficient or books unavailable." });
+      return;
+    }
+
+    // 3. Profit gate at placement: projected hedged net − buffer must clear the floor.
+    req.log.info({ asset: assetName }, `[MM·DECISION] ${formatLegAges(proj.legAges)} | dir=${proj.direction} maker@${proj.makerPrice} qty=${proj.makerQty.toFixed(8)} | projected_net=$${proj.projectedNetUsd.toFixed(4)} ${proj.projectedNetUsd - bufferUsd > minProfitUsd ? ">" : "≤"} floor=$${minProfitUsd.toFixed(4)}+buffer=$${bufferUsd.toFixed(4)} | ${proj.projectedNetUsd - bufferUsd > minProfitUsd ? (isDryRun ? "WOULD POST" : "POST") : "NO POST"}`);
+    if (proj.projectedNetUsd - bufferUsd <= minProfitUsd) {
+      await recordQuality({ route: routeTag(proj.direction), style: "cross-mm", isDryRun, filled: false, tradeSizeUsd, expectedProfitUsd: proj.projectedNetUsd, realizedProfitUsd: isDryRun ? null : 0, note: "gate_blocked: projected net below floor at placement", accountId }, req.log);
+      res.json({ success: false, isDryRun, executed: false, outcome: "gate_blocked", asset: assetName, projection: projOut(proj), realizedProfitUsd: null, error: `Projected hedged net $${proj.projectedNetUsd.toFixed(4)} − buffer $${bufferUsd.toFixed(4)} ≤ floor $${minProfitUsd.toFixed(4)} — not posting.` });
+      return;
+    }
+    if (isDryRun) {
+      res.json({ success: true, isDryRun, executed: false, outcome: "projection_only", asset: assetName, projection: projOut(proj), realizedProfitUsd: null, error: null });
+      return;
+    }
+
+    // 4. Inventory check on BOTH venues before posting (pre-positioned only —
+    //    a maker fill must never create an unhedgeable position).
+    const [kBals, cBals] = await Promise.all([getKrakenBalances(kCreds, true), getCoinbaseBalances(cbCreds)]);
+    const kVariants: Record<string, string[]> = { BTC: ["XXBT", "XBT", "BTC"], DOGE: ["XXDG", "XDG", "DOGE"], ETH: ["XETH", "ETH"], LTC: ["XLTC", "LTC"], XRP: ["XXRP", "XRP"] };
+    const kAmt = (names: string[]) => kBals.filter(x => names.includes(x.currency)).reduce((a, x) => a + x.amount, 0);
+    const cAmt = (name: string) => cBals.filter(x => x.currency === name).reduce((a, x) => a + x.amount, 0);
+    const needQty = proj.makerQty * 1.001;
+    const invErr = proj.direction === "buy"
+      ? (kAmt(["ZUSD", "USD"]) < tradeSizeUsd ? `need $${tradeSizeUsd.toFixed(2)} USD on Kraken (have $${kAmt(["ZUSD", "USD"]).toFixed(2)})` : cAmt(assetName) < needQty ? `need ${needQty.toFixed(6)} ${assetName} on Coinbase to hedge (have ${cAmt(assetName).toFixed(6)})` : null)
+      : (kAmt(kVariants[assetName] ?? [assetName]) < needQty ? `need ${needQty.toFixed(6)} ${assetName} on Kraken (have ${kAmt(kVariants[assetName] ?? [assetName]).toFixed(6)})` : cAmt("USD") < tradeSizeUsd * 1.02 ? `need $${(tradeSizeUsd * 1.02).toFixed(2)} USD on Coinbase to hedge incl. price-collar + fees (have $${cAmt("USD").toFixed(2)})` : null);
+    if (invErr) {
+      await recordQuality({ route: routeTag(proj.direction), style: "cross-mm", isDryRun: false, filled: false, tradeSizeUsd, expectedProfitUsd: proj.projectedNetUsd, realizedProfitUsd: 0, note: `inventory_blocked: ${invErr}`, accountId }, req.log);
+      res.json({ success: false, isDryRun, executed: false, outcome: "inventory_blocked", asset: assetName, projection: projOut(proj), realizedProfitUsd: null, error: `Inventory check failed — ${invErr}. Pre-position inventory first.` });
+      return;
+    }
+
+    // 5. Place the POST-ONLY maker order. Post-only means Kraken rejects it if
+    //    it would cross — we can never accidentally pay taker here.
+    const decideAtMs = Date.now();
+    const direction = proj.direction;
+    const placedPrice = proj.makerPrice;
+    const placedQty = proj.makerQty;
+    let txid: string;
+    try {
+      const r = await krakenRawLimitOrder(kCreds, direction, placedQty, placedPrice, kPair);
+      txid = r.txid?.[0] ?? "";
+      if (!txid) throw new Error("Kraken accepted the order but returned no txid");
+    } catch (e) {
+      const msg = (e as Error).message;
+      await recordQuality({ route: routeTag(direction), style: "cross-mm", isDryRun: false, filled: false, tradeSizeUsd, expectedProfitUsd: proj.projectedNetUsd, realizedProfitUsd: 0, note: `post_rejected: ${msg.slice(0, 140)}`, accountId }, req.log);
+      res.json({ success: false, isDryRun, executed: false, outcome: "post_rejected", asset: assetName, projection: projOut(proj), realizedProfitUsd: null, error: `Post-only order rejected: ${msg}` });
+      return;
+    }
+    const placedAtMs = Date.now();
+    req.log.info({ txid, asset: assetName, direction, price: placedPrice, qty: placedQty }, "[MM] post-only maker order resting on Kraken");
+
+    // 6. Watch loop: poll the order; on every book move re-project the hedge
+    //    AT OUR RESTING PRICE for the remaining qty. Projection below floor →
+    //    cancel-on-move. Terminal fill → hedge.
+    const safeInfo = async () => { try { return await krakenOrderInfo(kCreds, txid); } catch { return { status: "unknown", volExec: 0, price: 0, cost: 0, fee: 0 }; } };
+    const terminal = (st: string) => st === "closed" || st === "canceled" || st === "expired";
+    const restDeadline = Date.now() + restWindowMs;
+    let info = await safeInfo();
+    let cancelReason: "no_fill_cancel" | "gate_cancel" | null = null;
+    while (!terminal(info.status) && Date.now() < restDeadline) {
+      touchLiveLock();
+      await waitForBookTouch([kPair, cbKey], CROSS_MM_POLL_MS); // wake on move OR after poll interval
+      info = await safeInfo();
+      if (terminal(info.status)) break;
+      const remainingQty = Math.max(0, placedQty - (info.volExec || 0));
+      if (remainingQty > 1e-12) {
+        const live = projectMakerHedge(assetName, direction, tradeSizeUsd, makerFeePct, coinbaseFeesPct, placedPrice, remainingQty);
+        // Scale floor+buffer to the remaining notional so partials aren't over-gated.
+        const frac = remainingQty / placedQty;
+        if (!live || live.projectedNetUsd <= (minProfitUsd + bufferUsd) * frac * 0.999) {
+          cancelReason = "gate_cancel";
+          req.log.info({ txid, projectedNetUsd: live?.projectedNetUsd ?? null }, "[MM] market moved — projected hedged net below floor, cancelling resting maker order");
+          break;
+        }
+      }
+    }
+    if (!terminal(info.status)) {
+      if (!cancelReason) cancelReason = "no_fill_cancel";
+      try { await krakenCancelOrder(kCreds, txid); }
+      catch (e) { req.log.error({ txid, err: e }, "[MM] cancel request failed — order may still be live"); }
+      const confirmDeadline = Date.now() + CROSS_MM_CANCEL_CONFIRM_MS;
+      info = await safeInfo();
+      while (!terminal(info.status) && Date.now() < confirmDeadline) {
+        touchLiveLock();
+        await new Promise(r => setTimeout(r, CROSS_MM_POLL_MS));
+        info = await safeInfo();
+      }
+      if (!terminal(info.status)) {
+        // Cancel ACK is NOT terminal — fail CLOSED and block all live execution
+        // until this order is verified terminal (same rule as maker triangles).
+        setPendingIndeterminate({ exchange: "kraken", orderId: txid, route: routeTag(direction), sinceMs: Date.now() });
+        await recordQuality({ route: routeTag(direction), style: "cross-mm", isDryRun: false, filled: (info.volExec || 0) > 0, tradeSizeUsd, expectedProfitUsd: proj.projectedNetUsd, realizedProfitUsd: null, note: "indeterminate: cancel unconfirmed, live execution blocked", accountId }, req.log);
+        res.json({ success: false, isDryRun, executed: (info.volExec || 0) > 0, outcome: "indeterminate", asset: assetName, projection: projOut(proj), makerOrderId: txid, realizedProfitUsd: null, error: `Could not confirm a terminal state for maker order ${txid} — live execution is blocked until it is verified. Check Kraken open orders.` });
+        return;
+      }
+    }
+
+    // 7. Terminal maker state — volExec is the truth (late fills in the cancel
+    //    race included). Nothing filled → clean exit, $0 moved.
+    const filledQty = info.volExec || 0;
+    const filledAtMs = Date.now();
+    if (filledQty <= 1e-12) {
+      const reason = cancelReason ?? "no_fill_cancel";
+      await recordQuality({ route: routeTag(direction), style: "cross-mm", isDryRun: false, filled: false, tradeSizeUsd, expectedProfitUsd: proj.projectedNetUsd, realizedProfitUsd: 0, note: reason, accountId }, req.log);
+      res.json({ success: true, isDryRun, executed: false, outcome: reason, asset: assetName, projection: projOut(proj), makerOrderId: txid, makerFilledQty: 0, realizedProfitUsd: 0, latency: { decideToPlaceMs: placedAtMs - decideAtMs, restedMs: filledAtMs - placedAtMs }, error: null });
+      return;
+    }
+
+    // 8. CONFIRMED FILL → hedge the ACTUAL filled qty at market on Coinbase,
+    //    but only on a fresh book (wait-a-tick up to 2s). If freshness cannot
+    //    be established, do NOT fire blind — record the unhedged position
+    //    honestly so the trader can act.
+    req.log.info({ txid, filledQty, avgPrice: info.price, cost: info.cost, fee: info.fee }, "[MM] maker fill CONFIRMED — hedging on Coinbase");
+    let cbBookFresh = (getCoinbaseStreamBook(`${assetName}-USD`)?.ageMs ?? Infinity) <= maxQuoteAgeMs;
+    if (!cbBookFresh) {
+      const hd = Date.now() + 2_000;
+      while (Date.now() < hd) {
+        if (!(await waitForBookTouch([cbKey], hd - Date.now()))) break;
+        if ((getCoinbaseStreamBook(`${assetName}-USD`)?.ageMs ?? Infinity) <= maxQuoteAgeMs) { cbBookFresh = true; break; }
+      }
+    }
+    const makerNotional = info.cost || filledQty * (info.price || placedPrice);
+    const makerFeeUsd = info.fee || 0;
+    const ledgerRow = async (status: string, realized: number | null, hedgeOrderId: string | null, note: string) => {
+      try {
+        await db.insert(tradesTable).values({
+          pair: `${routeTag(direction)}${note ? ` [${note.slice(0, 100)}]` : ""}`,
+          buyExchange: direction === "buy" ? "kraken" : "coinbase",
+          sellExchange: direction === "buy" ? "coinbase" : "kraken",
+          volume: filledQty.toFixed(8), estimatedProfitUsd: proj.projectedNetUsd.toFixed(6), netEdgePct: "0",
+          isDryRun: false, krakenPrice: (info.price || placedPrice).toFixed(8), coinbasePrice: "0",
+          buyOrderId: direction === "buy" ? txid : hedgeOrderId, sellOrderId: direction === "buy" ? hedgeOrderId : txid,
+          status, realizedProfitUsd: realized != null ? realized.toFixed(6) : null,
+        });
+      } catch (e) { req.log.error({ err: e }, "[MM] failed to write trades ledger row"); }
+    };
+    if (!cbBookFresh) {
+      await ledgerRow("unhedged", null, null, "UNHEDGED: Coinbase book stale at hedge time");
+      await recordQuality({ route: routeTag(direction), style: "cross-mm", isDryRun: false, filled: true, tradeSizeUsd, expectedProfitUsd: proj.projectedNetUsd, realizedProfitUsd: null, note: "unhedged: coinbase book stale — position open", accountId }, req.log);
+      res.json({ success: false, isDryRun, executed: true, outcome: "unhedged", asset: assetName, projection: projOut(proj), makerOrderId: txid, makerFilledQty: filledQty, makerAvgPrice: info.price || placedPrice, realizedProfitUsd: null, error: `MAKER FILLED ${filledQty.toFixed(8)} ${assetName} but the Coinbase book went stale — hedge NOT fired. You hold an open ${direction === "buy" ? "long" : "short"} position; hedge manually or re-run when the stream recovers.` });
+      return;
+    }
+    let hedgeOrderId: string | null = null;
+    let hedge: { status: string; filledSize: number; filledValue: number; avgPrice: number; totalFees: number } | null = null;
+    try {
+      const hedgeSide = direction === "buy" ? "SELL" as const : "BUY" as const;
+      // Bounded IOC hedge: EXACT base size, worst-case price from a FRESH
+      // depth-walked projection of the actual filled qty — never Kraken's
+      // price, never unbounded quote spend. 0.5% price collar caps slippage.
+      const hedgeProj = projectMakerHedge(assetName, direction, tradeSizeUsd, makerFeePct, coinbaseFeesPct, placedPrice, filledQty);
+      if (!hedgeProj) throw new Error("Coinbase depth insufficient for the hedge quantity on a fresh book");
+      const hedgeLimitPx = direction === "buy" ? hedgeProj.hedgeVwapPx * 0.995 : hedgeProj.hedgeVwapPx * 1.005;
+      const incs = await getCoinbaseProductIncrements(mmPair as Pair).catch(() => undefined);
+      const r = await coinbaseIocLimitOrder(cbCreds, hedgeSide, filledQty, hedgeLimitPx, mmPair as Pair, incs);
+      hedgeOrderId = r.orderId ?? null;
+      if (!hedgeOrderId) throw new Error("Coinbase accepted the hedge but returned no order id");
+      for (let i = 0; i < 30; i++) {
+        touchLiveLock();
+        await new Promise(rr => setTimeout(rr, 500));
+        try { const d = await coinbaseOrderDetails(cbCreds, hedgeOrderId); if (["FILLED", "CANCELLED", "EXPIRED", "FAILED"].includes(d.status)) { hedge = d; break; } } catch { /* keep polling */ }
+      }
+      if (!hedge) { try { hedge = await coinbaseOrderDetails(cbCreds, hedgeOrderId); } catch { /* fall through */ } }
+    } catch (e) {
+      req.log.error({ err: e }, "[MM] hedge order failed");
+    }
+    const hedgedAtMs = Date.now();
+    if (!hedge || hedge.filledSize <= 1e-12) {
+      await ledgerRow("unhedged", null, hedgeOrderId, "UNHEDGED: Coinbase hedge did not fill");
+      await recordQuality({ route: routeTag(direction), style: "cross-mm", isDryRun: false, filled: true, tradeSizeUsd, expectedProfitUsd: proj.projectedNetUsd, realizedProfitUsd: null, note: "unhedged: hedge order failed or zero fill — position open", accountId }, req.log);
+      res.json({ success: false, isDryRun, executed: true, outcome: "unhedged", asset: assetName, projection: projOut(proj), makerOrderId: txid, makerFilledQty: filledQty, makerAvgPrice: info.price || placedPrice, hedgeOrderId, realizedProfitUsd: null, error: `MAKER FILLED ${filledQty.toFixed(8)} ${assetName} but the Coinbase hedge did not fill — you hold an open position. Hedge manually.` });
+      return;
+    }
+    // 9. PARTIAL HEDGE = NOT closed. A residual position is open, so the
+    //    cycle's P&L is NOT realized — record it as unhedged with the exact
+    //    residual, never as a verified win. (Scoreboard integrity > optics.)
+    if (hedge.filledSize < filledQty * 0.999) {
+      const residual = filledQty - hedge.filledSize;
+      const partialTag = `partial hedge ${hedge.filledSize.toFixed(8)}/${filledQty.toFixed(8)} — residual ${residual.toFixed(8)} ${assetName} open`;
+      await ledgerRow("unhedged", null, hedgeOrderId, `UNHEDGED: ${partialTag}`);
+      await recordQuality({ route: routeTag(direction), style: "cross-mm", isDryRun: false, filled: true, tradeSizeUsd, expectedProfitUsd: proj.projectedNetUsd, realizedProfitUsd: null, note: `unhedged: ${partialTag}`, accountId }, req.log);
+      res.json({ success: false, isDryRun, executed: true, outcome: "unhedged", asset: assetName, projection: projOut(proj), makerOrderId: txid, makerFilledQty: filledQty, makerAvgPrice: info.price || placedPrice, hedgeOrderId, hedgeFilledUsd: hedge.filledValue, realizedProfitUsd: null, error: `Hedge filled PARTIALLY (${partialTag}) — you hold an open ${direction === "buy" ? "long" : "short"} residual. Close it manually; P&L is not realized until then.` });
+      return;
+    }
+    // 10. FULLY hedged — fee-inclusive realized P&L from ACTUAL fills on both legs.
+    //     buy-maker: bought base on Kraken (cost+fee out), sold on CB (value−fee in)
+    //     sell-maker: sold base on Kraken (cost−fee in), bought back on CB (value+fee out)
+    const realized = direction === "buy"
+      ? (hedge.filledValue - hedge.totalFees) - (makerNotional + makerFeeUsd)
+      : (makerNotional - makerFeeUsd) - (hedge.filledValue + hedge.totalFees);
+    await ledgerRow("verified", realized, hedgeOrderId, "");
+    await recordQuality({ route: routeTag(direction), style: "cross-mm", isDryRun: false, filled: true, tradeSizeUsd, expectedProfitUsd: proj.projectedNetUsd, realizedProfitUsd: realized, note: "hedged", accountId }, req.log);
+    req.log.info({ txid, hedgeOrderId, realized: realized.toFixed(6), expected: proj.projectedNetUsd.toFixed(6) }, "[MM] cycle complete — hedged");
+    res.json({ success: true, isDryRun, executed: true, outcome: "hedged", asset: assetName, projection: projOut(proj), makerOrderId: txid, makerFilledQty: filledQty, makerAvgPrice: info.price || placedPrice, hedgeOrderId, hedgeFilledUsd: hedge.filledValue, realizedProfitUsd: realized, latency: { decideToPlaceMs: placedAtMs - decideAtMs, restedMs: filledAtMs - placedAtMs, fillToHedgeMs: hedgedAtMs - filledAtMs }, error: null });
+  } catch (err) {
+    res.json({ success: false, isDryRun, executed: false, outcome: "gate_blocked", asset: assetName, projection: null, realizedProfitUsd: null, error: (err as Error).message });
+  } finally {
+    if (lockGen != null) releaseLiveLock(lockGen);
+  }
+});
+
+// ── GET /arb/cross-mm-stats ──────────────────────────────────────────────────
+// Scoreboard for the maker-post/taker-hedge strategy ONLY (style "cross-mm"),
+// so its realized P&L is judged separately from the triangle strategy.
+router.get("/arb/cross-mm-stats", async (_req, res): Promise<void> => {
+  try {
+    const rows = await db.select({
+      route: executionQualityTable.route, filled: executionQualityTable.filled,
+      expected: executionQualityTable.expectedProfitUsd, realized: executionQualityTable.realizedProfitUsd,
+      note: executionQualityTable.note, createdAt: executionQualityTable.createdAt, isDryRun: executionQualityTable.isDryRun,
+    }).from(executionQualityTable)
+      .where(dbAnd(dbEq(executionQualityTable.style, "cross-mm"), dbEq(executionQualityTable.isDryRun, false)))
+      .orderBy(dbDesc(executionQualityTable.createdAt)).limit(500);
+    const n = (v: string | null) => { const x = parseFloat(v ?? ""); return isFinite(x) ? x : null; };
+    const noteHas = (r: { note: string | null }, tag: string) => (r.note ?? "").startsWith(tag);
+    const attempts = rows.length;
+    const makerFills = rows.filter(r => r.filled).length;
+    const hedgedRows = rows.filter(r => noteHas(r, "hedged"));
+    const realizedVals = hedgedRows.map(r => n(r.realized)).filter((x): x is number => x != null);
+    const realizedTotalUsd = realizedVals.reduce((a, x) => a + x, 0);
+    res.json({
+      attempts,
+      postRejected: rows.filter(r => noteHas(r, "post_rejected")).length,
+      gateCancels: rows.filter(r => noteHas(r, "gate_cancel")).length,
+      noFillCancels: rows.filter(r => noteHas(r, "no_fill_cancel")).length,
+      makerFills,
+      hedged: hedgedRows.length,
+      unhedged: rows.filter(r => noteHas(r, "unhedged")).length,
+      realizedTotalUsd,
+      avgRealizedUsd: realizedVals.length > 0 ? realizedTotalUsd / realizedVals.length : null,
+      fillRatePct: attempts > 0 ? (makerFills / attempts) * 100 : null,
+      recent: rows.slice(0, 25).map(r => ({ route: r.route, filled: r.filled, expectedProfitUsd: n(r.expected), realizedProfitUsd: n(r.realized), note: r.note, createdAt: r.createdAt ? new Date(r.createdAt as unknown as string | number | Date).toISOString() : null })),
     });
   } catch (err) {
     res.status(500).json({ error: (err as Error).message });

@@ -9,6 +9,8 @@ import {
   Repeat2, AlertTriangle, CheckCircle2,
 } from "lucide-react";
 import { format } from "date-fns";
+import { CrossMmCard } from "@/components/cross-mm-card";
+import { TwoExchangeTestCard } from "@/components/two-exchange-test-card";
 import { cn } from "@/lib/utils";
 import { useToast } from "@/hooks/use-toast";
 import { useLocalStorage } from "@/hooks/use-local-storage";
@@ -673,6 +675,12 @@ export default function Dashboard() {
       {/* Triangular Arb Opportunities */}
       {/* Inventory Mode Opportunities — shown only when the feature is toggled on in Config */}
       {settings.inventoryModeEnabled && <InventoryCard />}
+
+      {/* Maker-post + taker-hedge cross-exchange strategy (separate scoreboard) */}
+      <CrossMmCard />
+
+      {/* One-shot two-exchange diagnostic (fully separate from all strategies) */}
+      <TwoExchangeTestCard />
 
       <TriangularCard
         opportunities={triOpportunities}

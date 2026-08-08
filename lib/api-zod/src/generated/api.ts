@@ -515,6 +515,149 @@ export const GetInventoryImbalanceResponse = zod.object({
 
 
 /**
+ * Rests a POST-ONLY limit order on Kraken sized for the given USD exposure, only when a confirmed fill could be hedged profitably at market on Coinbase against pre-positioned inventory. The hedge is never placed before the maker fill is confirmed; the resting order is cancelled if it does not fill inside the window or if the projected hedged net drops below the profit floor. Dry run returns the full projection without placing anything.
+ * @summary Run one maker-post + taker-hedge cross-exchange cycle
+ */
+export const executeCrossMmBodyTradeSizeUsdDefault = 10;
+export const executeCrossMmBodyTradeSizeUsdMax = 10;
+
+export const executeCrossMmBodyMinProfitUsdDefault = 0.01;
+export const executeCrossMmBodyMaxQuoteAgeMsDefault = 200;
+export const executeCrossMmBodyRestWindowMsDefault = 30000;
+export const executeCrossMmBodyRestWindowMsMax = 120000;
+
+export const executeCrossMmBodyDirectionDefault = `auto`;
+export const executeCrossMmBodyCoinbaseFeesPctDefault = 0.4;
+export const executeCrossMmBodyIsDryRunDefault = true;
+
+export const ExecuteCrossMmBody = zod.object({
+  "krakenKey": zod.string(),
+  "krakenSecret": zod.string(),
+  "coinbaseKey": zod.string(),
+  "coinbaseSecret": zod.string(),
+  "asset": zod.string().describe('Base asset traded on both venues (e.g. ETH, BTC, SOL)'),
+  "tradeSizeUsd": zod.number().max(executeCrossMmBodyTradeSizeUsdMax).default(executeCrossMmBodyTradeSizeUsdDefault).describe('USD exposure of the maker order. Hard-capped at $10 until the strategy proves positive realized P&L.'),
+  "minProfitUsd": zod.number().default(executeCrossMmBodyMinProfitUsdDefault).describe('Profit floor the projected hedged net must clear (clamped >= 0 for live runs)'),
+  "maxQuoteAgeMs": zod.number().default(executeCrossMmBodyMaxQuoteAgeMsDefault).describe('Freshness window for both venues\' books at placement and hedge time'),
+  "restWindowMs": zod.number().max(executeCrossMmBodyRestWindowMsMax).default(executeCrossMmBodyRestWindowMsDefault).describe('How long the post-only order may rest before cancel'),
+  "direction": zod.enum(['auto', 'buy', 'sell']).default(executeCrossMmBodyDirectionDefault).describe('Side of the Kraken maker order; auto picks the better projected direction'),
+  "coinbaseFeesPct": zod.number().default(executeCrossMmBodyCoinbaseFeesPctDefault).describe('Coinbase taker fee assumption (percent) for the hedge leg'),
+  "isDryRun": zod.boolean().default(executeCrossMmBodyIsDryRunDefault)
+})
+
+export const ExecuteCrossMmResponse = zod.object({
+  "success": zod.boolean(),
+  "isDryRun": zod.boolean(),
+  "executed": zod.boolean().describe('True when a maker fill occurred (money moved)'),
+  "outcome": zod.string().describe('projection_only | gate_blocked | inventory_blocked | post_rejected | no_fill_cancel | gate_cancel | hedged | unhedged | indeterminate\n'),
+  "asset": zod.string().optional(),
+  "projection": zod.object({
+  "direction": zod.enum(['buy', 'sell']),
+  "makerPrice": zod.number(),
+  "makerQty": zod.number(),
+  "projectedNetUsd": zod.number(),
+  "makerFeeUsd": zod.number(),
+  "hedgeFeeUsd": zod.number(),
+  "hedgeVwapPx": zod.number(),
+  "hedgeTopPx": zod.number().optional(),
+  "hedgeSlippageUsd": zod.number().optional(),
+  "quoteAgeMs": zod.number(),
+  "legAges": zod.string().optional().describe('Human-readable per-leg book ages')
+}).nullish(),
+  "makerOrderId": zod.string().nullish(),
+  "makerFilledQty": zod.number().nullish(),
+  "makerAvgPrice": zod.number().nullish(),
+  "hedgeOrderId": zod.string().nullish(),
+  "hedgeFilledUsd": zod.number().nullish(),
+  "realizedProfitUsd": zod.number().nullish().describe('Fee-inclusive realized P&L from ACTUAL fills on both legs; null when nothing filled'),
+  "latency": zod.record(zod.string(), zod.number()).nullish().describe('Millisecond marks (decide→place→fill→hedge)'),
+  "error": zod.string().nullish()
+})
+
+
+/**
+ * @summary Maker-post/taker-hedge strategy scoreboard (separate from triangles)
+ */
+export const GetCrossMmStatsResponse = zod.object({
+  "attempts": zod.number(),
+  "postRejected": zod.number().optional(),
+  "gateCancels": zod.number().optional(),
+  "noFillCancels": zod.number().optional(),
+  "makerFills": zod.number(),
+  "hedged": zod.number(),
+  "unhedged": zod.number(),
+  "realizedTotalUsd": zod.number(),
+  "avgRealizedUsd": zod.number().nullish(),
+  "fillRatePct": zod.number().nullish(),
+  "recent": zod.array(zod.object({
+  "route": zod.string().optional(),
+  "filled": zod.boolean().optional(),
+  "expectedProfitUsd": zod.number().nullish(),
+  "realizedProfitUsd": zod.number().nullish(),
+  "note": zod.string().nullish(),
+  "createdAt": zod.string().nullish()
+})).optional()
+})
+
+
+/**
+ * Standalone diagnostic, fully separate from the arbitrage strategies. Buys ~$10 of ETH at market on Kraken, then sells the CONFIRMED filled quantity on Coinbase from pre-positioned ETH. Refuses to place any order when balances or credentials are insufficient. Records exact fills, fees, timestamps, order ids, and realized P&L. Never loops, never scales size.
+ * @summary One-shot two-exchange live test (Kraken market buy → Coinbase sell)
+ */
+export const runTwoExchangeTestBodySizeUsdDefault = 10;
+export const runTwoExchangeTestBodySizeUsdMax = 10;
+
+export const runTwoExchangeTestBodyIsDryRunDefault = true;
+
+export const RunTwoExchangeTestBody = zod.object({
+  "krakenKey": zod.string(),
+  "krakenSecret": zod.string(),
+  "coinbaseKey": zod.string(),
+  "coinbaseSecret": zod.string(),
+  "sizeUsd": zod.number().max(runTwoExchangeTestBodySizeUsdMax).default(runTwoExchangeTestBodySizeUsdDefault).describe('USD size of the Kraken buy. Hard-capped at $10 — this is a diagnostic, not a strategy.'),
+  "isDryRun": zod.boolean().default(runTwoExchangeTestBodyIsDryRunDefault).describe('When true, verifies balances and prices but places no orders.')
+})
+
+export const RunTwoExchangeTestResponse = zod.object({
+  "success": zod.boolean(),
+  "isDryRun": zod.boolean(),
+  "outcome": zod.string().describe('dry_run_ok | blocked | buy_failed | sell_failed | partial_sell | completed | indeterminate'),
+  "blockReason": zod.string().nullish(),
+  "buyLeg": zod.object({
+  "exchange": zod.string().optional(),
+  "side": zod.string().optional(),
+  "orderId": zod.string().nullish(),
+  "status": zod.string().nullish(),
+  "filledQty": zod.number().nullish(),
+  "avgPrice": zod.number().nullish(),
+  "notionalUsd": zod.number().nullish(),
+  "feeUsd": zod.number().nullish(),
+  "placedAt": zod.string().nullish(),
+  "terminalAt": zod.string().nullish(),
+  "error": zod.string().nullish()
+}).nullish(),
+  "sellLeg": zod.object({
+  "exchange": zod.string().optional(),
+  "side": zod.string().optional(),
+  "orderId": zod.string().nullish(),
+  "status": zod.string().nullish(),
+  "filledQty": zod.number().nullish(),
+  "avgPrice": zod.number().nullish(),
+  "notionalUsd": zod.number().nullish(),
+  "feeUsd": zod.number().nullish(),
+  "placedAt": zod.string().nullish(),
+  "terminalAt": zod.string().nullish(),
+  "error": zod.string().nullish()
+}).nullish(),
+  "realizedProfitUsd": zod.number().nullish().describe('(Coinbase proceeds − Coinbase fees) − (Kraken cost + Kraken fees); null unless BOTH legs fully filled'),
+  "residualEthOpen": zod.number().nullish(),
+  "startedAt": zod.string().nullish(),
+  "finishedAt": zod.string().nullish(),
+  "error": zod.string().nullish()
+})
+
+
+/**
  * Queries Kraken /0/private/TradeVolume for the caller's real taker fee on major pairs (max across pairs). Returns null when the query fails (bad keys, network) so callers can fall back to their configured assumption.
  * @summary Look up the account's actual Kraken taker fee tier
  */

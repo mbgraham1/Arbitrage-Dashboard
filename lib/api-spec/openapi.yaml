@@ -541,6 +541,90 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
 
+  /arb/cross-mm-execute:
+    post:
+      operationId: executeCrossMm
+      tags: [trades]
+      summary: Run one maker-post + taker-hedge cross-exchange cycle
+      description: >
+        Rests a POST-ONLY limit order on Kraken sized for the given USD
+        exposure, only when a confirmed fill could be hedged profitably at
+        market on Coinbase against pre-positioned inventory. The hedge is
+        never placed before the maker fill is confirmed; the resting order is
+        cancelled if it does not fill inside the window or if the projected
+        hedged net drops below the profit floor. Dry run returns the full
+        projection without placing anything.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CrossMmExecuteRequest"
+      responses:
+        "200":
+          description: Cycle outcome (projection, fills, hedge, realized P&L)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CrossMmExecuteResult"
+        "400":
+          description: Bad request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /arb/cross-mm-stats:
+    get:
+      operationId: getCrossMmStats
+      tags: [trades]
+      summary: Maker-post/taker-hedge strategy scoreboard (separate from triangles)
+      responses:
+        "200":
+          description: Attempts, fills, hedge outcomes, and realized P&L for the cross-mm strategy only
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CrossMmStats"
+        "500":
+          description: Server error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /arb/two-exchange-test:
+    post:
+      operationId: runTwoExchangeTest
+      tags: [trades]
+      summary: One-shot two-exchange live test (Kraken market buy → Coinbase sell)
+      description: >
+        Standalone diagnostic, fully separate from the arbitrage strategies.
+        Buys ~$10 of ETH at market on Kraken, then sells the CONFIRMED filled
+        quantity on Coinbase from pre-positioned ETH. Refuses to place any
+        order when balances or credentials are insufficient. Records exact
+        fills, fees, timestamps, order ids, and realized P&L. Never loops,
+        never scales size.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TwoExchangeTestRequest"
+      responses:
+        "200":
+          description: Test outcome with per-leg fills, fees, timestamps, and realized P&L
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TwoExchangeTestResult"
+        "400":
+          description: Bad request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
   /arb/fee-tier:
     post:
       operationId: getFeeTier
@@ -1318,6 +1402,173 @@ components:
           type: boolean
           default: true
 
+    CrossMmExecuteRequest:
+      type: object
+      required: [krakenKey, krakenSecret, coinbaseKey, coinbaseSecret, asset]
+      properties:
+        krakenKey: { type: string }
+        krakenSecret: { type: string }
+        coinbaseKey: { type: string }
+        coinbaseSecret: { type: string }
+        asset:
+          type: string
+          description: Base asset traded on both venues (e.g. ETH, BTC, SOL)
+        tradeSizeUsd:
+          type: number
+          default: 10
+          maximum: 10
+          description: USD exposure of the maker order. Hard-capped at $10 until the strategy proves positive realized P&L.
+        minProfitUsd:
+          type: number
+          default: 0.01
+          description: Profit floor the projected hedged net must clear (clamped >= 0 for live runs)
+        maxQuoteAgeMs:
+          type: number
+          default: 200
+          description: Freshness window for both venues' books at placement and hedge time
+        restWindowMs:
+          type: number
+          default: 30000
+          maximum: 120000
+          description: How long the post-only order may rest before cancel
+        direction:
+          type: string
+          enum: [auto, buy, sell]
+          default: auto
+          description: Side of the Kraken maker order; auto picks the better projected direction
+        coinbaseFeesPct:
+          type: number
+          default: 0.4
+          description: Coinbase taker fee assumption (percent) for the hedge leg
+        isDryRun:
+          type: boolean
+          default: true
+    CrossMmProjection:
+      type: object
+      required: [direction, makerPrice, makerQty, projectedNetUsd, makerFeeUsd, hedgeFeeUsd, hedgeVwapPx, quoteAgeMs]
+      properties:
+        direction: { type: string, enum: [buy, sell] }
+        makerPrice: { type: number }
+        makerQty: { type: number }
+        projectedNetUsd: { type: number }
+        makerFeeUsd: { type: number }
+        hedgeFeeUsd: { type: number }
+        hedgeVwapPx: { type: number }
+        hedgeTopPx: { type: number }
+        hedgeSlippageUsd: { type: number }
+        quoteAgeMs: { type: number }
+        legAges: { type: string, description: "Human-readable per-leg book ages" }
+    CrossMmExecuteResult:
+      type: object
+      required: [success, isDryRun, executed, outcome]
+      properties:
+        success: { type: boolean }
+        isDryRun: { type: boolean }
+        executed: { type: boolean, description: "True when a maker fill occurred (money moved)" }
+        outcome:
+          type: string
+          description: >
+            projection_only | gate_blocked | inventory_blocked | post_rejected |
+            no_fill_cancel | gate_cancel | hedged | unhedged | indeterminate
+        asset: { type: string }
+        projection:
+          allOf: [{ $ref: "#/components/schemas/CrossMmProjection" }]
+          nullable: true
+        makerOrderId: { type: string, nullable: true }
+        makerFilledQty: { type: number, nullable: true }
+        makerAvgPrice: { type: number, nullable: true }
+        hedgeOrderId: { type: string, nullable: true }
+        hedgeFilledUsd: { type: number, nullable: true }
+        realizedProfitUsd:
+          type: number
+          nullable: true
+          description: Fee-inclusive realized P&L from ACTUAL fills on both legs; null when nothing filled
+        latency:
+          type: object
+          nullable: true
+          additionalProperties: { type: number }
+          description: Millisecond marks (decide→place→fill→hedge)
+        error: { type: string, nullable: true }
+    CrossMmStats:
+      type: object
+      required: [attempts, makerFills, hedged, unhedged, realizedTotalUsd]
+      properties:
+        attempts: { type: integer }
+        postRejected: { type: integer }
+        gateCancels: { type: integer }
+        noFillCancels: { type: integer }
+        makerFills: { type: integer }
+        hedged: { type: integer }
+        unhedged: { type: integer }
+        realizedTotalUsd: { type: number }
+        avgRealizedUsd: { type: number, nullable: true }
+        fillRatePct: { type: number, nullable: true }
+        recent:
+          type: array
+          items:
+            type: object
+            properties:
+              route: { type: string }
+              filled: { type: boolean }
+              expectedProfitUsd: { type: number, nullable: true }
+              realizedProfitUsd: { type: number, nullable: true }
+              note: { type: string, nullable: true }
+              createdAt: { type: string, nullable: true }
+    TwoExchangeTestRequest:
+      type: object
+      required: [krakenKey, krakenSecret, coinbaseKey, coinbaseSecret]
+      properties:
+        krakenKey: { type: string }
+        krakenSecret: { type: string }
+        coinbaseKey: { type: string }
+        coinbaseSecret: { type: string }
+        sizeUsd:
+          type: number
+          default: 10
+          maximum: 10
+          description: USD size of the Kraken buy. Hard-capped at $10 — this is a diagnostic, not a strategy.
+        isDryRun:
+          type: boolean
+          default: true
+          description: When true, verifies balances and prices but places no orders.
+    TwoExchangeTestLeg:
+      type: object
+      properties:
+        exchange: { type: string }
+        side: { type: string }
+        orderId: { type: string, nullable: true }
+        status: { type: string, nullable: true }
+        filledQty: { type: number, nullable: true }
+        avgPrice: { type: number, nullable: true }
+        notionalUsd: { type: number, nullable: true }
+        feeUsd: { type: number, nullable: true }
+        placedAt: { type: string, nullable: true }
+        terminalAt: { type: string, nullable: true }
+        error: { type: string, nullable: true }
+    TwoExchangeTestResult:
+      type: object
+      required: [success, isDryRun, outcome]
+      properties:
+        success: { type: boolean }
+        isDryRun: { type: boolean }
+        outcome:
+          type: string
+          description: dry_run_ok | blocked | buy_failed | sell_failed | partial_sell | completed | indeterminate
+        blockReason: { type: string, nullable: true }
+        buyLeg:
+          allOf: [{ $ref: "#/components/schemas/TwoExchangeTestLeg" }]
+          nullable: true
+        sellLeg:
+          allOf: [{ $ref: "#/components/schemas/TwoExchangeTestLeg" }]
+          nullable: true
+        realizedProfitUsd:
+          type: number
+          nullable: true
+          description: (Coinbase proceeds − Coinbase fees) − (Kraken cost + Kraken fees); null unless BOTH legs fully filled
+        residualEthOpen: { type: number, nullable: true }
+        startedAt: { type: string, nullable: true }
+        finishedAt: { type: string, nullable: true }
+        error: { type: string, nullable: true }
     FeeTierRequest:
       type: object
       required: [krakenKey, krakenSecret]
