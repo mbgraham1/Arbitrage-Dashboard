@@ -53,6 +53,7 @@ import type {
   PairScanEntry,
   PreloadedCredentials,
   PriceData,
+  RouteHistoryClearResult,
   ScanAllPairsParams,
   TradeRecord,
   TradeRequest,
@@ -1626,6 +1627,78 @@ export const useGraphExecute = <TError = ErrorType<ErrorResponse>,
         TContext
       > => {
       return useMutation(getGraphExecuteMutationOptions(options));
+    }
+
+export const getClearRouteHistoryUrl = () => {
+
+
+
+
+  return `/api/arb/route-history/clear`
+}
+
+/**
+ * Instantly resets all in-memory route failure streaks, removes every route from the blacklist, and clears probe cool-downs.
+ * @summary Clear the route blacklist and consecutive-failure streaks
+ */
+export const clearRouteHistory = async ( options?: RequestInit): Promise<RouteHistoryClearResult> => {
+
+  return customFetch<RouteHistoryClearResult>(getClearRouteHistoryUrl(),
+  {
+    ...options,
+    method: 'POST'
+
+
+  }
+);}
+
+
+
+
+
+export const getClearRouteHistoryMutationOptions = <TError = ErrorType<unknown>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof clearRouteHistory>>, TError,void, TContext>, request?: SecondParameter<typeof customFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof clearRouteHistory>>, TError,void, TContext> => {
+
+const mutationKey = ['clearRouteHistory'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof clearRouteHistory>>, void> = () => {
+
+
+          return  clearRouteHistory(requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type ClearRouteHistoryMutationResult = NonNullable<Awaited<ReturnType<typeof clearRouteHistory>>>
+
+    export type ClearRouteHistoryMutationError = ErrorType<unknown>
+
+    /**
+ * @summary Clear the route blacklist and consecutive-failure streaks
+ */
+export const useClearRouteHistory = <TError = ErrorType<unknown>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof clearRouteHistory>>, TError,void, TContext>, request?: SecondParameter<typeof customFetch>}
+ ): UseMutationResult<
+        Awaited<ReturnType<typeof clearRouteHistory>>,
+        TError,
+        void,
+        TContext
+      > => {
+      return useMutation(getClearRouteHistoryMutationOptions(options));
     }
 
 export const getClearExecLockUrl = () => {

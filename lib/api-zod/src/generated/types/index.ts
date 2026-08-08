@@ -60,6 +60,7 @@ export * from './obScanResult';
 export * from './pairScanEntry';
 export * from './preloadedCredentials';
 export * from './priceData';
+export * from './routeHistoryClearResult';
 export * from './scanAllPairsParams';
 export * from './tradeRecord';
 export * from './tradeRequest';

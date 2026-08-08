@@ -562,6 +562,15 @@ export const GraphExecuteResponse = zod.object({
 
 
 /**
+ * Instantly resets all in-memory route failure streaks, removes every route from the blacklist, and clears probe cool-downs.
+ * @summary Clear the route blacklist and consecutive-failure streaks
+ */
+export const ClearRouteHistoryResponse = zod.object({
+  "clearedRoutes": zod.number().describe('Route streak\/blacklist entries removed')
+})
+
+
+/**
  * Manually clears the shared live-execution lock (e.g. when a dead route appears to be holding it). Invalidates the current holder's generation token so a zombie execution can never release a newer run's lock. Use with care — if an execution is genuinely mid-order, clearing the lock allows a second execution to run concurrently. Requires valid Kraken credentials: the caller must prove account ownership before a concurrency control can be disabled.
  * @summary HARD RESET — force-release the live execution lock
  */

@@ -1,7 +1,7 @@
 import * as React from "react"
 import { Link, useLocation } from "wouter"
-import { Activity, Settings, LayoutDashboard, Terminal, Zap, RotateCcw, Skull } from "lucide-react"
-import { useClearExecLock } from "@workspace/api-client-react"
+import { Activity, Settings, LayoutDashboard, Terminal, Zap, RotateCcw, Skull, Eraser } from "lucide-react"
+import { useClearExecLock, useClearRouteHistory } from "@workspace/api-client-react"
 import { cn } from "@/lib/utils"
 import { BotProvider, useBotContext, ALL_PAIRS } from "@/store/bot-context"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
@@ -26,6 +26,15 @@ function NavItem({ href, icon: Icon, label }: { href: string; icon: any; label: 
 function ForceModeControls() {
   const { forceMode, setForceMode, addLog, credentials } = useBotContext();
   const clearLock = useClearExecLock();
+  const clearHistory = useClearRouteHistory();
+  const clearBlacklist = async () => {
+    try {
+      const r = await clearHistory.mutateAsync();
+      addLog("warning", `[CLEAR·BL] Route blacklist wiped — ${r.clearedRoutes} route record(s) reset; all fill-rate streaks back to 0.`);
+    } catch (e) {
+      addLog("error", `[CLEAR·BL] Failed: ${e instanceof Error ? e.message : "unknown error"}`);
+    }
+  };
   const hardReset = async (cancelOrders: boolean) => {
     const tag = cancelOrders ? "[KILL·SWITCH]" : "[HARD·RESET]";
     if (!credentials.krakenKey || !credentials.krakenSecret) {
@@ -81,6 +90,22 @@ function ForceModeControls() {
           </TooltipTrigger>
           <TooltipContent side="bottom" className="max-w-[220px]">
             <p className="text-[11px]">Force-clears the live execution lock if a dead route is holding it. If a trade is genuinely mid-flight, clearing allows concurrent execution — use only when stuck.</p>
+          </TooltipContent>
+        </Tooltip>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <button
+              onClick={clearBlacklist}
+              disabled={clearHistory.isPending}
+              className="flex items-center gap-2 px-2 py-1 border-2 border-border text-xs font-bold uppercase tracking-wider text-muted-foreground hover:text-foreground transition-colors disabled:opacity-50"
+              data-testid="button-clear-blacklist"
+            >
+              <Eraser className="h-3 w-3" />
+              {clearHistory.isPending ? "…" : "CLEAR BL"}
+            </button>
+          </TooltipTrigger>
+          <TooltipContent side="bottom" className="max-w-[220px]">
+            <p className="text-[11px]">Clears the route blacklist: all consecutive-failure streaks reset to 0, every banned route re-enabled, probe cool-downs wiped.</p>
           </TooltipContent>
         </Tooltip>
         <Tooltip>

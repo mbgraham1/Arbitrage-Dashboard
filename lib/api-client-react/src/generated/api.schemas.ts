@@ -639,6 +639,11 @@ export interface GraphExecuteRequest {
   forceMode?: boolean;
 }
 
+export interface RouteHistoryClearResult {
+  /** Route streak/blacklist entries removed */
+  clearedRoutes: number;
+}
+
 export interface ExecLockClearRequest {
   krakenKey: string;
   krakenSecret: string;

@@ -543,6 +543,22 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
 
+  /arb/route-history/clear:
+    post:
+      operationId: clearRouteHistory
+      tags: [trades]
+      summary: Clear the route blacklist and consecutive-failure streaks
+      description: >
+        Instantly resets all in-memory route failure streaks, removes every
+        route from the blacklist, and clears probe cool-downs.
+      responses:
+        "200":
+          description: History cleared
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RouteHistoryClearResult"
+
   /arb/exec-lock/clear:
     post:
       operationId: clearExecLock
@@ -1423,6 +1439,14 @@ components:
             penalty, and consecutive-failure blacklist entirely. Fresh pre-flight
             profit gates (net profit minus slippage buffer > minProfitUsd) still
             apply; this never authorizes a trade the live re-quote says is unprofitable.
+
+    RouteHistoryClearResult:
+      type: object
+      required: [clearedRoutes]
+      properties:
+        clearedRoutes:
+          type: number
+          description: Route streak/blacklist entries removed
 
     ExecLockClearRequest:
       type: object

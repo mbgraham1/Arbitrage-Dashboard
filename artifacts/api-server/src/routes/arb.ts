@@ -490,6 +490,16 @@ function routeFailStreakCount(accountId: string, style: string, route: string): 
   return routeFailStreaks.get(streakKey(accountId, style, route))?.streak ?? 0;
 }
 
+// CLEAR BLACKLIST — reset all in-memory route history gates: consecutive-
+// failure streaks, blacklist bans, and probe cool-downs.
+router.post("/arb/route-history/clear", (req, res): void => {
+  const clearedRoutes = routeFailStreaks.size;
+  routeFailStreaks.clear();
+  routeProbeAt.clear();
+  req.log.info({ clearedRoutes }, "Route blacklist + failure streaks cleared manually");
+  res.json({ clearedRoutes });
+});
+
 // HARD RESET — manual lock clear for a stuck/dead execution. Requires VALID
 // Kraken credentials: the server is otherwise unauthenticated, and clearing
 // a live-execution lock is a concurrency-safety control — an anonymous
@@ -1326,8 +1336,17 @@ router.post("/arb/graph-execute", async (req, res): Promise<void> => {
     // window. A lock with a recent heartbeat is NEVER evicted — that would
     // let two live executions spend the same balance.
     if (forceMode && liveLockBusy() && liveLockSilentMs() > FORCE_LOCK_STALE_MS) {
-      req.log.warn({ silentMs: liveLockSilentMs() }, "FORCE MODE — evicting silent execution lock");
-      forceReleaseLiveLock();
+      req.log.warn({ silentMs: liveLockSilentMs() }, "FORCE MODE — evicting silent execution lock (cancelling open orders first)");
+      // Cancel the dead run's resting orders BEFORE proceeding, so a stale
+      // maker leg can't fill while the new trade runs. Failure to cancel =
+      // do NOT evict; the trader can use the KILL button.
+      try {
+        const n = await krakenCancelAllOrders({ krakenKey, krakenSecret });
+        req.log.info({ cancelledOrders: n }, "FORCE MODE eviction: open orders cancelled");
+        forceReleaseLiveLock();
+      } catch (e) {
+        req.log.error({ err: e }, "FORCE MODE eviction aborted — CancelAll failed, lock kept");
+      }
     }
     if (liveLockBusy()) {
       res.json({ success: false, isDryRun, executed: false, route: routeDescription ?? "(top route)", preflightProfitUsd: null, error: forceMode ? "A live execution with a RECENT heartbeat holds the lock — use HARD RESET / KILL if you're sure it's dead." : "Another LIVE execution is already in progress — refused to run concurrently." });
