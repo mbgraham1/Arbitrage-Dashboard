@@ -6,6 +6,7 @@ import { useListTrades, useGetTradeSummary, useGetTriangularHistory, useGetTrian
 import { format } from "date-fns";
 import { ArrowRight, BarChart2, Activity, Triangle, ChevronLeft, ChevronRight } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { TriProfitChart } from "@/components/tri-profit-chart";
 
 const TRI_PAGE_SIZE = 100;
 
@@ -269,6 +270,9 @@ export default function Trades() {
           </Card>
         </div>
       )}
+
+      {/* ── Triangular Scans tab — profit-over-time chart ── */}
+      {tab === "triangular" && <TriProfitChart items={triItems} />}
 
       {/* ── Triangular Scans tab — history table ── */}
       {tab === "triangular" && (
