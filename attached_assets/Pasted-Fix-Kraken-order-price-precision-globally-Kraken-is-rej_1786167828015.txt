@@ -1,0 +1,24 @@
+Fix Kraken order-price precision globally.
+
+Kraken is rejecting orders with errors such as:
+EOrder:Invalid price: ETH/USD price can only be specified up to 2 decimals
+
+Before submitting ANY Kraken order, normalize the limit price to Kraken’s allowed precision for that specific trading pair.
+
+1. Load Kraken AssetPairs metadata and obtain the pair’s pair_decimals / applicable price precision.
+2. Create one centralized normalize_kraken_price(pair, price) function.
+3. Every Kraken order path must pass its price through this function immediately before API submission — AUTO, Force, graph/triangular routes, maker repricing, retries, fallback orders, and unwind orders.
+4. Do not rely on generic Python floating-point rounding if it can produce excess decimal digits. Use Decimal/quantization or equivalent safe formatting and send Kraken a properly formatted price.
+5. ETH/USD currently needs 2 decimal places. BTC/USD should use whatever Kraken’s live AssetPairs metadata specifies rather than assuming a permanent hard-coded value.
+6. Also normalize ORDER VOLUME using Kraken’s pair-specific volume precision/minimums so fixing price precision doesn’t simply expose the next Kraken validation error.
+7. Log the transformation during testing, for example:
+    ETH/USD raw price 1915.997438 -> Kraken price 1916.00
+8. If metadata cannot be loaded for a pair, DO NOT submit an unvalidated live order. Log the problem and skip that route.
+
+Add a startup validation that confirms precision metadata has loaded for every Kraken pair the arbitrage engine can trade.
+
+That should fix this particular rejection.
+
+But there’s another issue in your screenshots I wouldn’t ignore: at 1:19 the scanner shows a theoretical +$0.1231 on the ETH→BCH route, yet Leg 2 fails to fill. At 1:40 the bot finally attempts another attractive route and Kraken rejects it before execution because of formatting. So right now you have two separate execution problems: fill mechanics and malformed Kraken order prices.
+
+Fix the precision error first. Then we can see whether the new Taker/Adaptive execution actually converts those displayed $0.10–$0.12 opportunities into positive realized P&L, which is the number that ultimately matters.
