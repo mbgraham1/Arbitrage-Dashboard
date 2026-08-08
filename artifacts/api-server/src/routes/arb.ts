@@ -1520,6 +1520,61 @@ async function snapshotAccountValue(creds: { krakenKey: string; krakenSecret: st
   }
 }
 
+// ── Snapshot retention (opportunistic, throttled) ────────────────────────────
+// account_snapshots grows on every live trade and every changed 60s poll.
+// Retention policy (P&L-safe by construction):
+//   • post_trade rows: NEVER deleted — they're the audit trail.
+//   • each account's first-ever row: NEVER deleted — it's the lifetime baseline.
+//   • poll rows younger than 7 days: kept in full (today's baseline lives here).
+//   • poll rows 7–30 days old: downsampled to one per hour (earliest in bucket).
+//   • poll rows older than 30 days: downsampled to one per day.
+// P&L math only reads the first-ever row, today's first row, and the latest
+// row — all untouched by this policy, so reported numbers don't change.
+const SNAPSHOT_PRUNE_INTERVAL_MS = 6 * 60 * 60 * 1000; // at most every 6h
+let lastSnapshotPruneMs = 0;
+
+async function pruneAccountSnapshots(log: { error: (o: object, m: string) => void }): Promise<void> {
+  const nowMs = Date.now();
+  if (nowMs - lastSnapshotPruneMs < SNAPSHOT_PRUNE_INTERVAL_MS) return;
+  lastSnapshotPruneMs = nowMs; // set first — a failing prune must not retry every request
+  try {
+    // Hourly downsample: poll rows older than 7 days, keep the earliest row in
+    // each (account, hour) bucket. First-ever rows are excluded explicitly.
+    await db.execute(sql`
+      DELETE FROM account_snapshots s
+      WHERE s.trigger = 'poll'
+        AND s.created_at < now() - interval '7 days'
+        AND s.created_at >= now() - interval '30 days'
+        AND s.id <> (SELECT min(m.id) FROM account_snapshots m WHERE m.account_id = s.account_id)
+        AND s.id NOT IN (
+          SELECT min(b.id)
+          FROM account_snapshots b
+          WHERE b.trigger = 'poll'
+            AND b.created_at < now() - interval '7 days'
+            AND b.created_at >= now() - interval '30 days'
+          GROUP BY b.account_id, date_trunc('hour', b.created_at)
+        )
+    `);
+    // Daily downsample: poll rows older than 30 days, keep the earliest row in
+    // each (account, day) bucket.
+    await db.execute(sql`
+      DELETE FROM account_snapshots s
+      WHERE s.trigger = 'poll'
+        AND s.created_at < now() - interval '30 days'
+        AND s.id <> (SELECT min(m.id) FROM account_snapshots m WHERE m.account_id = s.account_id)
+        AND s.id NOT IN (
+          SELECT min(b.id)
+          FROM account_snapshots b
+          WHERE b.trigger = 'poll'
+            AND b.created_at < now() - interval '30 days'
+          GROUP BY b.account_id, date_trunc('day', b.created_at)
+        )
+    `);
+  } catch (err) {
+    log.error({ err }, "account snapshot prune failed");
+  }
+}
+
 // ── POST /arb/account-pnl ─────────────────────────────────────────────────────
 // Ground-truth P&L from ACTUAL exchange balances, never scanner estimates.
 // Values Kraken (+ Coinbase when creds provided), stores a snapshot, then
@@ -1534,6 +1589,9 @@ router.post("/arb/account-pnl", async (req, res): Promise<void> => {
     krakenKey: parsed.data.krakenKey, krakenSecret: parsed.data.krakenSecret,
     ...(hasCoinbase ? { coinbaseKey: parsed.data.coinbaseKey, coinbaseSecret: parsed.data.coinbaseSecret } : {}),
   };
+  // Opportunistic retention pass — throttled, fire-and-forget so a slow
+  // prune can never delay a P&L response.
+  void pruneAccountSnapshots(req.log);
   try {
     const now = await snapshotAccountValue(creds, "poll", req.log);
     if (!now) { res.status(502).json({ error: "Could not value the account (balance or ticker fetch failed)." }); return; }
