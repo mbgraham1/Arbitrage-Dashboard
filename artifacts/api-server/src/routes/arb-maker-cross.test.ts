@@ -37,7 +37,7 @@ vi.mock("../lib/price-cache.js", () => ({
 
 vi.mock("../lib/exchange.js", () => ({
   getKrakenPrice:           vi.fn(),
-  getKrakenBalances:        vi.fn(() => Promise.resolve([{ currency: "ZUSD", amount: 1000 }])),
+  getKrakenBalances:        vi.fn(() => Promise.resolve([{ currency: "ZUSD", amount: 1000 }, { currency: "SOL", amount: 100 }])),
   krakenCancelAllOrders:    vi.fn(() => Promise.resolve(0)),
   setPrivateCallHeartbeat:  vi.fn(),
   krakenMarketOrder:        vi.fn(),
@@ -54,7 +54,7 @@ vi.mock("../lib/exchange.js", () => ({
   krakenAccountValueUsd:    vi.fn(() => Promise.resolve({ totalUsd: 1000, usdBalance: 1000, holdingsUsd: 0, holdings: [], unpriced: [] })),
   krakenNetCashFlowUsd:     vi.fn(() => Promise.resolve({ netUsd: 0, entries: 0, approximated: false, complete: true })),
   coinbaseAccountValueUsd:  vi.fn(() => Promise.resolve({ totalUsd: 0, usdBalance: 0, holdingsUsd: 0, unpriced: [] })),
-  getCoinbaseBalances:      vi.fn(() => Promise.resolve([])),
+  getCoinbaseBalances:      vi.fn(() => Promise.resolve([{ currency: "USD", amount: 1000 }, { currency: "SOL", amount: 100 }])),
   coinbaseMarketOrder:      vi.fn(),
   coinbaseLimitOrder:       vi.fn(),
   coinbaseOrderFilled:      vi.fn(),
@@ -98,9 +98,28 @@ vi.mock("../lib/order-book.js", () => ({
   preflightObCycle:    vi.fn(),
   discoverCrossPairs:  vi.fn(() => Promise.resolve({ lookup: new Map() })),
   freshJoinPrice:      vi.fn(),
-  OB_ASSETS:           [] as string[],
-  OB_USD_PAIRS:        {} as Record<string, string>,
+  waitForBookTouch:    vi.fn(() => Promise.resolve(false)),
+  formatLegAges:       vi.fn(() => "legs"),
+  OB_ASSETS:           ["SOL"] as string[],
+  OB_USD_PAIRS:        { SOL: "SOLUSD" } as Record<string, string>,
   CROSS_LOOKUP:        new Map(),
+}));
+
+// Executor-grade cross pre-fire dependency: LIVE stream books on both venues.
+// Default fixture is FRESH and PROFITABLE so the containment tests below reach
+// the order machinery; individual tests override it to prove the pre-fire
+// blocks execution (stale or thin re-quotes place NO orders).
+const FRESH_CROSS_BD = () => ({
+  netProfitUsd: 0.05, rawEdgeUsd: 0.06, feesUsd: 0.01, slippageUsd: 0,
+  baseQty: 0.0666,
+  legDiag: [], legAges: [
+    { pair: "SOLUSD[K]", ageMs: 10, recvAgeMs: 10 },
+    { pair: "SOL-USD[C]", ageMs: 10, recvAgeMs: 10 },
+  ],
+  quoteAgeMs: 10, marketUpdateMs: 1_754_600_000_000,
+});
+vi.mock("../lib/cross-pricing.js", () => ({
+  crossTakerBreakdown: vi.fn(),
 }));
 
 vi.mock("../lib/graph-engine.js", () => ({
@@ -119,6 +138,9 @@ vi.mock("../lib/tri-fill.js", () => ({
 import arbRouter from "./arb.js";
 import * as exchangeModule from "../lib/exchange.js";
 import * as graphEngineModule from "../lib/graph-engine.js";
+import * as crossPricingModule from "../lib/cross-pricing.js";
+
+const crossTakerBreakdown = crossPricingModule.crossTakerBreakdown as ReturnType<typeof vi.fn>;
 
 const scanGraphOpportunities = graphEngineModule.scanGraphOpportunities as ReturnType<typeof vi.fn>;
 const krakenRawLimitOrder    = exchangeModule.krakenRawLimitOrder    as ReturnType<typeof vi.fn>;
@@ -181,6 +203,10 @@ afterAll(async () => {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  // Default: fresh + profitable pre-fire so containment tests reach the order
+  // machinery. Reset every test — overrides must never leak forward.
+  crossTakerBreakdown.mockReset();
+  crossTakerBreakdown.mockImplementation(FRESH_CROSS_BD);
 });
 
 async function graphExecute(body: Record<string, unknown>) {
@@ -427,5 +453,70 @@ describe("POST /arb/graph-execute — maker cross-exchange execution", () => {
     expect(unwindCall).toBeTruthy();
     expect(unwindCall![2] as number).toBeCloseTo(PLANNED_VOL - HEDGED, 10);
   });
+
+});
+
+// ── Cross pre-fire gating: bypasses never authorize without a fresh re-quote ──
+// Big-edge bypass, probes, the profitable override, and FORCE MODE only skip
+// HISTORY gates. The executor-grade cross pre-fire (fresh stream books, per-leg
+// freshness, floor + safety buffer) still runs after them — a stale or thin
+// re-quote must place NO orders even when every history gate is bypassed.
+
+describe("POST /arb/graph-execute — cross pre-fire gates bypassed shapes", () => {
+
+  const NO_ORDERS = () => {
+    expect(krakenRawLimitOrder).not.toHaveBeenCalled();
+    expect(krakenRawMarketOrder).not.toHaveBeenCalled();
+    expect(coinbaseLimitOrder).not.toHaveBeenCalled();
+    expect(coinbaseMarketOrder).not.toHaveBeenCalled();
+  };
+
+  it("FORCE MODE with STALE quotes: skips with no orders — force bypasses history, never freshness", async () => {
+    scanGraphOpportunities.mockImplementation(() => Promise.resolve({ routes: [crossRoute("kraken")] }));
+    crossTakerBreakdown.mockImplementation(() => ({ ...FRESH_CROSS_BD(), quoteAgeMs: 5_000 }));
+
+    const { body } = await graphExecute({ ...BASE_BODY, forceMode: true });
+    expect(body["success"]).toBe(false);
+    expect(String(body["error"])).toMatch(/cross SKIP: quotes are still 5000ms old/);
+    NO_ORDERS();
+  });
+
+  it("FORCE MODE with a THIN fresh re-quote: net below buffer+floor places no orders", async () => {
+    scanGraphOpportunities.mockImplementation(() => Promise.resolve({ routes: [crossRoute("kraken")] }));
+    // Fresh but thin: $0.015 executable net ≤ $0.02 safety buffer on a $10 trade.
+    crossTakerBreakdown.mockImplementation(() => ({ ...FRESH_CROSS_BD(), netProfitUsd: 0.015 }));
+
+    const { body } = await graphExecute({ ...BASE_BODY, forceMode: true });
+    expect(body["success"]).toBe(false);
+    expect(String(body["error"])).toMatch(/cross executable net \$0\.0150/);
+    NO_ORDERS();
+  });
+
+  it("stream books unavailable: refuses to fire on the graph estimate, no orders", async () => {
+    scanGraphOpportunities.mockImplementation(() => Promise.resolve({ routes: [crossRoute("kraken")] }));
+    crossTakerBreakdown.mockImplementation(() => null);
+
+    const { body } = await graphExecute({ ...BASE_BODY, forceMode: true });
+    expect(body["success"]).toBe(false);
+    expect(String(body["error"])).toMatch(/live depth books unavailable/);
+    NO_ORDERS();
+  });
+
+  it("fresh profitable re-quote after bypassed history gates: taker cross fires and confirms actual fills", async () => {
+    // FORCE MODE (all history gates bypassed) + a fresh pre-fire that clears
+    // the floor: execution proceeds and sells the ACTUAL confirmed buy fill.
+    scanGraphOpportunities.mockImplementation(() => Promise.resolve({ routes: [crossRoute("kraken")] }));
+    krakenRawMarketOrder.mockResolvedValue({ txid: ["K-BUY-9"] });
+    krakenOrderInfo.mockResolvedValue(kClosed(PLANNED_VOL));
+    coinbaseMarketOrder.mockResolvedValue({ orderId: "CB-SELL-9", success: true });
+    coinbaseOrderDetails.mockResolvedValue({ status: "FILLED", filledSize: PLANNED_VOL, filledValue: 10.03, avgPrice: 150.6, totalFees: 0.04 });
+
+    const { body } = await graphExecute({ ...BASE_BODY, executionStyle: "taker", forceMode: true });
+    expect(body["success"]).toBe(true);
+    // Hedge sized from the ACTUAL confirmed buy fill.
+    const sell = coinbaseMarketOrder.mock.calls[0]!;
+    expect(sell[1]).toBe("SELL");
+    expect(sell[2] as number).toBeCloseTo(PLANNED_VOL, 10);
+  }, 30_000);
 
 });

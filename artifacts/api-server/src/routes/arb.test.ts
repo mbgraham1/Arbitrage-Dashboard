@@ -119,9 +119,25 @@ vi.mock("../lib/order-book.js", () => ({
   discoverCrossPairs:  vi.fn(() => Promise.resolve({ lookup: new Map(), crossMap: [], cachedAt: 0 })),
   freshJoinPrice:      vi.fn(),
   makerQuote:          vi.fn(),
+  waitForBookTouch:    vi.fn(() => Promise.resolve(false)),
+  formatLegAges:       vi.fn(() => "legs"),
   OB_ASSETS:           ["BTC", "ETH", "SOL", "ATOM"] as string[],
   OB_USD_PAIRS:        { BTC: "XXBTZUSD", ETH: "XETHZUSD", SOL: "SOLUSD", ATOM: "ATOMUSD" } as Record<string, string>,
   CROSS_LOOKUP:        new Map(),
+}));
+
+// Fresh, profitable, depth-walked cross breakdown: the executor-grade cross
+// pre-fire requires live stream books on both venues before any order.
+vi.mock("../lib/cross-pricing.js", () => ({
+  crossTakerBreakdown: vi.fn(() => ({
+    netProfitUsd: 0.05, rawEdgeUsd: 0.06, feesUsd: 0.01, slippageUsd: 0,
+    baseQty: 0.0666,
+    legDiag: [], legAges: [
+      { pair: "SOLUSD[K]", ageMs: 10, recvAgeMs: 10 },
+      { pair: "SOL-USD[C]", ageMs: 10, recvAgeMs: 10 },
+    ],
+    quoteAgeMs: 10, marketUpdateMs: 1_754_600_000_000,
+  })),
 }));
 
 vi.mock("../lib/graph-engine.js", () => ({
@@ -309,8 +325,9 @@ describe("POST /arb/ob-execute (dry-run) records volume as asset-A base quantity
       lookup: new Map([["ATOM-BTC", { pair: "ATOMXBT", base: "ATOM", quote: "BTC" }]]),
       crossMap: [], cachedAt: Date.now(),
     });
+    // profitUsd must clear the maker-floor safeguard (2.5% of the $100 size).
     preflightObCycle.mockResolvedValue({
-      volumeA: VOLUME_A, profitUsd: 0.5,
+      volumeA: VOLUME_A, profitUsd: 5,
       legs: [
         { pair: "ATOMUSD", side: "buy",  volume: VOLUME_A },
         { pair: "ATOMXBT", side: "sell", volume: VOLUME_A },

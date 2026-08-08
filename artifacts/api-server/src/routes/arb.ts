@@ -2544,23 +2544,27 @@ router.post("/arb/graph-execute", async (req, res): Promise<void> => {
     //     Routes that historically filled short of expectation must clear the
     //     average shortfall too; routes that rarely fill are blocked outright.
     let probeAttempt = false;
-    if (!isDryRun && forceMode && isKrakenTriangle) {
+    // Both live shapes now re-validate the edge with their OWN fresh
+    // order-book pre-flight immediately before placing orders: Kraken
+    // triangles inside runKrakenTriangle, and cross/inventory routes via the
+    // executor-grade cross pre-fire below (live stream books on both venues,
+    // per-leg freshness, consistency gate, buffer). A stale scanner edge can
+    // never authorize a trade on either shape, so history-based bypasses are
+    // safe to grant to both.
+    const hasFreshPreFire = isKrakenTriangle || isCrossInventory;
+    if (!isDryRun && forceMode && hasFreshPreFire) {
       // FORCE MODE: trader explicitly disabled all history-based gates.
-      // Restricted to Kraken triangles — that path re-quotes fresh order
-      // books in its own pre-flight immediately before placing orders.
-      // Cross/inventory shapes have no final re-quote, so history gates
-      // stay in force for them even under FORCE MODE.
-      req.log.info({ route: route.description }, "FORCE MODE — fill-rate gate, shortfall penalty, and blacklist bypassed (Kraken triangle)");
+      // Allowed only for shapes with their own final re-quote — the fresh
+      // pre-flight remains the last line of defense before any order.
+      req.log.info({ route: route.description }, `FORCE MODE — fill-rate gate, shortfall penalty, and blacklist bypassed (${isKrakenTriangle ? "Kraken triangle" : "cross-exchange inventory"})`);
     } else if (!isDryRun) {
       // 2a-bis. Consecutive-failure blacklist: 3 failed live cycles in a row
       // bans the route for 5 minutes — the dashboard's fall-through treats
       // any "Feedback-loop gate" error as "try the next best route".
-      // Big-edge bypass and probes only apply to Kraken triangles: that path
-      // re-validates the edge with its OWN fresh order-book pre-flight before
-      // any order is placed, so a stale scanner edge can't authorize a trade.
-      // Cross/inventory shapes have no equivalent final re-quote — for them
-      // history gates stay fully in force.
-      const hist = await routeQualityPenalty(route.description, executionStyle, tradeSizeUsd, accountScope(krakenKey, coinbaseKey, coinbaseSecret), isKrakenTriangle ? effNetProfitUsd : 0, isKrakenTriangle);
+      // Big-edge bypass and probes apply to any shape with its own fresh
+      // final re-quote (Kraken triangles AND cross/inventory routes) — the
+      // pre-fire re-validates the edge before any order is placed.
+      const hist = await routeQualityPenalty(route.description, executionStyle, tradeSizeUsd, accountScope(krakenKey, coinbaseKey, coinbaseSecret), hasFreshPreFire ? effNetProfitUsd : 0, hasFreshPreFire);
       // Big-edge bypass overrides the blacklist too: an edge > 2× this
       // route's historical average is a NEW opportunity, not the old pattern.
       const banMs = routeBlacklistRemainingMs(accountScope(krakenKey, coinbaseKey, coinbaseSecret), executionStyle, route.description);
@@ -2572,9 +2576,9 @@ router.post("/arb/graph-execute", async (req, res): Promise<void> => {
       // than 5 CONSECUTIVE failures, execute regardless of lifetime fill rate
       // — the streak (not the total) is what indicates a dead route now.
       const failStreak = routeFailStreakCount(accountScope(krakenKey, coinbaseKey, coinbaseSecret), executionStyle, route.description);
-      // Kraken triangles only — the override rides on that path's fresh
-      // order-book re-quote; cross shapes have no equivalent final check.
-      const profitableOverride = isKrakenTriangle && effNetProfitUsd > 0.01 && failStreak < ROUTE_BLACKLIST_AFTER;
+      // Rides on each shape's fresh order-book re-quote (triangle executor
+      // pre-flight or the executor-grade cross pre-fire below).
+      const profitableOverride = hasFreshPreFire && effNetProfitUsd > 0.01 && failStreak < ROUTE_BLACKLIST_AFTER;
       if (hist.blockReason && !profitableOverride) {
         res.json({ success: false, isDryRun, executed: false, route: route.description, preflightProfitUsd: route.netProfitUsd, error: `Feedback-loop gate: ${hist.blockReason} (${hist.attempts} recorded live attempts).` });
         return;
@@ -2888,6 +2892,13 @@ router.post("/arb/graph-execute", async (req, res): Promise<void> => {
       } catch (e) { log.error(`Failed to write failure ledger row: ${(e as Error).message}`); }
     };
 
+    // Probe attempts (fill-rate/risk-block recovery) get the tighter 2s maker
+    // window on cross routes too — same contract as Kraken triangle probes.
+    const crossMakerWindowMs = probeAttempt ? PROBE_MAKER_TIMEOUT_MS : MAKER_CROSS_FILL_WINDOW_MS;
+    if (probeAttempt && executionStyle === "maker") {
+      req.log.info({ route: route.description, crossMakerWindowMs }, "cross probe attempt — maker fill window tightened to the probe timer");
+    }
+
     // ── Maker-first machinery (executionStyle === "maker") ───────────────────
     // The maker leg is placed FIRST as a post-only limit at the scan's join
     // price. It gets a bounded fill window; on expiry we cancel and then poll
@@ -2907,7 +2918,7 @@ router.post("/arb/graph-execute", async (req, res): Promise<void> => {
         catch { return { status: "unknown", volExec: 0, price: 0, cost: 0, fee: 0 }; }
       };
       const terminal = (s: string) => s === "closed" || s === "canceled" || s === "expired";
-      const deadline = Date.now() + MAKER_CROSS_FILL_WINDOW_MS;
+      const deadline = Date.now() + crossMakerWindowMs;
       let info = await safe();
       while (!terminal(info.status) && Date.now() < deadline) {
         touchLiveLock();
@@ -2941,7 +2952,7 @@ router.post("/arb/graph-execute", async (req, res): Promise<void> => {
         try { return await coinbaseOrderDetails(cbCreds, orderId); }
         catch { return { status: "UNKNOWN", filledSize: 0, filledValue: 0, avgPrice: 0, totalFees: 0 }; }
       };
-      const deadline = Date.now() + MAKER_CROSS_FILL_WINDOW_MS;
+      const deadline = Date.now() + crossMakerWindowMs;
       let d = await safe();
       while (!terminal(d.status) && Date.now() < deadline) {
         touchLiveLock();
@@ -2983,7 +2994,7 @@ router.post("/arb/graph-execute", async (req, res): Promise<void> => {
         filledVolume = fill.volExec;
         buySpendUsd = fill.cost + fill.fee;
         if (filledVolume <= 0) {
-          throw new Error(`Maker buy leg ${buyOrderId} confirmed ${fill.status} with zero fill inside the ${MAKER_CROSS_FILL_WINDOW_MS / 1000}s window — nothing hedged, no exposure.`);
+          throw new Error(`Maker buy leg ${buyOrderId} confirmed ${fill.status} with zero fill inside the ${crossMakerWindowMs / 1000}s window — nothing hedged, no exposure.`);
         }
         log.info(`Maker buy leg ${buyOrderId} terminal ${fill.status}: ${filledVolume.toFixed(8)}/${plannedVolume.toFixed(8)} filled — hedging ACTUAL fill only`);
       } else if (executionStyle === "maker") {
@@ -3015,7 +3026,7 @@ router.post("/arb/graph-execute", async (req, res): Promise<void> => {
         filledVolume = d.filledSize;
         buySpendUsd = d.filledValue + d.totalFees;
         if (filledVolume <= 0) {
-          throw new Error(`Maker buy order ${buyOrderId} confirmed ${d.status} with zero fill inside the ${MAKER_CROSS_FILL_WINDOW_MS / 1000}s window — nothing hedged, no exposure.`);
+          throw new Error(`Maker buy order ${buyOrderId} confirmed ${d.status} with zero fill inside the ${crossMakerWindowMs / 1000}s window — nothing hedged, no exposure.`);
         }
         // Reconcile reported fill against the SUBMITTED amount: the hedge is
         // sized from the actual fill either way, but a fill above what we

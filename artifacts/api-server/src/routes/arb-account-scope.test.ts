@@ -161,9 +161,12 @@ const ID_A = accountIdFromKey(KEY_A);
 const ID_B = accountIdFromKey(KEY_B);
 
 /** 2-leg cross-exchange inventory route (buy Kraken → bridge → sell Coinbase).
- *  Deliberately NOT a Kraken triangle: for cross shapes the feedback-loop
- *  gate runs with allowProbe=false and currentNetUsd=0, so a bad history
- *  blocks deterministically (no probe, no big-edge bypass). */
+ *  Deliberately NOT a Kraken triangle. Cross shapes now run the gate with
+ *  allowProbe=true and the current net (they have their own executor-grade
+ *  pre-fire re-quote), so gate tests use a SMALL edge (≤ $0.01, below the
+ *  profitable-route override and far below the 2× big-edge bypass) — a bad
+ *  history then blocks deterministically once the single per-window probe
+ *  is consumed. */
 const crossRoute = (description: string, netProfitUsd: number) => ({
   description,
   hops: [
@@ -228,13 +231,16 @@ const graphScan = async (accountId?: string): Promise<ScanRoute[]> => {
 };
 
 const graphExecute = async (krakenKey: string, extra: Record<string, unknown> = {}): Promise<{ error: string | null }> => {
-  scanGraphOpportunities.mockResolvedValue({ routes: [crossRoute(R_GATE, 1.0)] });
+  // Edge $0.005 with floor $0.001: passes the profit floor but stays below
+  // the $0.01 profitable-route override and the 2× big-edge bypass, so the
+  // fill-rate gate's own verdict (block vs probe) is what's observable.
+  scanGraphOpportunities.mockResolvedValue({ routes: [crossRoute(R_GATE, 0.005)] });
   const res = await fetch(`${baseUrl}/arb/graph-execute`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
       krakenKey, krakenSecret: "s", routeDescription: R_GATE,
-      tradeSizeUsd: 10, minProfitUsd: 0.01, isDryRun: false, executionStyle: "taker",
+      tradeSizeUsd: 10, minProfitUsd: 0.001, isDryRun: false, executionStyle: "taker",
       // No Coinbase creds by default: an account that PASSES the gate stops
       // safely at the "Coinbase credentials required" check — no orders, no
       // DB writes.
@@ -291,7 +297,14 @@ describe("graph-scan fill-rate ranking is account-scoped", () => {
 // ── Feedback-loop gate isolation ───────────────────────────────────────────────
 
 describe("graph-execute feedback-loop gate is account-scoped", () => {
-  it("blocks account B on ITS OWN 0/12 live history", async () => {
+  it("grants account B ONE probe on its dead history, then blocks on ITS OWN 0/12", async () => {
+    // Cross shapes now earn probes too: the first attempt inside a decay
+    // window runs as a probe (gate passes; execution stops safely at the
+    // Coinbase credentials check — no orders).
+    const probe = await graphExecute(KEY_B);
+    expect(probe.error ?? "").not.toContain("Feedback-loop gate");
+    expect(probe.error).toContain("Coinbase API credentials are required");
+    // Probe consumed — the SAME account+route now blocks on B's own history.
     const out = await graphExecute(KEY_B);
     expect(out.error).toContain("Feedback-loop gate");
     expect(out.error).toContain("0/12");
@@ -313,7 +326,9 @@ describe("graph-execute feedback-loop gate is account-scoped", () => {
   it("a Coinbase key WITHOUT its secret does not fork the scope — B's own history still gates B", async () => {
     // B's 0/12 rows were recorded under hash(krakenB|). If a lone Coinbase
     // key changed the gate's scope, B's own dead history would become
-    // invisible to B's own gate. Canonical rule: no secret → same scope.
+    // invisible to B's own gate (and a FRESH probe would be granted under
+    // the forked scope). Canonical rule: no secret → same scope — B's probe
+    // was already consumed above, so this blocks outright.
     const out = await graphExecute(KEY_B, { coinbaseKey: `${NONCE}-cb-key-without-secret` });
     expect(out.error).toContain("Feedback-loop gate");
     expect(out.error).toContain("0/12");
