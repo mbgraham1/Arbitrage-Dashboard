@@ -2829,7 +2829,11 @@ components:
         isDryRun:
           type: boolean
         estimatedProfitUsd:
-          type: number
+          type: ["number", "null"]
+          description: >
+            Estimated (dry-run) or expected net profit in USD. Null when the
+            request is rejected before an estimate is computed, e.g. live ETH
+            loops blocked because the ETH/SOL rate is synthetic.
         leg1OrderId:
           type: ["string", "null"]
         leg2OrderId:

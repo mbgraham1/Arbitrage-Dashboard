@@ -1510,7 +1510,11 @@ export const TriExecuteResultPriceSource = {
 export interface TriExecuteResult {
   success: boolean;
   isDryRun: boolean;
-  estimatedProfitUsd: number;
+  /**
+     * Estimated (dry-run) or expected net profit in USD. Null when the request is rejected before an estimate is computed, e.g. live ETH loops blocked because the ETH/SOL rate is synthetic.
+     * @nullable
+     */
+  estimatedProfitUsd: number | null;
   /** @nullable */
   leg1OrderId?: string | null;
   /** @nullable */

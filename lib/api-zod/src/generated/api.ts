@@ -1598,7 +1598,7 @@ export const ExecuteTriangularBody = zod.object({
 export const ExecuteTriangularResponse = zod.object({
   "success": zod.boolean(),
   "isDryRun": zod.boolean(),
-  "estimatedProfitUsd": zod.number(),
+  "estimatedProfitUsd": zod.number().nullable().describe('Estimated (dry-run) or expected net profit in USD. Null when the request is rejected before an estimate is computed, e.g. live ETH loops blocked because the ETH\/SOL rate is synthetic.\n'),
   "leg1OrderId": zod.string().nullish(),
   "leg2OrderId": zod.string().nullish(),
   "leg3OrderId": zod.string().nullish(),

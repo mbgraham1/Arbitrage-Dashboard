@@ -2,7 +2,7 @@
  * Tests for the ETHSOL market availability guard in POST /arb/execute-triangular.
  *
  * Key assertions:
- * 1. Live ETH execution is blocked (HTTP 500) when ETH/SOL rates are synthetic
+ * 1. Live ETH execution is blocked (200 + success:false) when ETH/SOL rates are synthetic
  *    — a synthetic cross rate cannot be submitted as a real ETHSOL order book price.
  * 2. No Kraken private order function (krakenRawMarketOrder / krakenRawLimitOrder)
  *    is called when execution is blocked.
@@ -206,12 +206,15 @@ describe("POST /arb/execute-triangular — ETHSOL market guard", () => {
 
   describe("live execution blocked when ETH/SOL market is unavailable", () => {
 
-    it("returns HTTP 500 when WS cache reports synthetic rates and isDryRun=false", async () => {
+    it("returns success:false when WS cache reports synthetic rates and isDryRun=false", async () => {
       getTriPrices.mockReturnValue({ kraken: SYNTHETIC_KRAKEN_TRI, coinbase: null });
 
       const { status, body } = await postExecuteTriangular({ ...BASE_ETH_BODY, isDryRun: false });
 
-      expect(status).toBe(500);
+      expect(status).toBe(200);
+      expect(body["success"]).toBe(false);
+      expect(body["executed"]).toBeFalsy();
+      expect(body["estimatedProfitUsd"]).toBeNull();
       expect(body["error"]).toMatch(/direct market is currently unavailable/i);
       expect(body["synthetic"]).toBe(true);
       expect(body["priceSource"]).toBe("synthetic");
@@ -267,7 +270,8 @@ describe("POST /arb/execute-triangular — ETHSOL market guard", () => {
 
       vi.restoreAllMocks();
 
-      expect(status).toBe(500);
+      expect(status).toBe(200);
+      expect(body["success"]).toBe(false);
       expect(body["error"]).toMatch(/direct market is currently unavailable/i);
       expect(body["synthetic"]).toBe(true);
       expect(krakenRawMarketOrder).not.toHaveBeenCalled();

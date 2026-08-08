@@ -3338,7 +3338,9 @@ router.post("/arb/execute-triangular", async (req, res): Promise<void> => {
     // on leg 2 succeeding with a price that does not reflect a real bid/ask.
     if (!isDryRun && ethSolSource === "synthetic") {
       req.log.warn({ loop, ethSolSource }, "Live ETH triangular execution blocked — ETHSOL market unavailable");
-      res.status(500).json({
+      res.json({
+        success: false, isDryRun: false, estimatedProfitUsd: null,
+        leg1OrderId: null, leg2OrderId: null, leg3OrderId: null,
         error: "ETH/SOL direct market is currently unavailable on Kraken. " +
                "Live triangular execution requires a real ETHSOL order book — a synthetic cross rate cannot be submitted as a limit or market order. " +
                "Use dry-run mode to estimate profit, or wait for the direct market to come online.",
