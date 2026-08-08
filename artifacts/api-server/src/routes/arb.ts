@@ -720,13 +720,19 @@ async function runKrakenTriangle(input: TriangleExecInput, reqLog: ReqLog): Prom
       legIndex: number, label: string,
       spec: { pair: string; side: "buy" | "sell"; volume: number; limitPrice: number },
       beforeRetry: () => Promise<number | null>,
-      // Edge-aware resting (leg 1 only): rest up to restMs, but re-check the
-      // edge every EDGE_CHECK_EVERY_MS and cancel EARLY the moment fresh books
-      // say the route is no longer profitable. Time patience, edge discipline.
-      opts?: { restMs?: number; edgeStillGood?: () => Promise<boolean> },
+      // Edge-aware resting + book chasing (leg 1 only): rest up to restMs
+      // TOTAL, re-checking every EDGE_CHECK_EVERY_MS via freshLimit():
+      //   null  → edge gone: cancel EARLY, stop.
+      //   price → if the join price moved, cancel and RE-JOIN at the fresh
+      //           price (still post-only/maker) — a stale resting order behind
+      //           a drifted book never fills; chasing keeps us at the front.
+      opts?: { restMs?: number; freshLimit?: () => Promise<number | null> },
     ): Promise<AggFill> => {
       const restMs = opts?.restMs ?? MAKER_LEG_TIMEOUT_MS;
       const EDGE_CHECK_EVERY_MS = 4_000;
+      const MAX_CHASES = 6; // re-joins within the SAME restMs window
+      const legDeadline = Date.now() + restMs; // wall-clock cap across chases
+      let chases = 0;
       let remaining = spec.volume;
       let limit = spec.limitPrice;
       const agg: AggFill = { volExec: 0, cost: 0, fee: 0, txid: "" };
@@ -755,10 +761,11 @@ async function runKrakenTriangle(input: TriangleExecInput, reqLog: ReqLog): Prom
         }
         agg.txid = txid;
         setExecStatus({ orderId: txid, phase: "waiting for fill" });
-        const deadline = Date.now() + restMs;
+        const deadline = opts?.freshLimit ? legDeadline : Date.now() + restMs;
         let nextEdgeCheck = Date.now() + EDGE_CHECK_EVERY_MS;
         let edgeGone = false;
         let revoked = false;
+        let repriceTo: number | null = null;
         let info = await safeInfo(txid);
         while (!isFinal(info.status) && Date.now() < deadline) {
           await new Promise(r => setTimeout(r, 1_000));
@@ -771,19 +778,25 @@ async function runKrakenTriangle(input: TriangleExecInput, reqLog: ReqLog): Prom
             revoked = true;
             break;
           }
-          if (opts?.edgeStillGood && Date.now() >= nextEdgeCheck && !isFinal(info.status)) {
+          if (opts?.freshLimit && Date.now() >= nextEdgeCheck && !isFinal(info.status)) {
             nextEdgeCheck = Date.now() + EDGE_CHECK_EVERY_MS;
             setExecStatus({ phase: "resting — re-checking edge" });
-            if (!(await opts.edgeStillGood())) {
+            const px = await opts.freshLimit();
+            if (px == null) {
               log.info(`${label}: edge no longer clears the floor while resting — cancelling early`);
               edgeGone = true;
+              break;
+            }
+            if (px !== limit && chases < MAX_CHASES && Date.now() < deadline - 2_000) {
+              log.info(`${label}: book moved (${limit} → ${px}) — chasing: cancel and re-join at the fresh price`);
+              repriceTo = px;
               break;
             }
             setExecStatus({ phase: "waiting for fill" });
           }
         }
         if (!isFinal(info.status)) {
-          setExecStatus({ phase: edgeGone ? "edge gone — cancelling" : "fill timer expired — cancelling" });
+          setExecStatus({ phase: edgeGone ? "edge gone — cancelling" : repriceTo != null ? "book moved — re-joining" : "fill timer expired — cancelling" });
           await tryCancel(creds, txid, label, log);
           // A cancel ACK is not terminal — the order can still fill in the
           // race. Poll until Kraken reports a TERMINAL status; if we can't
@@ -801,6 +814,14 @@ async function runKrakenTriangle(input: TriangleExecInput, reqLog: ReqLog): Prom
         setExecStatus({ filledPct: pctOf(agg.volExec) });
         if (agg.volExec >= spec.volume * FILL_TOLERANCE) return agg; // filled
         if (revoked) throw new LockRevokedError(label, `order cancelled while resting; ${agg.volExec.toFixed(8)}/${spec.volume.toFixed(8)} confirmed filled — no fallback, no retry.`, agg);
+        if (repriceTo != null) {
+          // Chase: re-join at the fresh price for the REMAINDER. Does not
+          // consume a retry attempt — bounded by MAX_CHASES + legDeadline.
+          chases++;
+          limit = repriceTo;
+          attempt--;
+          continue;
+        }
         if (attempt >= MAX_LEG_ATTEMPTS) return agg;
         setExecStatus({ phase: "retrying — fresh book + pre-flight" });
         const freshPx = await beforeRetry();
@@ -855,12 +876,14 @@ async function runKrakenTriangle(input: TriangleExecInput, reqLog: ReqLog): Prom
           return fresh.legs[0].limitPrice;
         }, {
           // Leg 1 holds no inventory, so patience is free: rest the post-only
-          // order up to LEG1_MAX_REST_MS, but abort the MOMENT fresh books say
-          // the cycle no longer clears the floor.
+          // order up to LEG1_MAX_REST_MS, abort the MOMENT fresh books say the
+          // cycle no longer clears the floor, and CHASE the join price when
+          // the book drifts (a stale resting order never fills).
           restMs: LEG1_MAX_REST_MS,
-          edgeStillGood: async () => {
+          freshLimit: async () => {
             const fresh = await preflightObCycle(assetA as ObAsset, assetB as ObAsset, tradeSizeUsd, effectiveFeesPct, "maker");
-            return !!fresh && fresh.profitUsd > threshold;
+            if (!fresh || fresh.profitUsd <= threshold) return null; // edge gone
+            return fresh.legs[0].limitPrice;
           },
         });
       } catch (e) {
