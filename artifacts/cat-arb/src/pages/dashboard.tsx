@@ -530,7 +530,7 @@ export default function Dashboard() {
                 </div>
                 <div className="flex flex-col border-2 border-border p-2">
                   <span className="text-muted-foreground uppercase text-[10px]">Fees+Slip</span>
-                  <span>{settings.totalFees + settings.slippage}%</span>
+                  <span>{(settings.totalFees + settings.slippage).toFixed(2)}%</span>
                 </div>
               </div>
             </CardContent>

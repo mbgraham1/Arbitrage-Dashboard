@@ -373,6 +373,9 @@ const idleExecStatus = (): ExecStatus => ({
 let execStatus: ExecStatus = idleExecStatus();
 function setExecStatus(patch: Partial<ExecStatus>): void {
   execStatus = { ...execStatus, ...patch, updatedAtMs: Date.now() };
+  // Heartbeat: a live execution proves it's alive every time it transitions
+  // phase/leg/fill state. Staleness is measured from this, not lock age.
+  if (liveExecLockHeld) liveExecLockSinceMs = Date.now();
 }
 
 // Single-flight lock for LIVE order placement. One process, one live triangle
@@ -380,6 +383,68 @@ function setExecStatus(patch: Partial<ExecStatus>): void {
 // interleaving orders, corrupting each other's execStatus, or double-spending
 // the same balance. Dry runs and pre-flights are not serialized.
 let liveExecLockHeld = false;
+let liveExecLockSinceMs = 0; // heartbeat — refreshed by every setExecStatus()
+let liveExecLockGen = 0;     // generation token: only the CURRENT holder may release
+// Failsafe: every phase of a live execution updates execStatus within seconds
+// (bounded poll loops / order placements). A lock whose holder has produced NO
+// heartbeat for this long belongs to a dead execution (crashed promise, lost
+// await) — clear it instead of refusing new trades forever. Deliberately far
+// above the longest single bounded wait (~15s confirm polls, ~35s exchange
+// waits) so a slow-but-alive execution is never evicted.
+const LIVE_LOCK_STALE_MS = 180_000;
+function liveLockBusy(): boolean {
+  if (!liveExecLockHeld) return false;
+  if (Date.now() - liveExecLockSinceMs > LIVE_LOCK_STALE_MS) {
+    liveExecLockHeld = false;
+    liveExecLockGen++; // invalidate the dead holder's token — its finally becomes a no-op
+    execStatus = idleExecStatus();
+    return false;
+  }
+  return true;
+}
+/** Returns a generation token; pass it to releaseLiveLock so a stale-evicted
+ *  holder can never release a NEWER execution's lock. */
+function acquireLiveLock(): number {
+  liveExecLockHeld = true;
+  liveExecLockSinceMs = Date.now();
+  return ++liveExecLockGen;
+}
+/** Heartbeat for live executors that don't drive execStatus (graph-cross,
+ *  inventory): call from every poll/order/unwind step to prove liveness. */
+function touchLiveLock(): void {
+  if (liveExecLockHeld) liveExecLockSinceMs = Date.now();
+}
+function releaseLiveLock(gen: number): void {
+  if (gen === liveExecLockGen && liveExecLockHeld) {
+    liveExecLockHeld = false;
+    execStatus = idleExecStatus();
+  }
+}
+
+// ── Consecutive-failure route blacklist ──────────────────────────────────────
+// 3 failed LIVE full cycles IN A ROW → route blacklisted for 15 minutes so the
+// engine immediately moves to the next best route instead of grinding a dead
+// one. A single completed cycle resets the streak. Scoped per account+style.
+const ROUTE_BLACKLIST_AFTER = 3;
+const ROUTE_BLACKLIST_MS = 15 * 60_000;
+const routeFailStreaks = new Map<string, { streak: number; blacklistedUntil: number }>();
+const streakKey = (accountId: string, style: string, route: string) => `${accountId}|${style}|${route}`;
+function noteRouteLiveResult(accountId: string, style: string, route: string, filled: boolean): void {
+  const key = streakKey(accountId, style, route);
+  if (filled) { routeFailStreaks.delete(key); return; }
+  const cur = routeFailStreaks.get(key) ?? { streak: 0, blacklistedUntil: 0 };
+  cur.streak += 1;
+  if (cur.streak >= ROUTE_BLACKLIST_AFTER) {
+    cur.blacklistedUntil = Date.now() + ROUTE_BLACKLIST_MS;
+    cur.streak = 0; // streak restarts after the ban expires
+  }
+  routeFailStreaks.set(key, cur);
+}
+function routeBlacklistRemainingMs(accountId: string, style: string, route: string): number {
+  const cur = routeFailStreaks.get(streakKey(accountId, style, route));
+  if (!cur) return 0;
+  return Math.max(0, cur.blacklistedUntil - Date.now());
+}
 
 /** Cancel confirmed only by a TERMINAL Kraken order status — a cancel ack is
  *  not proof: the order may still fill in the race. Thrown when we cannot
@@ -416,7 +481,7 @@ async function runKrakenTriangle(input: TriangleExecInput, reqLog: ReqLog): Prom
   const { krakenKey, krakenSecret, assetA, assetB, tradeSizeUsd, feesPct, minProfitUsd, isDryRun } = input;
   const creds = { krakenKey, krakenSecret };
   const route = `USD→${assetA}→${assetB}→USD`;
-  let ownsLiveLock = false;
+  let lockGen: number | null = null;
   // Per-leg diagnostic: how many legs CONFIRMED filled before the run ended.
   // null until a live run actually starts placing orders (dry runs, pre-flight
   // rejections stay null so they can't skew leg-level fill rates).
@@ -486,11 +551,10 @@ async function runKrakenTriangle(input: TriangleExecInput, reqLog: ReqLog): Prom
     //    (queried from the exchange, never assumed from the plan). Success is
     //    only reported when the position ends flat.
     // Single-flight: only one LIVE triangle may run in this process.
-    if (liveExecLockHeld) {
+    if (liveLockBusy()) {
       return { body: { success: false, isDryRun, executed: false, route, preflightProfitUsd: pf.profitUsd, error: "Another live execution is already in progress — wait for it to finish." } };
     }
-    liveExecLockHeld = true;
-    ownsLiveLock = true;
+    lockGen = acquireLiveLock();
     legsCompleted = 0;
 
     const log = { info: (m: string) => reqLog.info(m), error: (m: string) => reqLog.error(m) };
@@ -521,7 +585,7 @@ async function runKrakenTriangle(input: TriangleExecInput, reqLog: ReqLog): Prom
     // than missing the window. Leg 1 only falls back when the edge still
     // covers taker fees; legs 2/3 always complete at market — we already
     // hold inventory, and completing beats unwinding at the same taker cost.
-    const MAKER_LEG_TIMEOUT_MS = 4_000;
+    const MAKER_LEG_TIMEOUT_MS = 3_000; // fill-or-abort: 3s per maker window
     const MAX_LEG_ATTEMPTS = 1;
     interface AggFill { volExec: number; cost: number; fee: number; txid: string }
     const isFinal = (s: string) => s === "closed" || s === "canceled" || s === "expired";
@@ -668,7 +732,7 @@ async function runKrakenTriangle(input: TriangleExecInput, reqLog: ReqLog): Prom
       }
       if (aHeld < l1.volume * FILL_TOLERANCE) {
         if (aHeld > 0) await tryUnwindMarket(creds, "sell", aHeld, pairA, `sell ${assetA} (unwind partial leg1)`, log);
-        throw new Error(`Leg 1 did not fill within the ${MAKER_LEG_TIMEOUT_MS / 1000}s maker window and taker fallback ${aHeld > 0 ? "left a shortfall" : "was declined (edge doesn't cover taker fees)"} (${aHeld.toFixed(8)}/${l1.volume.toFixed(8)} ${assetA}); partial position unwound.`);
+        throw new Error(`Leg 1 timeout: no fill within the ${MAKER_LEG_TIMEOUT_MS / 1000}s window and taker fallback ${aHeld > 0 ? "left a shortfall" : "was declined (edge doesn't cover taker fees)"} (${aHeld.toFixed(8)}/${l1.volume.toFixed(8)} ${assetA}); order canceled, lock released.`);
       }
       legsCompleted = 1;
     }
@@ -811,12 +875,10 @@ async function runKrakenTriangle(input: TriangleExecInput, reqLog: ReqLog): Prom
     const legsForRecord = err instanceof IndeterminateOrderError && legsCompleted === 0 ? null : legsCompleted;
     return { body: { success: false, isDryRun, executed: false, route, preflightProfitUsd: null, error: (err as Error).message, legsFilled: legsForRecord } };
   } finally {
-    // Only the execution that HOLDS the lock may reset shared state —
-    // otherwise a rejected second request would clobber the live one's status.
-    if (ownsLiveLock) {
-      liveExecLockHeld = false;
-      execStatus = idleExecStatus(); // never leave a stale "executing" status behind
-    }
+    // Only the CURRENT lock holder may reset shared state — the generation
+    // token makes this a no-op if this run was stale-evicted and a newer
+    // execution now owns the lock.
+    if (lockGen != null) releaseLiveLock(lockGen);
   }
 }
 
@@ -909,6 +971,8 @@ async function recordQuality(row: {
       note: row.note ?? null,
     });
   } catch (err) { log.error({ err }, "failed to record execution quality"); }
+  // Consecutive-failure blacklist bookkeeping (live executions only).
+  if (!row.isDryRun) noteRouteLiveResult(row.accountId ?? "legacy", row.style, row.route, row.filled);
 }
 
 // Feedback-loop gate tuning (advisor-reviewed):
@@ -1141,14 +1205,13 @@ router.post("/arb/graph-execute", async (req, res): Promise<void> => {
   // Global execution lease — shared with all live executors (triangle, OB,
   // inventory). A second live request (another tab, an auto-fire racing a manual
   // click) must never run concurrently and double-spend the same balance.
-  let holdsLease = false;
+  let lockGen: number | null = null;
   if (!isDryRun) {
-    if (liveExecLockHeld) {
+    if (liveLockBusy()) {
       res.json({ success: false, isDryRun, executed: false, route: routeDescription ?? "(top route)", preflightProfitUsd: null, error: "Another LIVE execution is already in progress — refused to run concurrently." });
       return;
     }
-    liveExecLockHeld = true;
-    holdsLease = true;
+    lockGen = acquireLiveLock();
   }
   try {
     // 0. Prefer the account's ACTUAL Kraken fee tier over the caller's
@@ -1194,6 +1257,14 @@ router.post("/arb/graph-execute", async (req, res): Promise<void> => {
     //     Routes that historically filled short of expectation must clear the
     //     average shortfall too; routes that rarely fill are blocked outright.
     if (!isDryRun) {
+      // 2a-bis. Consecutive-failure blacklist: 3 failed live cycles in a row
+      // bans the route for 15 minutes — the dashboard's fall-through treats
+      // any "Feedback-loop gate" error as "try the next best route".
+      const banMs = routeBlacklistRemainingMs(accountIdFromKey(krakenKey, coinbaseKey), executionStyle, route.description);
+      if (banMs > 0) {
+        res.json({ success: false, isDryRun, executed: false, route: route.description, preflightProfitUsd: route.netProfitUsd, error: `Feedback-loop gate: route blacklisted for ${Math.ceil(banMs / 60_000)} more min after ${ROUTE_BLACKLIST_AFTER} consecutive failed live cycles — moving to the next best route.` });
+        return;
+      }
       const hist = await routeQualityPenalty(route.description, executionStyle, tradeSizeUsd, accountIdFromKey(krakenKey, coinbaseKey));
       if (hist.blockReason) {
         res.json({ success: false, isDryRun, executed: false, route: route.description, preflightProfitUsd: route.netProfitUsd, error: `Feedback-loop gate: ${hist.blockReason} (${hist.attempts} recorded live attempts).` });
@@ -1307,6 +1378,7 @@ router.post("/arb/graph-execute", async (req, res): Promise<void> => {
     // 1s interval — QueryOrders counts against Kraken's private rate limit.
     const waitKrakenFill = async (txid: string) => {
       for (let i = 0; i < 15; i++) {
+        touchLiveLock();
         await new Promise(r => setTimeout(r, 1_000));
         try {
           const info = await krakenOrderInfo(kCreds, txid);
@@ -1320,6 +1392,7 @@ router.post("/arb/graph-execute", async (req, res): Promise<void> => {
     const CB_TERMINAL = new Set(["FILLED", "CANCELLED", "EXPIRED", "FAILED"]);
     const waitCoinbaseFill = async (orderId: string) => {
       for (let i = 0; i < 30; i++) {
+        touchLiveLock();
         await new Promise(r => setTimeout(r, 500));
         try {
           const d = await coinbaseOrderDetails(cbCreds, orderId);
@@ -1468,7 +1541,7 @@ router.post("/arb/graph-execute", async (req, res): Promise<void> => {
     req.log.error({ err }, "graph-execute error");
     res.json({ success: false, isDryRun, executed: false, route: routeDescription ?? "(top route)", preflightProfitUsd: null, error: (err as Error).message });
   } finally {
-    if (holdsLease) liveExecLockHeld = false;
+    if (lockGen != null) releaseLiveLock(lockGen);
   }
 });
 
@@ -2889,7 +2962,7 @@ router.post("/arb/inventory-execute", async (req, res): Promise<void> => {
 
   const kCreds  = { krakenKey, krakenSecret };
   const cbCreds = { coinbaseKey, coinbaseSecret };
-  let ownsLiveLock = false;
+  let lockGen: number | null = null;
 
   try {
     // 1. Fresh quote (bypasses WS cache)
@@ -2946,7 +3019,7 @@ router.post("/arb/inventory-execute", async (req, res): Promise<void> => {
     // 3. Live execution: acquire lock first to prevent concurrent executions
     //    (graph-execute, OB-execute, or another inventory request) from
     //    double-spending the same balance.
-    if (liveExecLockHeld) {
+    if (liveLockBusy()) {
       res.status(409).json({
         success: false, isDryRun: false, executed: false, asset: sym, pair,
         buyExchange, sellExchange, volume: null, buyPrice, sellPrice,
@@ -2956,8 +3029,7 @@ router.post("/arb/inventory-execute", async (req, res): Promise<void> => {
       });
       return;
     }
-    liveExecLockHeld = true;
-    ownsLiveLock = true;
+    lockGen = acquireLiveLock();
 
     const KRAKEN_RAW_PAIRS: Record<string, string> = {
       "BTC/USD": "XXBTZUSD", "ETH/USD": "ETHUSD", "SOL/USD": "SOLUSD",
@@ -2974,6 +3046,7 @@ router.post("/arb/inventory-execute", async (req, res): Promise<void> => {
     const CB_TERMINAL = new Set(["FILLED", "CANCELLED", "EXPIRED", "FAILED"]);
     const waitCoinbaseFill = async (orderId: string) => {
       for (let i = 0; i < 30; i++) {
+        touchLiveLock();
         await new Promise(r => setTimeout(r, 500));
         try {
           const d = await coinbaseOrderDetails(cbCreds, orderId);
@@ -2988,6 +3061,7 @@ router.post("/arb/inventory-execute", async (req, res): Promise<void> => {
       // Phase 1: poll up to 20 s for a terminal status.
       const TERMINAL = new Set(["closed", "canceled", "expired"]);
       for (let i = 0; i < 20; i++) {
+        touchLiveLock();
         await new Promise(r => setTimeout(r, 1_000));
         try {
           const info = await krakenOrderInfo(kCreds, txid);
@@ -3000,6 +3074,7 @@ router.post("/arb/inventory-execute", async (req, res): Promise<void> => {
       // Kraken can still fill a "canceling" order in the race.
       try { await krakenCancelOrder(kCreds, txid); } catch { /* ignore cancel ack errors */ }
       for (let i = 0; i < 15; i++) {
+        touchLiveLock();
         await new Promise(r => setTimeout(r, 1_000));
         try {
           const info = await krakenOrderInfo(kCreds, txid);
@@ -3127,7 +3202,7 @@ router.post("/arb/inventory-execute", async (req, res): Promise<void> => {
     req.log.error({ err }, "inventory-execute error");
     res.status(500).json({ error: (err as Error).message });
   } finally {
-    if (ownsLiveLock) liveExecLockHeld = false;
+    if (lockGen != null) releaseLiveLock(lockGen);
   }
 });
 

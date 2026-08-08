@@ -30,3 +30,6 @@ Any ranking/gating built on the execution-quality history must filter by the acc
 
 ## Bounded taker fallbacks
 When a maker leg times out and falls back to a taker fill: a plain market BUY has no maximum quote spend, so on cross pairs it can silently draw pre-existing account inventory when the price moves past the sizing estimate. Use an IOC limit with an explicit worst-case price cap (spend hard-bounded at volume × cap) sized from the inventory THIS RUN holds. Also pass Kraken oflags "fciq" (fee in quote) on all orders so cost±fee accounting is exact regardless of account fee preference. Preserve maker+fallback txids (comma-join) for reconciliation.
+
+## Single-flight lock eviction
+Never time-clear a live execution lock on age alone. Use generation tokens (release is a no-op unless gen matches) plus a heartbeat refreshed by every status update AND every poll-loop iteration in EVERY live executor; staleness = long silence (3 min), not long runtime. A stale eviction must bump the generation so the dead holder's finally can't release the new holder's lock.
