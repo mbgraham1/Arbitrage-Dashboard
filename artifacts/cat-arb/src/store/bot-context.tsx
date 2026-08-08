@@ -581,6 +581,13 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
   // Port of Python v13 "FORCE TRIANGULAR" button: fires best BTC loop with $10 test.
   const forceTriangular = useCallback(async () => {
     if (executeTriangularMutation.isPending) return;
+    // Safety gate: never fire live orders when the ETH/SOL leg is priced from
+    // a synthetic cross-rate (ETH/USD ÷ SOL/USD) — spread errors compound
+    // across three legs. Dry-run estimates are fine with synthetic rates.
+    if (liveModeRef.current && triPriceSource.kraken === "synthetic") {
+      addLog("warning", "[TRI·FORCE] Blocked — ETH/SOL direct market unavailable on Kraken (synthetic cross-rate). Live triangular trades disabled until the direct market returns.");
+      return;
+    }
     setIsForcingTriangular(true);
     try {
       const creds = credentialsRef.current;
@@ -609,7 +616,7 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
     } finally {
       setIsForcingTriangular(false);
     }
-  }, [addLog, executeTriangularMutation, triOpportunities]);
+  }, [addLog, executeTriangularMutation, triOpportunities, triPriceSource]);
 
   // ── Force Trade ───────────────────────────────────────────────────────────────
   // Calls /arb/scan to find the #1-ranked pair by gross spread, then routes

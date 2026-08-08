@@ -240,20 +240,39 @@ export default function Dashboard() {
             </div>
           )}
 
-          {/* Force Triangular — live mode only, $10 BTC/SOL test loop */}
-          {liveMode && (
-            <Button
-              variant="outline"
-              size="lg"
-              className="border-2 border-yellow-500 text-yellow-600 hover:bg-yellow-500 hover:text-white font-bold uppercase"
-              onClick={forceTriangular}
-              disabled={isForcingTriangular}
-              title="Fire best BTC/SOL/USD loop on Kraken with $10 test — 3 market orders"
-            >
-              <RefreshCw className={cn("h-4 w-4 mr-2", isForcingTriangular && "animate-spin")} />
-              {isForcingTriangular ? "TRI FIRING..." : "FORCE TRI"}
-            </Button>
-          )}
+          {/* Force Triangular — live mode only, $10 BTC/SOL test loop.
+              Blocked when the ETH/SOL leg is priced from a synthetic cross-rate
+              (ETH/USD ÷ SOL/USD): spread errors compound across three legs, so
+              the profit estimate is too unreliable for live orders. Dry-run mode
+              is unaffected — this button only renders in live mode. */}
+          {liveMode && (() => {
+            const krakenSynthetic = triPriceSource.kraken === "synthetic";
+            return (
+              <TooltipProvider>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <span tabIndex={0}>
+                      <Button
+                        variant="outline"
+                        size="lg"
+                        className="border-2 border-yellow-500 text-yellow-600 hover:bg-yellow-500 hover:text-white font-bold uppercase"
+                        onClick={forceTriangular}
+                        disabled={isForcingTriangular || krakenSynthetic}
+                      >
+                        <RefreshCw className={cn("h-4 w-4 mr-2", isForcingTriangular && "animate-spin")} />
+                        {isForcingTriangular ? "TRI FIRING..." : "FORCE TRI"}
+                      </Button>
+                    </span>
+                  </TooltipTrigger>
+                  <TooltipContent side="bottom" className="max-w-[240px]">
+                    {krakenSynthetic
+                      ? "Blocked: ETH/SOL direct market unavailable on Kraken — prices are estimated from a cross-rate (ETH/USD ÷ SOL/USD) and may be imprecise. Live triangular trades are disabled until the direct market returns."
+                      : "Fire best BTC/SOL/USD loop on Kraken with $10 test — 3 market orders"}
+                  </TooltipContent>
+                </Tooltip>
+              </TooltipProvider>
+            );
+          })()}
 
           <Button
             size="lg"
