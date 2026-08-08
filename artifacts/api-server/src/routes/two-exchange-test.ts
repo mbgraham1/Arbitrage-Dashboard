@@ -60,8 +60,9 @@ router.post("/arb/two-exchange-test", async (req, res): Promise<void> => {
   const kCreds = { krakenKey: b.krakenKey, krakenSecret: b.krakenSecret };
   const cbCreds = { coinbaseKey: b.coinbaseKey, coinbaseSecret: b.coinbaseSecret };
 
+  let balancesSeen: { krakenUsd: number; coinbaseEth: number } | null = null;
   const blocked = (reason: string) => {
-    res.json({ success: false, isDryRun, outcome: "blocked", blockReason: reason, buyLeg: null, sellLeg: null, realizedProfitUsd: null, residualEthOpen: null, startedAt, finishedAt: new Date().toISOString(), error: null });
+    res.json({ success: false, isDryRun, outcome: "blocked", blockReason: reason, balances: balancesSeen, buyLeg: null, sellLeg: null, realizedProfitUsd: null, residualEthOpen: null, startedAt, finishedAt: new Date().toISOString(), error: null });
   };
 
   if (!b.krakenKey || !b.krakenSecret) { blocked("Kraken API credentials missing."); return; }
@@ -84,6 +85,7 @@ router.post("/arb/two-exchange-test", async (req, res): Promise<void> => {
       const [kBals, cBals] = await Promise.all([getKrakenBalances(kCreds, true), getCoinbaseBalances(cbCreds)]);
       kUsd = kBals.filter(x => ["ZUSD", "USD"].includes(x.currency)).reduce((a, x) => a + x.amount, 0);
       cbEth = cBals.filter(x => x.currency === "ETH").reduce((a, x) => a + x.amount, 0);
+      balancesSeen = { krakenUsd: kUsd, coinbaseEth: cbEth };
     } catch (e) {
       blocked(`Balance check failed (bad credentials or exchange error): ${(e as Error).message}`); return;
     }
@@ -93,7 +95,7 @@ router.post("/arb/two-exchange-test", async (req, res): Promise<void> => {
 
     if (isDryRun) {
       res.json({
-        success: true, isDryRun, outcome: "dry_run_ok", blockReason: null,
+        success: true, isDryRun, outcome: "dry_run_ok", blockReason: null, balances: balancesSeen,
         buyLeg: { exchange: "kraken", side: "buy", orderId: null, status: "not_placed", filledQty: estQty, avgPrice: kAsk, notionalUsd: sizeUsd, feeUsd: null, placedAt: null, terminalAt: null, error: null },
         sellLeg: { exchange: "coinbase", side: "sell", orderId: null, status: "not_placed", filledQty: estQty, avgPrice: cbBid, notionalUsd: estQty * cbBid, feeUsd: null, placedAt: null, terminalAt: null, error: null },
         realizedProfitUsd: null, residualEthOpen: null, startedAt, finishedAt: new Date().toISOString(),
@@ -110,7 +112,7 @@ router.post("/arb/two-exchange-test", async (req, res): Promise<void> => {
       buyTxid = r.txid?.[0] ?? "";
       if (!buyTxid) throw new Error("Kraken returned no txid");
     } catch (e) {
-      res.json({ success: false, isDryRun, outcome: "buy_failed", blockReason: null, buyLeg: { exchange: "kraken", side: "buy", orderId: null, status: "rejected", filledQty: 0, avgPrice: null, notionalUsd: null, feeUsd: null, placedAt: buyPlacedAt, terminalAt: new Date().toISOString(), error: (e as Error).message }, sellLeg: null, realizedProfitUsd: null, residualEthOpen: null, startedAt, finishedAt: new Date().toISOString(), error: `Kraken buy rejected — nothing was traded. ${(e as Error).message}` });
+      res.json({ success: false, isDryRun, outcome: "buy_failed", blockReason: null, balances: balancesSeen, buyLeg: { exchange: "kraken", side: "buy", orderId: null, status: "rejected", filledQty: 0, avgPrice: null, notionalUsd: null, feeUsd: null, placedAt: buyPlacedAt, terminalAt: new Date().toISOString(), error: (e as Error).message }, sellLeg: null, realizedProfitUsd: null, residualEthOpen: null, startedAt, finishedAt: new Date().toISOString(), error: `Kraken buy rejected — nothing was traded. ${(e as Error).message}` });
       return;
     }
     let info = { status: "unknown", volExec: 0, price: 0, cost: 0, fee: 0 };
@@ -124,12 +126,12 @@ router.post("/arb/two-exchange-test", async (req, res): Promise<void> => {
     const buyLeg: Leg = { exchange: "kraken", side: "buy", orderId: buyTxid, status: info.status, filledQty: info.volExec, avgPrice: info.price || null, notionalUsd: info.cost || null, feeUsd: info.fee || null, placedAt: buyPlacedAt, terminalAt: buyTerminalAt, error: null };
     if (!["closed", "canceled", "expired"].includes(info.status)) {
       // Market order not confirmed terminal — do NOT fire the sell against an unknown position.
-      res.json({ success: false, isDryRun, outcome: "indeterminate", blockReason: null, buyLeg, sellLeg: null, realizedProfitUsd: null, residualEthOpen: info.volExec || null, startedAt, finishedAt: new Date().toISOString(), error: `Kraken order ${buyTxid} did not reach a terminal state within ${TERMINAL_WAIT_MS / 1000}s — check Kraken manually before selling anything. NOT selling on Coinbase.` });
+      res.json({ success: false, isDryRun, outcome: "indeterminate", blockReason: null, balances: balancesSeen, buyLeg, sellLeg: null, realizedProfitUsd: null, residualEthOpen: info.volExec || null, startedAt, finishedAt: new Date().toISOString(), error: `Kraken order ${buyTxid} did not reach a terminal state within ${TERMINAL_WAIT_MS / 1000}s — check Kraken manually before selling anything. NOT selling on Coinbase.` });
       return;
     }
     const filledQty = info.volExec || 0;
     if (filledQty <= 1e-12) {
-      res.json({ success: false, isDryRun, outcome: "buy_failed", blockReason: null, buyLeg, sellLeg: null, realizedProfitUsd: null, residualEthOpen: 0, startedAt, finishedAt: new Date().toISOString(), error: "Kraken buy reached a terminal state with zero fill — nothing was traded, nothing to sell." });
+      res.json({ success: false, isDryRun, outcome: "buy_failed", blockReason: null, balances: balancesSeen, buyLeg, sellLeg: null, realizedProfitUsd: null, residualEthOpen: 0, startedAt, finishedAt: new Date().toISOString(), error: "Kraken buy reached a terminal state with zero fill — nothing was traded, nothing to sell." });
       return;
     }
 
@@ -195,7 +197,7 @@ router.post("/arb/two-exchange-test", async (req, res): Promise<void> => {
     }
     req.log.info({ buyTxid, sellOrderId, outcome, realized }, "[2XTEST] two-exchange test finished");
     res.json({
-      success: outcome === "completed", isDryRun, outcome, blockReason: null, buyLeg, sellLeg,
+      success: outcome === "completed", isDryRun, outcome, blockReason: null, balances: balancesSeen, buyLeg, sellLeg,
       realizedProfitUsd: realized, residualEthOpen: residual > 1e-12 ? residual : 0,
       startedAt, finishedAt: new Date().toISOString(),
       error: outcome === "completed" ? null : outcome === "sell_failed"

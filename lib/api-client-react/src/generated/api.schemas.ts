@@ -523,12 +523,22 @@ export interface TwoExchangeTestLeg {
   error?: string | null;
 }
 
+/**
+ * Balances actually read from the exchanges during the check
+ */
+export type TwoExchangeTestResultBalances = {
+  krakenUsd?: number;
+  coinbaseEth?: number;
+} | null;
+
 export interface TwoExchangeTestResult {
   success: boolean;
   isDryRun: boolean;
   /** dry_run_ok | blocked | buy_failed | sell_failed | partial_sell | completed | indeterminate */
   outcome: string;
   blockReason?: string | null;
+  /** Balances actually read from the exchanges during the check */
+  balances?: TwoExchangeTestResultBalances;
   buyLeg?: TwoExchangeTestLeg | null;
   sellLeg?: TwoExchangeTestLeg | null;
   /** (Coinbase proceeds − Coinbase fees) − (Kraken cost + Kraken fees); null unless BOTH legs fully filled */

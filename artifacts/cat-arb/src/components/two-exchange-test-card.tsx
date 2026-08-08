@@ -87,6 +87,11 @@ export function TwoExchangeTestCard() {
               {last.realizedProfitUsd != null && <> · realized P&L <span className={cn("font-semibold", last.realizedProfitUsd >= 0 ? "text-green-500" : "text-red-500")}>${last.realizedProfitUsd.toFixed(4)}</span></>}
               {last.residualEthOpen != null && last.residualEthOpen > 0 && <span className="text-red-500"> · residual {last.residualEthOpen.toFixed(8)} ETH open</span>}
             </div>
+            {last.balances && (
+              <div data-testid="text-2xtest-balances">
+                balances read: Kraken <span className="font-semibold">${last.balances.krakenUsd?.toFixed(2)}</span> USD · Coinbase <span className="font-semibold">{last.balances.coinbaseEth?.toFixed(6)}</span> ETH
+              </div>
+            )}
             {last.blockReason && <div className="text-amber-500">blocked: {last.blockReason}</div>}
             <LegView label="Leg 1" leg={last.buyLeg} />
             <LegView label="Leg 2" leg={last.sellLeg} />

@@ -812,7 +812,9 @@ async function coinbaseRequest<T>(
   path: string,
   body?: unknown
 ): Promise<T> {
-  const jwt = buildCoinbaseJwt(creds.coinbaseKey, creds.coinbaseSecret, method, path);
+  // Coinbase JWTs sign the path WITHOUT the query string — including it
+  // makes every paginated/filtered request fail auth.
+  const jwt = buildCoinbaseJwt(creds.coinbaseKey, creds.coinbaseSecret, method, path.split("?")[0]);
   const resp = await fetch(`${COINBASE_BASE}${path}`, {
     method,
     headers: {
@@ -885,14 +887,25 @@ export async function getCoinbaseOrderBook(pair: Pair = "SOL/USD"): Promise<{
 }
 
 export async function getCoinbaseBalances(creds: CoinbaseCreds): Promise<BalanceEntry[]> {
-  const data = await coinbaseRequest<{ accounts: Array<{ currency: string; available_balance: { value: string } }> }>(
-    creds,
-    "GET",
-    "/api/v3/brokerage/accounts"
-  );
-  return (data.accounts || [])
-    .filter((a) => parseFloat(a.available_balance.value) > 0)
-    .map((a) => ({ currency: a.currency, amount: parseFloat(a.available_balance.value) }));
+  // The accounts endpoint is PAGINATED (default ~49 per page). Accounts with
+  // funds can land on later pages behind dozens of zero-balance currencies —
+  // reading only page 1 silently reports real holdings as 0. Walk every page.
+  const out: BalanceEntry[] = [];
+  let cursor: string | undefined;
+  for (let page = 0; page < 20; page++) {
+    const qs = `limit=250${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`;
+    const data = await coinbaseRequest<{
+      accounts: Array<{ currency: string; available_balance: { value: string } }>;
+      has_next?: boolean; cursor?: string;
+    }>(creds, "GET", `/api/v3/brokerage/accounts?${qs}`);
+    for (const a of data.accounts || []) {
+      const amount = parseFloat(a.available_balance.value);
+      if (amount > 0) out.push({ currency: a.currency, amount });
+    }
+    if (!data.has_next || !data.cursor) break;
+    cursor = data.cursor;
+  }
+  return out;
 }
 
 export async function coinbaseMarketOrder(

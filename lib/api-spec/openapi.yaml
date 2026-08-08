@@ -1555,6 +1555,13 @@ components:
           type: string
           description: dry_run_ok | blocked | buy_failed | sell_failed | partial_sell | completed | indeterminate
         blockReason: { type: string, nullable: true }
+        balances:
+          type: object
+          nullable: true
+          description: Balances actually read from the exchanges during the check
+          properties:
+            krakenUsd: { type: number }
+            coinbaseEth: { type: number }
         buyLeg:
           allOf: [{ $ref: "#/components/schemas/TwoExchangeTestLeg" }]
           nullable: true

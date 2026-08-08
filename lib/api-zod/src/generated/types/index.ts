@@ -97,4 +97,5 @@ export * from './triExecuteResultPriceSource';
 export * from './twoExchangeTestLeg';
 export * from './twoExchangeTestRequest';
 export * from './twoExchangeTestResult';
+export * from './twoExchangeTestResultBalances';
 export * from './wsStatus';

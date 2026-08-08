@@ -623,6 +623,10 @@ export const RunTwoExchangeTestResponse = zod.object({
   "isDryRun": zod.boolean(),
   "outcome": zod.string().describe('dry_run_ok | blocked | buy_failed | sell_failed | partial_sell | completed | indeterminate'),
   "blockReason": zod.string().nullish(),
+  "balances": zod.object({
+  "krakenUsd": zod.number().optional(),
+  "coinbaseEth": zod.number().optional()
+}).nullish().describe('Balances actually read from the exchanges during the check'),
   "buyLeg": zod.object({
   "exchange": zod.string().optional(),
   "side": zod.string().optional(),
