@@ -658,6 +658,13 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
 
         const best = entries && entries.length > 0 ? entries[0] : null;
 
+        if (!best) {
+          addLog(
+            "warning",
+            `[FORCE] Scan returned no prices for the ${settingsRef.current.enabledPairs.length} enabled pair(s) — feeds may be stale or unavailable`,
+          );
+        }
+
         if (best) {
           // ── Fresh price check — REST bypass, no WS cache ─────────────────
           // The scan result may be several seconds old (served from the same
@@ -726,6 +733,17 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
       // Always request SOL/USD explicitly (enabledPairs:["SOL/USD"]) so /prices
       // cannot return a non-SOL pair whose price would be used for sizing.
       if (!priceData) {
+        // Respect the pair filter: only fall back to SOL/USD when the trader
+        // actually enabled it. Otherwise, executing on SOL/USD would silently
+        // bypass the enabled-pairs setting — abort with a clear warning instead.
+        if (!settingsRef.current.enabledPairs.includes("SOL/USD")) {
+          addLog(
+            "error",
+            "[FORCE] All enabled pairs are currently unavailable and SOL/USD is not enabled — aborting. " +
+            "Enable SOL/USD in Config or wait for price feeds to recover.",
+          );
+          return;
+        }
         addLog("info", "[FORCE] Fetching SOL/USD prices (fallback)...");
         let fetched: PriceData;
         try {
