@@ -200,7 +200,9 @@ const triRoute = (description: string) => ({
 /** Maker preflight: $1.00 edge (clears the $0.25 maker floor at $10). Fresh
  *  object per call — the executor mutates leg limit prices. */
 const makerPf = () => ({
-  profitUsd: 1.0, slippagePct: 0, confidencePct: 90,
+  // Kept under the canonical route-sanity cap (ROUTE_SANITY_MAX_NET_PCT,
+  // default 5% of size): an implausible net now blocks execution by design.
+  profitUsd: 0.30, slippagePct: 0, confidencePct: 90,
   legs: [
     { pair: "ATOMUSD",  side: "buy",  volume: 2,      limitPrice: 5 },
     { pair: "ATOMXBT",  side: "sell", volume: 2,      limitPrice: 0.0001 },

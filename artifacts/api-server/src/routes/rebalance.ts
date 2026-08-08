@@ -49,7 +49,7 @@ import {
   PAIRS, type Pair,
 } from "../lib/exchange";
 import { geminiRoles, type GeminiCreds } from "../lib/gemini";
-import { geminiIocLimitOrder, geminiOrderStatus, geminiSymbolDetails } from "../lib/gemini-exec";
+import { geminiIocLimitOrder, geminiOrderStatus, geminiSymbolDetails, isExplicitGeminiReject } from "../lib/gemini-exec";
 
 const router: IRouter = Router();
 
@@ -98,6 +98,7 @@ function isDeterministicRejection(e: unknown): boolean {
   if (e instanceof KrakenPrecisionError) return true;
   const m = e instanceof Error ? e.message : String(e);
   if (CLIENT_PREFLIGHT_REJECTION.test(m)) return true;
+  if (isExplicitGeminiReject(m)) return true; // Gemini's own explicit refusal to create the order
   return /EOrder:Order minimum not met|EOrder:Cost minimum not met|EOrder:Volume minimum not met|EGeneral:Invalid arguments|EOrder:Invalid price|EOrder:Invalid order|EOrder:Unknown pair|InvalidQuantity|Coinbase IOC order rejected/i.test(m);
 }
 
@@ -128,7 +129,9 @@ async function venueMins(venue: LiveVenueId, asset: string, maxAgeMs?: number): 
     const kPair = (OB_USD_PAIRS as Record<string, string>)[asset] ?? KRAKEN_EXTRA_PAIRS[asset];
     if (!kPair) throw new Error(`no Kraken pair mapping for ${asset}`);
     const m = await krakenPairMeta(kPair, maxAgeMs);
-    return { minQty: m.ordermin, minNotionalUsd: m.costmin, qtyStepText: null };
+    // Kraken quantity step = 10^-lot_decimals (normalizeKrakenVolume enforces
+    // it at submit; exposed here so plans/blocks can display the exact step).
+    return { minQty: m.ordermin, minNotionalUsd: m.costmin, qtyStepText: (10 ** -m.lotDecimals).toFixed(m.lotDecimals) };
   }
   if (venue === "coinbase") {
     const pair = (PAIRS as readonly string[]).includes(`${asset}/USD`) ? (`${asset}/USD` as Pair) : null;

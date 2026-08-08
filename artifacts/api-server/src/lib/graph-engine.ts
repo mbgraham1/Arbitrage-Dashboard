@@ -152,7 +152,7 @@ export interface GraphRoute {
   profitPct: number;
   slippagePct: number;
   /** Whether the net profit exceeds a positive threshold */
-  status: "VIABLE" | "REJECTED";
+  status: "VIABLE" | "REJECTED" | "PRICING CONSISTENCY ERROR";
   /** True ONLY when the route is safe to fire live: an executor-supported shape,
    *  every leg priced from a LIVE stream book, and caller-supplied detected fees. */
   executable: boolean;

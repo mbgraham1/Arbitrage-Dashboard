@@ -13,3 +13,6 @@ description: Unified live-execution gates — 200ms per-leg freshness, consecuti
 
 **Why:** real money at $10 sizes; user demanded strictly truthful displayed profit and stricter execution even if the bot fires less.
 **How to apply:** any new scanner/executor must reuse these gates and the buffer-inclusive display convention; never add an optimistic fee default or top-of-book preview.
+
+## Canonical route-sanity guard (2026-08-08)
+`lib/route-sanity.ts` routeSanityError(startUsd, net, gross?) — blocks nets above ROUTE_SANITY_MAX_NET_PCT (default 5% of size) or net>gross as "PRICING CONSISTENCY ERROR". Wired at: graph-scan display, xv-scan blocker chain, xv execute re-projection, triangle preflight, cross pre-fire. Force/big-edge bypasses skip history gates only — never this. Test fixtures must use sub-cap profits.

@@ -3384,7 +3384,7 @@ components:
         netProfitUsd: { type: number }
         profitPct: { type: number }
         slippagePct: { type: number }
-        status: { type: string, enum: [VIABLE, REJECTED] }
+        status: { type: string, enum: [VIABLE, REJECTED, "PRICING CONSISTENCY ERROR"] }
         executable:
           type: boolean
           description: "True when the live executor supports this route shape (Kraken triangle or 2-leg cross-exchange). Unsupported shapes are dry-run only."

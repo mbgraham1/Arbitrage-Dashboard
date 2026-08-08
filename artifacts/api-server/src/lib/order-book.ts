@@ -972,7 +972,13 @@ export async function preflightObCycle(
     const mVolumeB = cross.aIsQuote ? mVolumeA / priceCross : mVolumeA * priceCross;
     const usdFinal = mVolumeB * priceSellB;
     const gross    = usdFinal - sizeUsd;
-    const feeUsd   = (feesPct / 100) * (sizeUsd + sizeUsd + usdFinal); // per-leg on notional
+    // Per-leg fee on each leg's ACTUAL notional (USD value of assets exchanged):
+    // leg 1 notional = sizeUsd; leg 3 notional = usdFinal. Cross-leg notional is
+    // the USD value of what changes hands there: buying B with A (aIsQuote) the
+    // A spent is worth ~sizeUsd; selling A for B (!aIsQuote) the B received is
+    // worth ~usdFinal. Previously hard-coded sizeUsd for both orientations.
+    const crossNotionalUsd = cross.aIsQuote ? sizeUsd : usdFinal;
+    const feeUsd   = (feesPct / 100) * (sizeUsd + crossNotionalUsd + usdFinal); // per-leg on notional
     const legs: [ObExecutionLeg, ObExecutionLeg, ObExecutionLeg] = [
       { pair: pairA,      side: "buy",                       volume: mVolumeA, limitPrice: priceBuyA  },
       cross.aIsQuote

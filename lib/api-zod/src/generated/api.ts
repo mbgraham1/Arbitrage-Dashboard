@@ -2099,7 +2099,7 @@ export const GetGraphScanResponse = zod.object({
   "netProfitUsd": zod.number(),
   "profitPct": zod.number(),
   "slippagePct": zod.number(),
-  "status": zod.enum(['VIABLE', 'REJECTED']),
+  "status": zod.enum(['VIABLE', 'REJECTED', 'PRICING CONSISTENCY ERROR']),
   "executable": zod.boolean().describe('True when the live executor supports this route shape (Kraken triangle or 2-leg cross-exchange). Unsupported shapes are dry-run only.'),
   "histLiveAttempts": zod.number().optional().describe('Recent live execution attempts recorded for this route+style (max 20 considered).'),
   "histFillRate": zod.number().nullish().describe('Historical live fill rate 0..1; null until the route has ≥10 live attempts (insufficient history to judge).'),

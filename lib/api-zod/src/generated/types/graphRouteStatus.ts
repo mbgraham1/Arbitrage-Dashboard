@@ -12,4 +12,5 @@ export type GraphRouteStatus = typeof GraphRouteStatus[keyof typeof GraphRouteSt
 export const GraphRouteStatus = {
   VIABLE: 'VIABLE',
   REJECTED: 'REJECTED',
+  PRICING_CONSISTENCY_ERROR: 'PRICING CONSISTENCY ERROR',
 } as const;

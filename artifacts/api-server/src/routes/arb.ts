@@ -62,6 +62,7 @@ import { getBestPairPrices, getTriPrices, getBtcTriPrices, scanAllPairs, getPair
 import { scanOrderBookCycles, preflightObCycle, discoverCrossPairs, freshJoinPrice, makerQuote, takerCycleBreakdown, cachedTakerCycleBreakdown, getEventScan, krakenStreamStats, getStreamBook, waitForBookTouch, formatLegAges, OB_ASSETS, OB_USD_PAIRS, CROSS_LOOKUP, type ObAsset } from "../lib/order-book";
 import { scanGraphOpportunities, type GeminiScanInput, type GeminiEdgeBook, type BookLevels } from "../lib/graph-engine";
 import { crossTakerBreakdown } from "../lib/cross-pricing";
+import { routeSanityError } from "../lib/route-sanity";
 import { projectMakerHedge, bestMakerHedgeProjection, projectTakerTaker, type MmProjection, type MmDirection } from "../lib/cross-mm";
 import { detectFees as detectRealFees } from "../lib/fees";
 import { coinbaseBookKey, coinbaseStreamStats, getCoinbaseStreamBook, getGeminiStreamBook, startGeminiBookStream } from "../lib/book-stream";
@@ -518,6 +519,15 @@ router.get("/arb/graph-scan", async (req, res): Promise<void> => {
       if (r.safetyBufferUsd == null) r.safetyBufferUsd = graphSafetyBufferUsd;
       r.netAfterBufferUsd = r.netProfitUsd - r.safetyBufferUsd;
       r.status = r.netAfterBufferUsd > 0 ? "VIABLE" : "REJECTED";
+      // Canonical sanity guard: an implausible net (unit inversion, notional
+      // reset, corrupt book) must never display as viable or reach execution.
+      const sanity = routeSanityError(r.startUsd, r.netProfitUsd, r.grossProfitUsd);
+      if (sanity) {
+        r.status = "PRICING CONSISTENCY ERROR";
+        r.executable = false;
+        r.researchReason = sanity;
+        r.netAfterBufferUsd = Math.min(r.netAfterBufferUsd, 0);
+      }
     }
     // Fill-rate-weighted ranking (advisor-reviewed): rank executable routes by
     // expected REALIZED profit — net profit × historical live fill rate — not
@@ -1073,6 +1083,16 @@ async function runKrakenTriangle(input: TriangleExecInput, reqLog: ReqLog): Prom
     const pf = await preflightObCycle(assetA as ObAsset, assetB as ObAsset, tradeSizeUsd, effectiveFeesPct, takerOnly ? "taker" : "maker", input.maxQuoteAgeMs);
     if (!pf) {
       return { body: { success: false, isDryRun, executed: false, route, preflightProfitUsd: null, error: "Could not fetch fresh order books (or depth can't absorb the size)." } };
+    }
+    // Canonical sanity guard on the fresh pre-fire number: an implausible net
+    // (unit inversion, notional reset, corrupt book) must never fire — this
+    // gate cannot be bypassed by force mode or big-edge history bypasses.
+    {
+      const sanityErr = routeSanityError(tradeSizeUsd, pf.profitUsd);
+      if (sanityErr) {
+        reqLog.error({ route, freshProfitUsd: pf.profitUsd, tradeSizeUsd }, "PRICING CONSISTENCY ERROR — triangle pre-fire net implausible; execution blocked");
+        return { body: { success: false, isDryRun, executed: false, route, preflightProfitUsd: pf.profitUsd, error: sanityErr } };
+      }
     }
     // Execution gate: fresh profit AFTER FEES must clear the caller's
     // minProfitUsd floor (flat USD, not scaled by trade size). Taker mode
@@ -2799,6 +2819,16 @@ router.post("/arb/graph-execute", async (req, res): Promise<void> => {
       if (Math.abs(route.netProfitUsd - crossBd.netProfitUsd) > tol) {
         req.log.error({ route: route.description, scannerNetUsd: route.netProfitUsd, prefireNetUsd: crossBd.netProfitUsd, toleranceUsd: tol, legs: crossBd.legDiag }, "PRICING CONSISTENCY ERROR — cross scanner and pre-fire disagree on the same snapshot; execution blocked");
         res.json({ success: false, isDryRun: false, executed: false, route: route.description, preflightProfitUsd: crossBd.netProfitUsd, error: `PRICING CONSISTENCY ERROR: scanner net $${route.netProfitUsd.toFixed(4)} vs pre-fire net $${crossBd.netProfitUsd.toFixed(4)} on the same snapshot (tolerance $${tol.toFixed(4)}). Execution blocked — this is a pricing bug, not market movement.` });
+        return;
+      }
+    }
+    // Canonical sanity guard on the fresh cross pre-fire net — cannot be
+    // bypassed by force mode or big-edge bypasses (those only skip history gates).
+    {
+      const sanityErr = routeSanityError(tradeSizeUsd, crossBd.netProfitUsd);
+      if (sanityErr) {
+        req.log.error({ route: route.description, prefireNetUsd: crossBd.netProfitUsd, tradeSizeUsd }, "PRICING CONSISTENCY ERROR — cross pre-fire net implausible; execution blocked");
+        res.json({ success: false, isDryRun: false, executed: false, route: route.description, preflightProfitUsd: crossBd.netProfitUsd, error: sanityErr });
         return;
       }
     }

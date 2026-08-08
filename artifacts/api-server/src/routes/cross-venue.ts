@@ -30,6 +30,7 @@ import { z } from "zod";
 import { db, tradesTable } from "@workspace/db";
 import { getStreamBook, getCoinbaseStreamBook, getGeminiStreamBook, startGeminiBookStream, geminiStreamStats, onBookUpdate, coinbaseBookKey, geminiBookKey, type StreamBook } from "../lib/book-stream";
 import { OB_ASSETS, OB_USD_PAIRS, type ObAsset } from "../lib/order-book";
+import { routeSanityError } from "../lib/route-sanity";
 import {
   getKrakenBalances,
   getCoinbaseAssetDetail,
@@ -358,7 +359,13 @@ export async function evalRoutesForAsset(asset: string, vs: Record<LiveVenueId, 
       let blocker: string;
       const g = bestFeasible ?? best;
       const oldestLegVenue = g.buyAgeMs >= g.sellAgeMs ? buy : sell;
-      if (g.quoteAgeMs > maxQuoteAgeMs) {
+      // Canonical sanity guard: an implausible projected net (unit inversion,
+      // corrupt/inverted book) must never rank, display, or auto-fire.
+      const sanityErr = routeSanityError(g.sizeUsd, g.netProfitUsd, g.grossSpreadUsd);
+      if (sanityErr) {
+        reason = sanityErr;
+        blocker = "PRICING CONSISTENCY ERROR";
+      } else if (g.quoteAgeMs > maxQuoteAgeMs) {
         reason = `books stale: oldest leg ${g.quoteAgeMs}ms > ${maxQuoteAgeMs}ms`;
         blocker = `STALE ${oldestLegVenue.toUpperCase()} BOOK ${g.quoteAgeMs}ms`;
       } else if (g.netAfterBufferUsd < minNetUsd) {
@@ -663,6 +670,13 @@ async function executeXvCycle(b: z.infer<typeof ExecuteBody>, log: XvLogger): Pr
     // 4. Re-project on CURRENT books with DETECTED fees; all gates re-checked.
     const p = project(asset, buyVenue, sellVenue, sizeUsd, bs.takerPct, ss.takerPct);
     if (!p) { skip("no live depth on one/both venues (or depth cannot absorb the size)"); return out!; }
+    // Canonical sanity guard on the FRESH pre-fire projection — an implausible
+    // net (unit inversion, corrupt book) must never fire, even under force or
+    // big-edge bypasses; those only bypass history gates, never this.
+    {
+      const sanityErr = routeSanityError(p.sizeUsd, p.netProfitUsd, p.grossSpreadUsd);
+      if (sanityErr) { skip(sanityErr, { projection: p }); return out!; }
+    }
     if (p.quoteAgeMs > maxQuoteAgeMs) { skip(`books stale: oldest leg ${p.quoteAgeMs}ms > ${maxQuoteAgeMs}ms`, { projection: p }); return out!; }
     if (p.netAfterBufferUsd < minNetUsd) { skip(`net-after-buffer $${p.netAfterBufferUsd.toFixed(4)} below floor $${minNetUsd.toFixed(2)} — never firing a negative/thin edge`, { projection: p }); return out!; }
     if (gemDetails && p.baseQty < gemDetails.minOrderSize * 1.02) { skip(`quantity ${p.baseQty.toFixed(8)} too close to Gemini min ${gemDetails.minOrderSize} — partial quantization could breach the minimum`, { projection: p }); return out!; }
