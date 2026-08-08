@@ -14,7 +14,7 @@
  * per-leg ages, snapshot identity.
  */
 
-import { getStreamBook, getCoinbaseStreamBook } from "./book-stream";
+import { getStreamBook, getCoinbaseStreamBook, getGeminiStreamBook, type StreamBook } from "./book-stream";
 import { OB_USD_PAIRS, type ObAsset, type LegAge } from "./order-book";
 
 type Level = [number, number];
@@ -145,6 +145,90 @@ export function bestMakerHedgeProjection(
   if (!buy) return sell;
   if (!sell) return buy;
   return buy.projectedNetUsd >= sell.projectedNetUsd ? buy : sell;
+}
+
+// ── Venue-agnostic maker→hedge projection (kraken/coinbase/gemini) ───────────
+export type MmVenue = "kraken" | "coinbase" | "gemini";
+
+/** Live stream book for a venue+asset (null when absent/empty). Kraken uses its
+ *  REST pair key; Coinbase uses "ASSET-USD"; Gemini uses "ASSETUSD" (age is
+ *  local-arrival based — Gemini l2 carries no exchange timestamp). */
+function mmBookFor(venue: MmVenue, asset: ObAsset): (StreamBook & { ageMs: number }) | null {
+  if (venue === "kraken") return getStreamBook(OB_USD_PAIRS[asset]);
+  if (venue === "coinbase") return getCoinbaseStreamBook(`${asset}-USD`);
+  return getGeminiStreamBook(`${asset}USD`);
+}
+function mmLegTag(venue: MmVenue, asset: ObAsset): string {
+  if (venue === "kraken") return OB_USD_PAIRS[asset];
+  if (venue === "coinbase") return `${asset}-USD`;
+  return `${asset}USD`;
+}
+
+/**
+ * Generalized maker-post / taker-hedge projection for ANY ordered pair of
+ * venues among kraken/coinbase/gemini. Mirrors projectCbMakerHedge's economics
+ * exactly (maker joins the top of its own book — post-only never crosses; hedge
+ * is depth-walked on the other venue for the SAME qty). Returns null when a
+ * book is missing or hedge depth is insufficient. `makerPriceOverride`/
+ * `qtyOverride` pin the projection to an ACTUAL resting order (cancel-on-move
+ * gate + confirmed-fill hedge sizing). `direction` = the side of the MAKER order.
+ */
+export function projectVenueMakerHedge(
+  asset: ObAsset,
+  makerVenue: MmVenue,
+  hedgeVenue: MmVenue,
+  direction: MmDirection,
+  sizeUsd: number,
+  makerFeePct: number,
+  hedgeTakerFeePct: number,
+  makerPriceOverride?: number,
+  qtyOverride?: number,
+): MmProjection | null {
+  if (makerVenue === hedgeVenue) return null;
+  const mBook = mmBookFor(makerVenue, asset);
+  const hBook = mmBookFor(hedgeVenue, asset);
+  if (!mBook || !hBook) return null;
+
+  const mTopBid = mBook.bids[0]?.[0] ?? 0;
+  const mTopAsk = mBook.asks[0]?.[0] ?? 0;
+  if (mTopBid <= 0 || mTopAsk <= 0) return null;
+
+  const makerPrice = makerPriceOverride ?? (direction === "buy" ? mTopBid : mTopAsk);
+  if (!(makerPrice > 0)) return null;
+  const makerQty = qtyOverride ?? sizeUsd / makerPrice;
+  if (!(makerQty > 0)) return null;
+  const makerNotional = makerQty * makerPrice;
+  const makerFeeUsd = makerNotional * (makerFeePct / 100);
+
+  let projectedNetUsd: number, hedgeVwapPx: number, hedgeTopPx: number, hedgeFeeUsd: number, hedgeSlippageUsd: number;
+  if (direction === "buy") {
+    // Maker BUY → hedge = SELL makerQty into the hedge venue's bids.
+    const h = walkSellIntoBids(hBook.bids, makerQty);
+    if (!h) return null;
+    hedgeVwapPx = h.usd / makerQty; hedgeTopPx = h.top;
+    hedgeFeeUsd = h.usd * (hedgeTakerFeePct / 100);
+    hedgeSlippageUsd = Math.max(0, h.top * makerQty - h.usd);
+    projectedNetUsd = h.usd - makerNotional - makerFeeUsd - hedgeFeeUsd;
+  } else {
+    // Maker SELL → hedge = BUY makerQty back from the hedge venue's asks.
+    const h = walkBuyQtyFromAsks(hBook.asks, makerQty);
+    if (!h) return null;
+    hedgeVwapPx = h.usd / makerQty; hedgeTopPx = h.top;
+    hedgeFeeUsd = h.usd * (hedgeTakerFeePct / 100);
+    hedgeSlippageUsd = Math.max(0, h.usd - h.top * makerQty);
+    projectedNetUsd = makerNotional - h.usd - makerFeeUsd - hedgeFeeUsd;
+  }
+
+  const legAges: LegAge[] = [
+    { pair: `${mmLegTag(makerVenue, asset)}[${makerVenue}·maker]`, ageMs: mBook.ageMs, recvAgeMs: Math.max(0, Date.now() - mBook.updatedAtMs) },
+    { pair: `${mmLegTag(hedgeVenue, asset)}[${hedgeVenue}·hedge]`, ageMs: hBook.ageMs, recvAgeMs: Math.max(0, Date.now() - hBook.updatedAtMs) },
+  ];
+  return {
+    direction, makerPrice, makerQty, projectedNetUsd, makerFeeUsd, hedgeFeeUsd,
+    hedgeVwapPx, hedgeTopPx, hedgeSlippageUsd, legAges,
+    quoteAgeMs: Math.max(mBook.ageMs, hBook.ageMs),
+    marketUpdateMs: Math.max(mBook.updatedAtMs, hBook.updatedAtMs),
+  };
 }
 
 /**

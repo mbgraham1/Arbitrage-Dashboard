@@ -8,6 +8,7 @@ import discoveryRouter from "./discovery";
 import geminiRouter from "./gemini";
 import crossVenueRouter from "./cross-venue";
 import profitHunterRouter from "./profit-hunter";
+import rebalanceRouter from "./rebalance";
 
 const router: IRouter = Router();
 
@@ -20,5 +21,6 @@ router.use(discoveryRouter);
 router.use(geminiRouter);
 router.use(crossVenueRouter);
 router.use(profitHunterRouter);
+router.use(rebalanceRouter);
 
 export default router;

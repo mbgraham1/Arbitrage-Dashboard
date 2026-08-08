@@ -78,6 +78,13 @@ import type {
   PairScanEntry,
   PreloadedCredentials,
   PriceData,
+  RebalanceArmRequest,
+  RebalanceArmed,
+  RebalanceCaps,
+  RebalanceClearLatchRequest,
+  RebalanceClearLatchResult,
+  RebalancePlan,
+  RebalanceStatus,
   RouteHistoryClearResult,
   ScanAllPairsParams,
   TradeRecord,
@@ -95,8 +102,15 @@ import type {
   TwoXFeesResult,
   TwoXScanResult,
   TwoXStats,
+  XvAutoStartError,
+  XvAutoStartRequest,
+  XvAutoStartResult,
+  XvAutoStatus,
+  XvAutoStopResult,
   XvExecuteRequest,
   XvExecuteResult,
+  XvPlan,
+  XvPlanParams,
   XvScanParams,
   XvScanRequest,
   XvScanResult,
@@ -2924,6 +2938,742 @@ export function useXvStats<TData = Awaited<ReturnType<typeof xvStats>>, TError =
  ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
 
   const queryOptions = getXvStatsQueryOptions(options)
+
+  const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+
+export const getXvAutoStartUrl = () => {
+
+
+
+
+  return `/api/arb/xv-auto/start`
+}
+
+/**
+ * Arms an event-driven engine that re-evaluates the affected asset on every WebSocket book tick and fires the shared execution core ONLY when every hard guard passes on that same fresh snapshot — identical guards to the manual Execute path (this is not an override). Requires at least TWO venues with verified keys, DETECTED fee tiers, and verified balances. Freshness can only be tightened, never loosened past the 200ms hard gate. Auto never transfers assets between exchanges. Keys are held in memory only and wiped on stop or server restart.
+ * @summary Arm the event-driven cross-venue Auto-Execute engine
+ */
+export const xvAutoStart = async (xvAutoStartRequest?: XvAutoStartRequest, options?: RequestInit): Promise<XvAutoStartResult> => {
+
+  return customFetch<XvAutoStartResult>(getXvAutoStartUrl(),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(xvAutoStartRequest)
+  }
+);}
+
+
+
+
+
+export const getXvAutoStartMutationOptions = <TError = ErrorType<XvAutoStartError | ErrorResponse>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof xvAutoStart>>, TError,{data?: BodyType<XvAutoStartRequest>}, TContext>, request?: SecondParameter<typeof customFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof xvAutoStart>>, TError,{data?: BodyType<XvAutoStartRequest>}, TContext> => {
+
+const mutationKey = ['xvAutoStart'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof xvAutoStart>>, {data?: BodyType<XvAutoStartRequest>}> = (props) => {
+          const {data} = props ?? {};
+
+          return  xvAutoStart(data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type XvAutoStartMutationResult = NonNullable<Awaited<ReturnType<typeof xvAutoStart>>>
+    export type XvAutoStartMutationBody = BodyType<XvAutoStartRequest> | undefined
+    export type XvAutoStartMutationError = ErrorType<XvAutoStartError | ErrorResponse>
+
+    /**
+ * @summary Arm the event-driven cross-venue Auto-Execute engine
+ */
+export const useXvAutoStart = <TError = ErrorType<XvAutoStartError | ErrorResponse>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof xvAutoStart>>, TError,{data?: BodyType<XvAutoStartRequest>}, TContext>, request?: SecondParameter<typeof customFetch>}
+ ): UseMutationResult<
+        Awaited<ReturnType<typeof xvAutoStart>>,
+        TError,
+        {data?: BodyType<XvAutoStartRequest>},
+        TContext
+      > => {
+      return useMutation(getXvAutoStartMutationOptions(options));
+    }
+
+export const getXvAutoStopUrl = () => {
+
+
+
+
+  return `/api/arb/xv-auto/stop`
+}
+
+/**
+ * @summary Disarm the cross-venue Auto-Execute engine (wipes in-memory keys)
+ */
+export const xvAutoStop = async ( options?: RequestInit): Promise<XvAutoStopResult> => {
+
+  return customFetch<XvAutoStopResult>(getXvAutoStopUrl(),
+  {
+    ...options,
+    method: 'POST'
+
+
+  }
+);}
+
+
+
+
+
+export const getXvAutoStopMutationOptions = <TError = ErrorType<unknown>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof xvAutoStop>>, TError,void, TContext>, request?: SecondParameter<typeof customFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof xvAutoStop>>, TError,void, TContext> => {
+
+const mutationKey = ['xvAutoStop'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof xvAutoStop>>, void> = () => {
+
+
+          return  xvAutoStop(requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type XvAutoStopMutationResult = NonNullable<Awaited<ReturnType<typeof xvAutoStop>>>
+
+    export type XvAutoStopMutationError = ErrorType<unknown>
+
+    /**
+ * @summary Disarm the cross-venue Auto-Execute engine (wipes in-memory keys)
+ */
+export const useXvAutoStop = <TError = ErrorType<unknown>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof xvAutoStop>>, TError,void, TContext>, request?: SecondParameter<typeof customFetch>}
+ ): UseMutationResult<
+        Awaited<ReturnType<typeof xvAutoStop>>,
+        TError,
+        void,
+        TContext
+      > => {
+      return useMutation(getXvAutoStopMutationOptions(options));
+    }
+
+export const getXvAutoStatusUrl = () => {
+
+
+
+
+  return `/api/arb/xv-auto/status`
+}
+
+/**
+ * @summary Cross-venue Auto-Execute engine status + decision log
+ */
+export const xvAutoStatus = async ( options?: RequestInit): Promise<XvAutoStatus> => {
+
+  return customFetch<XvAutoStatus>(getXvAutoStatusUrl(),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getXvAutoStatusQueryKey = () => {
+    return [
+    `/api/arb/xv-auto/status`
+    ] as const;
+    }
+
+
+export const getXvAutoStatusQueryOptions = <TData = Awaited<ReturnType<typeof xvAutoStatus>>, TError = ErrorType<unknown>>( options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof xvAutoStatus>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getXvAutoStatusQueryKey();
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof xvAutoStatus>>> = ({ signal }) => xvAutoStatus({ signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof xvAutoStatus>>, TError, TData> & { queryKey: QueryKey }
+}
+
+export type XvAutoStatusQueryResult = NonNullable<Awaited<ReturnType<typeof xvAutoStatus>>>
+export type XvAutoStatusQueryError = ErrorType<unknown>
+
+
+/**
+ * @summary Cross-venue Auto-Execute engine status + decision log
+ */
+
+export function useXvAutoStatus<TData = Awaited<ReturnType<typeof xvAutoStatus>>, TError = ErrorType<unknown>>(
+  options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof xvAutoStatus>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+
+ ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+
+  const queryOptions = getXvAutoStatusQueryOptions(options)
+
+  const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+
+export const getXvPlanUrl = (params?: XvPlanParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/arb/xv-plan?${stringifiedParams}` : `/api/arb/xv-plan`
+}
+
+/**
+ * For every positive-net route on CURRENT books, computes exactly what must sit WHERE before execution — no assets are ever transferred during a trade. Buy side needs notional + taker fee + 1% margin; sell side needs base qty + 2% margin (the same margins the executor enforces). Requirements are compared against VERIFIED live balances only: READY, SHORT by an exact amount, or UNVERIFIED (never treated as $0 or as sufficient). Planning uses a relaxed 60s book-age window so funding advice doesn't flap; execution still requires ≤200ms freshness. NEVER trades.
+ * @summary Cross-venue inventory / pre-positioning planner (never trades)
+ */
+export const xvPlan = async (xvScanRequest?: XvScanRequest,
+    params?: XvPlanParams, options?: RequestInit): Promise<XvPlan> => {
+
+  return customFetch<XvPlan>(getXvPlanUrl(params),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(xvScanRequest)
+  }
+);}
+
+
+
+
+
+export const getXvPlanMutationOptions = <TError = ErrorType<unknown>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof xvPlan>>, TError,{data?: BodyType<XvScanRequest>;params?: XvPlanParams}, TContext>, request?: SecondParameter<typeof customFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof xvPlan>>, TError,{data?: BodyType<XvScanRequest>;params?: XvPlanParams}, TContext> => {
+
+const mutationKey = ['xvPlan'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof xvPlan>>, {data?: BodyType<XvScanRequest>;params?: XvPlanParams}> = (props) => {
+          const {data,params} = props ?? {};
+
+          return  xvPlan(data,params,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type XvPlanMutationResult = NonNullable<Awaited<ReturnType<typeof xvPlan>>>
+    export type XvPlanMutationBody = BodyType<XvScanRequest> | undefined
+    export type XvPlanMutationError = ErrorType<unknown>
+
+    /**
+ * @summary Cross-venue inventory / pre-positioning planner (never trades)
+ */
+export const useXvPlan = <TError = ErrorType<unknown>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof xvPlan>>, TError,{data?: BodyType<XvScanRequest>;params?: XvPlanParams}, TContext>, request?: SecondParameter<typeof customFetch>}
+ ): UseMutationResult<
+        Awaited<ReturnType<typeof xvPlan>>,
+        TError,
+        {data?: BodyType<XvScanRequest>;params?: XvPlanParams},
+        TContext
+      > => {
+      return useMutation(getXvPlanMutationOptions(options));
+    }
+
+export const getRebalanceCapsUrl = () => {
+
+
+
+
+  return `/api/rebalance/caps`
+}
+
+/**
+ * Fail-closed capability probe: a venue can only participate in an action kind this proves it supports. Missing permissions are reported verbatim with the EXACT setting to change — never silently skipped.
+ * @summary Probe each venue's rebalance capabilities (local buy / withdraw)
+ */
+export const rebalanceCaps = async (xvScanRequest?: XvScanRequest, options?: RequestInit): Promise<RebalanceCaps> => {
+
+  return customFetch<RebalanceCaps>(getRebalanceCapsUrl(),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(xvScanRequest)
+  }
+);}
+
+
+
+
+
+export const getRebalanceCapsMutationOptions = <TError = ErrorType<unknown>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof rebalanceCaps>>, TError,{data?: BodyType<XvScanRequest>}, TContext>, request?: SecondParameter<typeof customFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof rebalanceCaps>>, TError,{data?: BodyType<XvScanRequest>}, TContext> => {
+
+const mutationKey = ['rebalanceCaps'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof rebalanceCaps>>, {data?: BodyType<XvScanRequest>}> = (props) => {
+          const {data} = props ?? {};
+
+          return  rebalanceCaps(data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type RebalanceCapsMutationResult = NonNullable<Awaited<ReturnType<typeof rebalanceCaps>>>
+    export type RebalanceCapsMutationBody = BodyType<XvScanRequest> | undefined
+    export type RebalanceCapsMutationError = ErrorType<unknown>
+
+    /**
+ * @summary Probe each venue's rebalance capabilities (local buy / withdraw)
+ */
+export const useRebalanceCaps = <TError = ErrorType<unknown>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof rebalanceCaps>>, TError,{data?: BodyType<XvScanRequest>}, TContext>, request?: SecondParameter<typeof customFetch>}
+ ): UseMutationResult<
+        Awaited<ReturnType<typeof rebalanceCaps>>,
+        TError,
+        {data?: BodyType<XvScanRequest>},
+        TContext
+      > => {
+      return useMutation(getRebalanceCapsMutationOptions(options));
+    }
+
+export const getRebalancePlanUrl = () => {
+
+
+
+
+  return `/api/rebalance/plan`
+}
+
+/**
+ * For the top positive-net cross-venue routes, plans the cheapest funding action to make each executable — LOCAL_BUY (buy the base asset on the venue that needs it, using USD already there) or TRANSFER (Kraken → elsewhere via a whitelisted named key). An action is only BENEFICIAL for routes with DETECTED fees on BOTH legs and VERIFIED balances, when the route's projected net still exceeds the action's full overhead; it is revalidated on ≤2s-fresh books immediately before a BOUNDED IOC limit order (never an unbounded market order). Transfers are planned with real withdrawal fees but NEVER auto-executed in v1. The daily cap is a rolling 24h ledger that survives restarts. Projections, not guarantees. NEVER trades.
+ * @summary Plan pre-positioning actions for the best positive-net routes (never fires)
+ */
+export const rebalancePlan = async (xvScanRequest?: XvScanRequest, options?: RequestInit): Promise<RebalancePlan> => {
+
+  return customFetch<RebalancePlan>(getRebalancePlanUrl(),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(xvScanRequest)
+  }
+);}
+
+
+
+
+
+export const getRebalancePlanMutationOptions = <TError = ErrorType<unknown>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof rebalancePlan>>, TError,{data?: BodyType<XvScanRequest>}, TContext>, request?: SecondParameter<typeof customFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof rebalancePlan>>, TError,{data?: BodyType<XvScanRequest>}, TContext> => {
+
+const mutationKey = ['rebalancePlan'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof rebalancePlan>>, {data?: BodyType<XvScanRequest>}> = (props) => {
+          const {data} = props ?? {};
+
+          return  rebalancePlan(data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type RebalancePlanMutationResult = NonNullable<Awaited<ReturnType<typeof rebalancePlan>>>
+    export type RebalancePlanMutationBody = BodyType<XvScanRequest> | undefined
+    export type RebalancePlanMutationError = ErrorType<unknown>
+
+    /**
+ * @summary Plan pre-positioning actions for the best positive-net routes (never fires)
+ */
+export const useRebalancePlan = <TError = ErrorType<unknown>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof rebalancePlan>>, TError,{data?: BodyType<XvScanRequest>}, TContext>, request?: SecondParameter<typeof customFetch>}
+ ): UseMutationResult<
+        Awaited<ReturnType<typeof rebalancePlan>>,
+        TError,
+        {data?: BodyType<XvScanRequest>},
+        TContext
+      > => {
+      return useMutation(getRebalancePlanMutationOptions(options));
+    }
+
+export const getRebalanceArmUrl = () => {
+
+
+
+
+  return `/api/rebalance/arm`
+}
+
+/**
+ * Arms an engine that, once per 30s tick, executes the single best BENEFICIAL LOCAL_BUY within the per-action cap, rolling 24h daily cap, and per-venue USD reserves — as a BOUNDED IOC limit order (never an unbounded market order) after a ≤2s-fresh revalidation of fees, depth, and net edge. Transfers are never fired automatically. Keys are held in memory only and wiped on stop. Refuses to act on assumed fees or unverified balances, or while the reconciliation latch is set (409).
+ * @summary Arm the Auto Rebalance funding engine (executes LOCAL BUYS only)
+ */
+export const rebalanceArm = async (rebalanceArmRequest: RebalanceArmRequest, options?: RequestInit): Promise<RebalanceArmed> => {
+
+  return customFetch<RebalanceArmed>(getRebalanceArmUrl(),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(rebalanceArmRequest)
+  }
+);}
+
+
+
+
+
+export const getRebalanceArmMutationOptions = <TError = ErrorType<ErrorResponse>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof rebalanceArm>>, TError,{data: BodyType<RebalanceArmRequest>}, TContext>, request?: SecondParameter<typeof customFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof rebalanceArm>>, TError,{data: BodyType<RebalanceArmRequest>}, TContext> => {
+
+const mutationKey = ['rebalanceArm'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof rebalanceArm>>, {data: BodyType<RebalanceArmRequest>}> = (props) => {
+          const {data} = props ?? {};
+
+          return  rebalanceArm(data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type RebalanceArmMutationResult = NonNullable<Awaited<ReturnType<typeof rebalanceArm>>>
+    export type RebalanceArmMutationBody = BodyType<RebalanceArmRequest>
+    export type RebalanceArmMutationError = ErrorType<ErrorResponse>
+
+    /**
+ * @summary Arm the Auto Rebalance funding engine (executes LOCAL BUYS only)
+ */
+export const useRebalanceArm = <TError = ErrorType<ErrorResponse>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof rebalanceArm>>, TError,{data: BodyType<RebalanceArmRequest>}, TContext>, request?: SecondParameter<typeof customFetch>}
+ ): UseMutationResult<
+        Awaited<ReturnType<typeof rebalanceArm>>,
+        TError,
+        {data: BodyType<RebalanceArmRequest>},
+        TContext
+      > => {
+      return useMutation(getRebalanceArmMutationOptions(options));
+    }
+
+export const getRebalanceStopUrl = () => {
+
+
+
+
+  return `/api/rebalance/stop`
+}
+
+/**
+ * @summary EMERGENCY STOP — disarm the rebalance engine and wipe in-memory keys
+ */
+export const rebalanceStop = async ( options?: RequestInit): Promise<RebalanceArmed> => {
+
+  return customFetch<RebalanceArmed>(getRebalanceStopUrl(),
+  {
+    ...options,
+    method: 'POST'
+
+
+  }
+);}
+
+
+
+
+
+export const getRebalanceStopMutationOptions = <TError = ErrorType<unknown>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof rebalanceStop>>, TError,void, TContext>, request?: SecondParameter<typeof customFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof rebalanceStop>>, TError,void, TContext> => {
+
+const mutationKey = ['rebalanceStop'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof rebalanceStop>>, void> = () => {
+
+
+          return  rebalanceStop(requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type RebalanceStopMutationResult = NonNullable<Awaited<ReturnType<typeof rebalanceStop>>>
+
+    export type RebalanceStopMutationError = ErrorType<unknown>
+
+    /**
+ * @summary EMERGENCY STOP — disarm the rebalance engine and wipe in-memory keys
+ */
+export const useRebalanceStop = <TError = ErrorType<unknown>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof rebalanceStop>>, TError,void, TContext>, request?: SecondParameter<typeof customFetch>}
+ ): UseMutationResult<
+        Awaited<ReturnType<typeof rebalanceStop>>,
+        TError,
+        void,
+        TContext
+      > => {
+      return useMutation(getRebalanceStopMutationOptions(options));
+    }
+
+export const getRebalanceClearLatchUrl = () => {
+
+
+
+
+  return `/api/rebalance/clear-latch`
+}
+
+/**
+ * Clears the durable reconciliation latch that was set when an earlier order's outcome could not be confirmed terminal. ONLY clear this AFTER checking the venue's order history to verify what actually happened — clearing lets the engine arm and act again. Requires an explicit `{ "confirm": true }` body.
+ * @summary Clear the durable reconciliation latch (only after checking the exchange)
+ */
+export const rebalanceClearLatch = async (rebalanceClearLatchRequest: RebalanceClearLatchRequest, options?: RequestInit): Promise<RebalanceClearLatchResult> => {
+
+  return customFetch<RebalanceClearLatchResult>(getRebalanceClearLatchUrl(),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(rebalanceClearLatchRequest)
+  }
+);}
+
+
+
+
+
+export const getRebalanceClearLatchMutationOptions = <TError = ErrorType<ErrorResponse>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof rebalanceClearLatch>>, TError,{data: BodyType<RebalanceClearLatchRequest>}, TContext>, request?: SecondParameter<typeof customFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof rebalanceClearLatch>>, TError,{data: BodyType<RebalanceClearLatchRequest>}, TContext> => {
+
+const mutationKey = ['rebalanceClearLatch'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof rebalanceClearLatch>>, {data: BodyType<RebalanceClearLatchRequest>}> = (props) => {
+          const {data} = props ?? {};
+
+          return  rebalanceClearLatch(data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type RebalanceClearLatchMutationResult = NonNullable<Awaited<ReturnType<typeof rebalanceClearLatch>>>
+    export type RebalanceClearLatchMutationBody = BodyType<RebalanceClearLatchRequest>
+    export type RebalanceClearLatchMutationError = ErrorType<ErrorResponse>
+
+    /**
+ * @summary Clear the durable reconciliation latch (only after checking the exchange)
+ */
+export const useRebalanceClearLatch = <TError = ErrorType<ErrorResponse>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof rebalanceClearLatch>>, TError,{data: BodyType<RebalanceClearLatchRequest>}, TContext>, request?: SecondParameter<typeof customFetch>}
+ ): UseMutationResult<
+        Awaited<ReturnType<typeof rebalanceClearLatch>>,
+        TError,
+        {data: BodyType<RebalanceClearLatchRequest>},
+        TContext
+      > => {
+      return useMutation(getRebalanceClearLatchMutationOptions(options));
+    }
+
+export const getRebalanceStatusUrl = () => {
+
+
+
+
+  return `/api/rebalance/status`
+}
+
+/**
+ * @summary Auto Rebalance engine status + activity log
+ */
+export const rebalanceStatus = async ( options?: RequestInit): Promise<RebalanceStatus> => {
+
+  return customFetch<RebalanceStatus>(getRebalanceStatusUrl(),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getRebalanceStatusQueryKey = () => {
+    return [
+    `/api/rebalance/status`
+    ] as const;
+    }
+
+
+export const getRebalanceStatusQueryOptions = <TData = Awaited<ReturnType<typeof rebalanceStatus>>, TError = ErrorType<unknown>>( options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof rebalanceStatus>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getRebalanceStatusQueryKey();
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof rebalanceStatus>>> = ({ signal }) => rebalanceStatus({ signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof rebalanceStatus>>, TError, TData> & { queryKey: QueryKey }
+}
+
+export type RebalanceStatusQueryResult = NonNullable<Awaited<ReturnType<typeof rebalanceStatus>>>
+export type RebalanceStatusQueryError = ErrorType<unknown>
+
+
+/**
+ * @summary Auto Rebalance engine status + activity log
+ */
+
+export function useRebalanceStatus<TData = Awaited<ReturnType<typeof rebalanceStatus>>, TError = ErrorType<unknown>>(
+  options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof rebalanceStatus>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+
+ ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+
+  const queryOptions = getRebalanceStatusQueryOptions(options)
 
   const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
 

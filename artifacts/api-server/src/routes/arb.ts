@@ -60,11 +60,13 @@ import {
 } from "../lib/exchange";
 import { getBestPairPrices, getTriPrices, getBtcTriPrices, scanAllPairs, getPairPrices, getAllPairSnapshots } from "../lib/price-cache";
 import { scanOrderBookCycles, preflightObCycle, discoverCrossPairs, freshJoinPrice, makerQuote, takerCycleBreakdown, cachedTakerCycleBreakdown, getEventScan, krakenStreamStats, getStreamBook, waitForBookTouch, formatLegAges, OB_ASSETS, OB_USD_PAIRS, CROSS_LOOKUP, type ObAsset } from "../lib/order-book";
-import { scanGraphOpportunities } from "../lib/graph-engine";
+import { scanGraphOpportunities, type GeminiScanInput, type GeminiEdgeBook, type BookLevels } from "../lib/graph-engine";
 import { crossTakerBreakdown } from "../lib/cross-pricing";
 import { projectMakerHedge, bestMakerHedgeProjection, projectTakerTaker, type MmProjection, type MmDirection } from "../lib/cross-mm";
 import { detectFees as detectRealFees } from "../lib/fees";
-import { coinbaseBookKey, coinbaseStreamStats, getCoinbaseStreamBook } from "../lib/book-stream";
+import { coinbaseBookKey, coinbaseStreamStats, getCoinbaseStreamBook, getGeminiStreamBook, startGeminiBookStream } from "../lib/book-stream";
+import { geminiSymbols, geminiSymbolDetails } from "../lib/gemini-exec";
+import { geminiVerify, type GeminiCreds } from "../lib/gemini";
 import { createPairHistory, updatePairHistory, type PairHistory } from "../lib/kalman";
 import { waitForTriLimitFill } from "../lib/tri-fill.js";
 
@@ -408,6 +410,75 @@ function repriceCrossRoutes(routes: { hops: { from: string; to: string; exchange
   }
 }
 
+// ── Gemini SCAN-ONLY universe for the graph scanner ───────────────────────────
+// Mirror of cross-venue.ts's Gemini universe discovery, kept local to avoid an
+// arb↔cross-venue import cycle. Only symbols Gemini ACTUALLY lists with a USD
+// book (never guessed); books warm via startGeminiBookStream so the first scan
+// finds them fresh. Assumed Gemini taker % for credential-less display (labeled).
+const GEMINI_ASSUMED_TAKER_PCT = 0.4;
+let geminiGraphListed: string[] = []; // UPPER asset codes with a live Gemini USD book
+let geminiGraphMinCache = new Map<string, number>(); // asset (UPPER) → minOrderSize (base)
+let geminiGraphUniverseAt = 0;
+
+async function refreshGeminiGraphUniverse(): Promise<void> {
+  if (Date.now() - geminiGraphUniverseAt < 6 * 3600_000 && geminiGraphListed.length) return;
+  const syms = await geminiSymbols(); // lowercase like "btcusd"
+  const usd = new Set(syms.filter(s => s.endsWith("usd")).map(s => s.slice(0, -3).toUpperCase()));
+  // Restrict to the shared graph universe (OB_ASSETS + USDC) so we only build
+  // cross-venue hops against assets the other venues also carry.
+  const wanted = [...OB_ASSETS, "USDC"].filter(a => usd.has(a));
+  geminiGraphListed = wanted;
+  geminiGraphUniverseAt = Date.now();
+  startGeminiBookStream(wanted.map(a => `${a}USD`));
+  // Prime symbol minimums (base units) for the SCAN minimum gate. Best-effort:
+  // a missing minimum simply omits the gate for that asset (never fabricated).
+  await Promise.all(wanted.map(async (a) => {
+    try {
+      const det = await geminiSymbolDetails(`${a}USD`);
+      geminiGraphMinCache.set(a, det.minOrderSize);
+    } catch { /* leave unset — no synthetic minimum */ }
+  }));
+}
+/** Assemble the SCAN-ONLY Gemini input (live USD books + fee + minimums) for the
+ *  graph engine, or null when no Gemini book is warm yet. Fees are DETECTED only
+ *  when Gemini keys are in the request (else assumed+labeled). Fully defensive:
+ *  ANY failure (universe fetch, missing book, verify) degrades to "no Gemini
+ *  hops in this scan" rather than breaking the endpoint — Gemini is additive. */
+async function buildGeminiScanInput(geminiKey: string | null, geminiSecret: string | null): Promise<GeminiScanInput | null> {
+  try {
+    try { await refreshGeminiGraphUniverse(); } catch { /* stale universe reused */ }
+    const books = new Map<string, GeminiEdgeBook>();
+    for (const asset of geminiGraphListed) {
+      const b = getGeminiStreamBook(`${asset}USD`);
+      if (!b || b.asks.length === 0 || b.bids.length === 0) continue;
+      books.set(asset, {
+        asks: b.asks as BookLevels,
+        bids: b.bids as BookLevels,
+        ageMs: b.ageMs,
+        minOrderSize: geminiGraphMinCache.get(asset) ?? 0,
+      });
+    }
+    if (books.size === 0) return null; // no warm Gemini book → skip Gemini entirely
+
+    // Fee detection: DETECTED only when Gemini keys are supplied AND verify. A
+    // detect-or-refuse rule — but this is a SCAN endpoint, so an assumed fee
+    // just labels the route (routes are forced research-only regardless).
+    let feePct = GEMINI_ASSUMED_TAKER_PCT;
+    let feesDetected = false;
+    if (geminiKey && geminiSecret) {
+      try {
+        const gc: GeminiCreds = { geminiKey, geminiSecret };
+        const acct = await geminiVerify(gc);
+        feePct = acct.takerPct;
+        feesDetected = true;
+      } catch { /* verify failed → stay assumed+labeled */ }
+    }
+    return { assets: [...books.keys()], books, feePct, feesDetected };
+  } catch {
+    return null; // Gemini scan input unavailable → scan Kraken/Coinbase as before
+  }
+}
+
 router.get("/arb/graph-scan", async (req, res): Promise<void> => {
   const tradeSizeUsd    = Math.max(1,  parseFloat(String(req.query["tradeSizeUsd"]    ?? "10"))   || 10);
   const krakenFeesPct   = Math.max(0,  parseFloat(String(req.query["krakenFeesPct"]   ?? "0.16")) || 0.16);
@@ -418,11 +489,19 @@ router.get("/arb/graph-scan", async (req, res): Promise<void> => {
   // from the held keys — same derivation as accountIdFromKey). Without it,
   // history-based ranking is skipped: every route gets the neutral prior.
   const accountId = String(req.query["accountId"] ?? "").trim() || null;
+  // Optional Gemini keys (SCAN-ONLY): when present, Gemini fees are DETECTED and
+  // labeled as such; routes through Gemini are ALWAYS research-only regardless.
+  const geminiKey    = String(req.query["geminiKey"]    ?? "").trim() || null;
+  const geminiSecret = String(req.query["geminiSecret"] ?? "").trim() || null;
   try {
+    // Feed live Gemini USD books into the graph so cross-venue hops through
+    // Gemini surface in ranked routes. STRICTLY scan-only — the engine forces
+    // executable:false on every route containing a Gemini leg.
+    const geminiInput = await buildGeminiScanInput(geminiKey, geminiSecret);
     // Display endpoint: no Kraken keys here, so fee inputs are ASSUMED tiers,
     // not detected — every route stays research-only ("fees assumed") until the
     // executor path (which passes detected tiers) prices it.
-    const result = await scanGraphOpportunities(tradeSizeUsd, krakenFeesPct, coinbaseFeesPct, maxHops, executionStyle, false);
+    const result = await scanGraphOpportunities(tradeSizeUsd, krakenFeesPct, coinbaseFeesPct, maxHops, executionStyle, false, geminiInput ?? undefined);
     // Taker/adaptive display: Kraken triangles priced by the executor's own
     // simulator on the streamed snapshot — table number == pre-fire number.
     if (executionStyle === "taker") {
@@ -4765,13 +4844,26 @@ router.get("/trades/summary", async (req, res): Promise<void> => {
       totalProfitUsd: sum(tradesTable.estimatedProfitUsd),
       avgNetEdgePct: avg(tradesTable.netEdgePct),
       bestTradeProfitUsd: max(tradesTable.estimatedProfitUsd),
-      verifiedTrades: sql<number>`COUNT(*) FILTER (WHERE ${tradesTable.status} = 'verified')`,
+      // VERIFIED = confirmed fill on every required leg AND a real,
+      // non-null realized P&L. A row can carry status='verified' yet a null
+      // realizedProfitUsd (e.g. a fully-sold XV leg whose sell notional could
+      // not be priced — cross-venue.ts) — such an indeterminate row must NOT
+      // count as a verified trade nor leak a phantom $0 into the P&L. The
+      // `realized_profit_usd IS NOT NULL` clause is the hard gate.
+      verifiedTrades: sql<number>`COUNT(*) FILTER (WHERE ${tradesTable.status} = 'verified' AND ${tradesTable.realizedProfitUsd} IS NOT NULL)`,
       failedTrades: sql<number>`COUNT(*) FILTER (WHERE ${tradesTable.status} = 'failed')`,
       simulatedTrades: sql<number>`COUNT(*) FILTER (WHERE ${tradesTable.status} = 'simulated' OR ${tradesTable.status} = 'estimated' OR ${tradesTable.status} IS NULL)`,
       // Realized P&L: SUM over VERIFIED rows' realizedProfitUsd ONLY — never
-      // scanner estimates, never dry runs, never legacy rows without proof.
-      realizedPnlUsd: sql<string | null>`SUM(${tradesTable.realizedProfitUsd}) FILTER (WHERE ${tradesTable.status} = 'verified')`,
-      bestVerifiedProfitUsd: sql<string | null>`MAX(${tradesTable.realizedProfitUsd}) FILTER (WHERE ${tradesTable.status} = 'verified')`,
+      // scanner estimates, never dry runs, never legacy/indeterminate rows
+      // without a proven realized figure.
+      realizedPnlUsd: sql<string | null>`SUM(${tradesTable.realizedProfitUsd}) FILTER (WHERE ${tradesTable.status} = 'verified' AND ${tradesTable.realizedProfitUsd} IS NOT NULL)`,
+      bestVerifiedProfitUsd: sql<string | null>`MAX(${tradesTable.realizedProfitUsd}) FILTER (WHERE ${tradesTable.status} = 'verified' AND ${tradesTable.realizedProfitUsd} IS NOT NULL)`,
+      // Live, fully-completed, verified-fill cycles across ALL strategies
+      // (triangles, graph-cross, INV, MM2, XV, 2X/2XTEST) — the same hard gate
+      // plus isDryRun = false. Dry runs never reach a verified ledger write, so
+      // this is defensive belt-and-braces against any legacy/simulated row.
+      liveCompletedCycles: sql<number>`COUNT(*) FILTER (WHERE ${tradesTable.status} = 'verified' AND ${tradesTable.realizedProfitUsd} IS NOT NULL AND ${tradesTable.isDryRun} = false)`,
+      liveRealizedPnlUsd: sql<string | null>`SUM(${tradesTable.realizedProfitUsd}) FILTER (WHERE ${tradesTable.status} = 'verified' AND ${tradesTable.realizedProfitUsd} IS NOT NULL AND ${tradesTable.isDryRun} = false)`,
     })
     .from(tradesTable);
 
@@ -4792,6 +4884,8 @@ router.get("/trades/summary", async (req, res): Promise<void> => {
     failedTrades: Number(statsRow?.failedTrades ?? 0),
     simulatedTrades: Number(statsRow?.simulatedTrades ?? 0),
     realizedPnlUsd: statsRow?.realizedPnlUsd != null ? parseFloat(String(statsRow.realizedPnlUsd)) : 0,
+    liveCompletedCycles: Number(statsRow?.liveCompletedCycles ?? 0),
+    liveRealizedPnlUsd: statsRow?.liveRealizedPnlUsd != null ? parseFloat(String(statsRow.liveRealizedPnlUsd)) : 0,
     bestVerifiedProfitUsd: statsRow?.bestVerifiedProfitUsd != null ? parseFloat(String(statsRow.bestVerifiedProfitUsd)) : null,
     recentTrades: recentTrades.map(t => ({
       ...t,

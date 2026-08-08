@@ -96,7 +96,7 @@ export function ProfitHunterCard() {
               <span>status: <span className={d.running ? "text-green-500" : ""}>{d.running ? "HUNTING" : "stopped"}</span></span>
               <span>samples: {d.ticks ?? 0}</span>
               <span>tracked opportunities: {d.tracked ?? 0}</span>
-              <span>fees: {d.feeSource === "detected" ? <span className="text-green-500">your detected K/CB tiers</span> : <span className="text-amber-500">assumed entry tiers*</span>}</span>
+              <span>fees: {d.feeSource === "detected" ? <span className="text-green-500">your detected {credentials.geminiKey && credentials.geminiSecret ? "K/CB/Gemini" : "K/CB"} tiers</span> : <span className="text-amber-500">assumed entry tiers*</span>}{credentials.geminiKey && credentials.geminiSecret ? <span className="text-muted-foreground"> (Gemini keys forwarded — its legs use detected fees too)</span> : null}</span>
               {d.stopReason && <span className="text-amber-500">{d.stopReason}</span>}
             </div>
             {(d.errors?.length ?? 0) > 0 && <div className="text-red-400">recent sampling errors: {d.errors!.join(" · ")}</div>}

@@ -18,4 +18,6 @@ export interface GraphRouteHop {
   amountOut: number;
   feePct: number;
   limitPrice: number;
+  /** true = leg priced from a LIVE stream book; false = REST fallback */
+  streamed?: boolean;
 }

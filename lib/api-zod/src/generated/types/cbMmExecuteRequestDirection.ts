@@ -7,7 +7,7 @@
  */
 
 /**
- * Side of the Coinbase maker order; omit to auto-pick the better projection
+ * Side of the maker order; omit to auto-pick the better projection
  */
 export type CbMmExecuteRequestDirection = typeof CbMmExecuteRequestDirection[keyof typeof CbMmExecuteRequestDirection];
 

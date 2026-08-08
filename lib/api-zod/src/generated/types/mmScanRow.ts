@@ -8,13 +8,19 @@
 
 export interface MmScanRow {
   asset?: string;
-  /** cbMaker (Coinbase maker + Kraken hedge) | kMaker (reverse) | takerKtoC (buy Kraken, sell Coinbase, taker both) | takerCtoK */
+  /** cbMaker (Coinbase maker + Kraken hedge) | kMaker (reverse) | takerKtoC (buy Kraken, sell Coinbase, taker both) | takerCtoK | venueMaker (venue-generic maker→hedge, includes any Gemini leg) */
   structure?: string;
+  /** human-readable structure, e.g. 'gemini(maker)→kraken(hedge)' */
+  structureLabel?: string;
   direction?: string;
   available?: boolean;
+  /** kraken | coinbase | gemini */
   makerVenue?: string;
+  /** kraken | coinbase | gemini */
   hedgeVenue?: string;
+  /** null = fee tier NOT detected for the maker venue (shown as ASSUMED) */
   makerFeePct?: number | null;
+  /** null = fee tier NOT detected for the hedge venue (shown as ASSUMED) */
   hedgeFeePct?: number | null;
   makerPrice?: number;
   makerQty?: number;

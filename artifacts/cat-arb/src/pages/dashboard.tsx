@@ -13,6 +13,7 @@ import { CrossMmCard } from "@/components/cross-mm-card";
 import { TwoExchangeTestCard } from "@/components/two-exchange-test-card";
 import { TwoXScannerCard } from "@/components/two-x-scanner-card";
 import { CrossVenueScannerCard } from "@/components/cross-venue-scanner-card";
+import { AutoRebalanceCard } from "@/components/auto-rebalance-card";
 import { CbMmCard } from "@/components/cb-mm-card";
 import { DiscoveryCard } from "@/components/discovery-card";
 import { ProfitHunterCard } from "@/components/profit-hunter-card";
@@ -34,7 +35,7 @@ import { execPreview, useGetTradeSummary, useListTrades, useScanAllPairs, useGet
  *  Falls back to the absolute time string when elapsed < 10 s to avoid
  *  "0s ago" flicker right after a fire. */
 function ObAutoTradeAgo({ timestamp }: { timestamp: string }) {
-  const [, setTick] = useState(0);
+const [, setTick] = useState(0);
   const elapsedS = Math.floor((Date.now() - new Date(timestamp).getTime()) / 1000);
   useEffect(() => {
     // One-shot update at the 10 s threshold so the label flips from absolute
@@ -59,6 +60,39 @@ function ObAutoTradeAgo({ timestamp }: { timestamp: string }) {
   const m = Math.floor(elapsedS / 60);
   const s = elapsedS % 60;
   return <>{m > 0 ? `${m}m ${s}s ago` : `${s}s ago`}</>;
+}
+
+/** Terminal-style section divider used to group the dashboard into
+ *  LIVE ACCOUNT / LIVE EXECUTION / RESEARCH / LEGACY blocks. */
+function SectionHeader({
+  title,
+  subtitle,
+  tone = "default",
+}: {
+  title: string;
+  subtitle?: string;
+  tone?: "default" | "live" | "muted";
+}) {
+  return (
+    <div
+      className={cn(
+        "flex flex-col gap-0.5 border-l-4 pl-3 py-1",
+        tone === "live" && "border-destructive",
+        tone === "muted" && "border-muted-foreground/40",
+        tone === "default" && "border-primary",
+      )}
+    >
+      <h2 className={cn(
+        "text-sm font-bold uppercase tracking-widest",
+        tone === "live" ? "text-destructive" : tone === "muted" ? "text-muted-foreground" : "text-primary",
+      )}>
+        {title}
+      </h2>
+      {subtitle && (
+        <span className="text-[10px] font-mono text-muted-foreground leading-none">{subtitle}</span>
+      )}
+    </div>
+  );
 }
 
 function PriceTile({
@@ -154,6 +188,8 @@ function NonceConflictBanner() {
 }
 
 export default function Dashboard() {
+  const [researchOpen, setResearchOpen] = useState(false);
+  const [legacyOpen, setLegacyOpen] = useState(false);
   const {
     isRunning, setIsRunning, liveMode,
     latestPriceData, cachedBalances, activityLog, sessionProfitUsd,
@@ -210,8 +246,24 @@ export default function Dashboard() {
     return sorted[0] ?? null;
   }, [forceScanQuery.data, forceFeesAndSlip]);
 
+  // ── Live-mode credential gate ────────────────────────────────────────────────
+  // In LIVE mode the engines place REAL orders on Kraken AND Coinbase, so both
+  // venues' keys must be present before the bot can start. The button is
+  // disabled up-front with the exact requirement rather than failing on click.
+  const hasKrakenCreds = !!credentials.krakenKey && !!credentials.krakenSecret;
+  const hasCoinbaseCreds = !!credentials.coinbaseKey && !!credentials.coinbaseSecret;
+  const liveCredsMissing = liveMode && (!hasKrakenCreds || !hasCoinbaseCreds);
+  const MISSING_LIVE_CREDS_TEXT = "Add Kraken + Coinbase API keys in Config — live mode places real orders";
+
   const toggleBot = () => {
-    if (!credentials.krakenKey && !isRunning) {
+    // Stopping is always allowed.
+    if (isRunning) { setIsRunning(false); return; }
+    if (liveCredsMissing) {
+      addLog("error", MISSING_LIVE_CREDS_TEXT);
+      return;
+    }
+    // Paper mode still needs at least Kraken creds to fetch balances/quotes.
+    if (!liveMode && !credentials.krakenKey) {
       addLog("error", "Cannot start bot without API credentials. Go to Settings.");
       return;
     }
@@ -264,8 +316,9 @@ export default function Dashboard() {
           )}
 
           <div className="bg-muted px-3 py-2 border-2 border-border flex flex-col items-center justify-center">
-            <span className="text-[10px] uppercase font-bold text-muted-foreground">Trades Today</span>
+            <span className="text-[10px] uppercase font-bold text-muted-foreground">Trades</span>
             <span className="text-sm font-mono font-bold leading-none">{sessionTradeCount}</span>
+            <span className="text-[8px] font-mono text-muted-foreground leading-none mt-0.5">this browser session</span>
           </div>
 
           {apiLatencyMs != null && (
@@ -279,27 +332,28 @@ export default function Dashboard() {
           )}
 
           <div className="bg-muted px-3 py-2 border-2 border-border flex flex-col items-center justify-center">
-            <span className="text-[10px] uppercase font-bold text-muted-foreground">Failed Trades</span>
+            <span className="text-[10px] uppercase font-bold text-muted-foreground">Failed</span>
             <span className={cn("text-sm font-mono font-bold leading-none", failedTrades > 0 ? "text-destructive" : "")}>
               {failedTrades}
             </span>
+            <span className="text-[8px] font-mono text-muted-foreground leading-none mt-0.5">this browser session</span>
           </div>
 
           <div className="bg-muted px-4 py-2 border-2 border-border flex flex-col items-end flex-1 md:flex-none">
             <span className="text-[10px] uppercase font-bold text-muted-foreground">
-              Realized P&L (Verified) · {summaryQuery.data?.verifiedTrades ?? 0} verified fills
+              Realized P&L · verified live fills only · {summaryQuery.data?.liveCompletedCycles ?? summaryQuery.data?.verifiedTrades ?? 0} completed live cycles
             </span>
             <span className={cn(
               "text-xl font-mono font-bold leading-none",
-              (summaryQuery.data?.realizedPnlUsd ?? 0) > 0 ? "text-success" :
-              (summaryQuery.data?.realizedPnlUsd ?? 0) < 0 ? "text-destructive" : ""
+              (summaryQuery.data?.liveRealizedPnlUsd ?? summaryQuery.data?.realizedPnlUsd ?? 0) > 0 ? "text-success" :
+              (summaryQuery.data?.liveRealizedPnlUsd ?? summaryQuery.data?.realizedPnlUsd ?? 0) < 0 ? "text-destructive" : ""
             )} data-testid="text-realized-pnl">
-              {(summaryQuery.data?.realizedPnlUsd ?? 0) >= 0 ? "+" : "-"}$
-              {Math.abs(summaryQuery.data?.realizedPnlUsd ?? 0).toFixed(2)}
+              {(summaryQuery.data?.liveRealizedPnlUsd ?? summaryQuery.data?.realizedPnlUsd ?? 0) >= 0 ? "+" : "-"}$
+              {Math.abs(summaryQuery.data?.liveRealizedPnlUsd ?? summaryQuery.data?.realizedPnlUsd ?? 0).toFixed(2)}
             </span>
             {sessionProfitUsd !== 0 && (
               <span className="text-[10px] font-mono text-muted-foreground">
-                session: {sessionProfitUsd >= 0 ? "+" : "-"}${Math.abs(sessionProfitUsd).toFixed(2)}
+                this browser session: {sessionProfitUsd >= 0 ? "+" : "-"}${Math.abs(sessionProfitUsd).toFixed(2)}
               </span>
             )}
           </div>
@@ -312,9 +366,11 @@ export default function Dashboard() {
                 size="lg"
                 className="border-2 border-destructive text-destructive hover:bg-destructive hover:text-destructive-foreground font-bold uppercase"
                 onClick={forceTrade}
-                disabled={isForcingTrade}
+                disabled={isForcingTrade || liveCredsMissing}
                 title={
-                  bestForcePair
+                  liveCredsMissing
+                    ? MISSING_LIVE_CREDS_TEXT
+                    : bestForcePair
                     ? `Rescans, then trades ${bestForcePair.pair} if net edge clears your minimum · net edge ${(bestForcePair.grossSpreadPct - forceFeesAndSlip) >= 0 ? "+" : ""}${(bestForcePair.grossSpreadPct - forceFeesAndSlip).toFixed(3)}% (gross ${bestForcePair.grossSpreadPct >= 0 ? "+" : ""}${bestForcePair.grossSpreadPct.toFixed(3)}% − ${forceFeesAndSlip.toFixed(2)}% ${forceFeeModel.takerDetected ? `taker fees [Kraken ${forceFeeModel.krakenTakerPct!.toFixed(2)}% + Coinbase ${(forceFeeModel.feesPct - forceFeeModel.krakenTakerPct!).toFixed(2)}%]` : "configured fees (taker tier not detected)"}+slip) · market orders · buy ${bestForcePair.buyExchange} → sell ${bestForcePair.sellExchange}`
                     : "Rescans all pairs, fetches a fresh quote, then trades only if net edge clears your minimum (market orders — taker fees)"
                 }
@@ -322,8 +378,10 @@ export default function Dashboard() {
                 <Siren className="h-4 w-4 mr-2" />
                 {isForcingTrade ? "EXECUTING..." : "FORCE SCAN & TRADE"}
               </Button>
-              <span className="text-[10px] font-mono text-muted-foreground leading-none">
-                {bestForcePair
+              <span className="text-[10px] font-mono text-muted-foreground leading-none max-w-[240px] text-center">
+                {liveCredsMissing
+                  ? <span className="text-destructive">{MISSING_LIVE_CREDS_TEXT}</span>
+                  : bestForcePair
                   ? <>Best: <span className="font-bold text-foreground">{bestForcePair.pair}</span> <span className={cn((bestForcePair.grossSpreadPct - forceFeesAndSlip) >= 0 ? "text-success" : "text-destructive")}>{(bestForcePair.grossSpreadPct - forceFeesAndSlip) >= 0 ? "+" : ""}{(bestForcePair.grossSpreadPct - forceFeesAndSlip).toFixed(3)}% net</span> <span className="text-muted-foreground">({forceFeeModel.takerDetected ? "taker" : "cfg"} fees)</span></>
                   : <span className="italic">SOL/USD (fallback)</span>
                 }
@@ -338,6 +396,9 @@ export default function Dashboard() {
               is unaffected — this button only renders in live mode. */}
           {liveMode && (() => {
             const krakenSynthetic = triPriceSource.kraken === "synthetic";
+            // FORCE TRI fires 3 live Kraken market orders — Kraken creds are
+            // mandatory. Disable up-front with the exact requirement.
+            const triCredsMissing = !hasKrakenCreds;
             return (
               <TooltipProvider>
                 <Tooltip>
@@ -348,7 +409,8 @@ export default function Dashboard() {
                         size="lg"
                         className="border-2 border-yellow-500 text-yellow-600 hover:bg-yellow-500 hover:text-white font-bold uppercase"
                         onClick={forceTriangular}
-                        disabled={isForcingTriangular || krakenSynthetic}
+                        disabled={isForcingTriangular || krakenSynthetic || triCredsMissing}
+                        data-testid="button-force-tri"
                       >
                         <RefreshCw className={cn("h-4 w-4 mr-2", isForcingTriangular && "animate-spin")} />
                         {isForcingTriangular ? "TRI FIRING..." : "FORCE TRI"}
@@ -356,7 +418,9 @@ export default function Dashboard() {
                     </span>
                   </TooltipTrigger>
                   <TooltipContent side="bottom" className="max-w-[240px]">
-                    {krakenSynthetic
+                    {triCredsMissing
+                      ? MISSING_LIVE_CREDS_TEXT
+                      : krakenSynthetic
                       ? "Blocked: ETH/SOL direct market unavailable on Kraken — prices are estimated from a cross-rate (ETH/USD ÷ SOL/USD) and may be imprecise. Live triangular trades are disabled until the direct market returns."
                       : "Fire best BTC/SOL/USD loop on Kraken with $10 test — 3 market orders"}
                   </TooltipContent>
@@ -365,18 +429,41 @@ export default function Dashboard() {
             );
           })()}
 
-          <Button
-            size="lg"
-            variant={isRunning ? "destructive" : "default"}
-            className="w-full md:w-40"
-            onClick={toggleBot}
-          >
-            {isRunning ? (
-              <><Square className="h-4 w-4 mr-2" /> STOP BOT</>
-            ) : (
-              <><Play className="h-4 w-4 mr-2" /> START BOT</>
+          <div className="flex flex-col items-stretch gap-1 w-full md:w-auto">
+            <Button
+              size="lg"
+              variant={isRunning ? "destructive" : liveMode ? "default" : "outline"}
+              className={cn(
+                "w-full md:w-56",
+                !isRunning && !liveMode && "border-2 border-amber-500 text-amber-500 hover:bg-amber-500 hover:text-white font-bold",
+              )}
+              onClick={toggleBot}
+              disabled={!isRunning && liveCredsMissing}
+              title={
+                isRunning
+                  ? "Stop the bot engine"
+                  : liveCredsMissing
+                    ? MISSING_LIVE_CREDS_TEXT
+                    : liveMode
+                      ? "Start the LIVE engine — places REAL orders on Kraken + Coinbase"
+                      : "Start the PAPER engine — simulates fills, no real orders"
+              }
+              data-testid="button-start-bot"
+            >
+              {isRunning ? (
+                <><Square className="h-4 w-4 mr-2" /> STOP BOT</>
+              ) : liveMode ? (
+                <><Play className="h-4 w-4 mr-2" /> START BOT</>
+              ) : (
+                <><Play className="h-4 w-4 mr-2" /> START PAPER BOT</>
+              )}
+            </Button>
+            {!isRunning && liveCredsMissing && (
+              <span className="text-[10px] font-mono text-destructive leading-tight md:max-w-56 text-center">
+                {MISSING_LIVE_CREDS_TEXT}
+              </span>
             )}
-          </Button>
+          </div>
 
           <Button
             size="lg"
@@ -391,6 +478,92 @@ export default function Dashboard() {
         </div>
       </div>
 
+      {/* ══ 1. LIVE ACCOUNT & P&L ═══════════════════════════════════════════════
+          Verified realized P&L (fills only) + balance-based account equity. */}
+      <SectionHeader
+        title="LIVE ACCOUNT & P&L"
+        subtitle="verified live fills + account equity — the only numbers that are account truth"
+      />
+      <RealizedPnlCard />
+
+      {/* ══ 2. LIVE EXECUTION ══════════════════════════════════════════════════
+          The real engines — each places REAL orders when live mode is ON.
+          Each card keeps its own credential / profitability / safety gates. */}
+      <SectionHeader
+        title="LIVE EXECUTION"
+        subtitle={liveMode
+          ? "LIVE — these engines place REAL orders on your accounts"
+          : "MODE: PAPER — legacy bot simulates; live engines below never simulate, they refuse without keys + LIVE mode"}
+        tone="live"
+      />
+
+      {/* Cross-Venue Scanner (Kraken · Coinbase · Gemini) */}
+      <CrossVenueScannerCard />
+
+      {/* PRIMARY profit-seeking strategy: maker-hedge engine (incl. TOP REAL OPPORTUNITIES) */}
+      <CbMmCard />
+
+      {/* Auto Rebalance — funding engine that pre-positions inventory */}
+      <AutoRebalanceCard />
+
+      {/* Cross-exchange inventory arb — shown only when toggled on in Config */}
+      {settings.inventoryModeEnabled && <InventoryCard />}
+
+      {/* Order Book Hunter + Triangular — execute real orders in live mode */}
+      <OrderBookHunterCard />
+      <GraphEngineCard />
+      <TriangularCard
+        opportunities={triOpportunities}
+        isRunning={isRunning}
+        isExecutingTri={isExecutingTriangular}
+        priceSource={triPriceSource}
+        btcTriStatus={btcTriStatus}
+        blockedBy={isAutoExecutingOb ? "OB" : isExecutingCross ? "CROSS" : null}
+      />
+
+      {/* Trade History — verified vs SIM/EST labels preserved; stays in the live block. */}
+      <TradeHistoryTable />
+
+      {/* ══ 3. RESEARCH & SCAN-ONLY ════════════════════════════════════════════
+          Live data, NO execution. Collapsed by default. */}
+      <details
+        className="rounded-lg border border-border"
+        data-testid="section-research"
+        open={researchOpen}
+        onToggle={(e) => setResearchOpen((e.target as HTMLDetailsElement).open)}
+      >
+        <summary className="cursor-pointer px-4 py-3 text-sm font-bold uppercase tracking-widest text-primary select-none">
+          RESEARCH — live data, no execution
+          <span className="ml-2 text-[10px] font-mono font-normal text-muted-foreground normal-case tracking-normal">
+            (scanners &amp; charts — nothing here places an order)
+          </span>
+        </summary>
+        {researchOpen && <div className="p-4 space-y-6">
+          {/* Children mount ONLY while open — collapsed research must not poll. */}
+          <AllPairsCard activePair={latestPriceData?.pair ?? null} feesAndSlipPct={settings.totalFees + settings.slippage} enabledPairs={enabledPairsForScan} />
+          <MultiCoinRankerCard settings={settings} />
+          <DiscoveryCard />
+          <ProfitHunterCard />
+          <ExecutionQualityCard />
+        </div>}
+      </details>
+
+      {/* ══ 4. LEGACY & PAPER TRADING ══════════════════════════════════════════
+          Not live account truth. Dry-run-first / superseded strategies. */}
+      <details
+        className="rounded-lg border border-border"
+        data-testid="section-legacy"
+        open={legacyOpen}
+        onToggle={(e) => setLegacyOpen((e.target as HTMLDetailsElement).open)}
+      >
+        <summary className="cursor-pointer px-4 py-3 text-sm font-bold uppercase tracking-widest text-muted-foreground select-none">
+          LEGACY &amp; PAPER TRADING — not live account truth
+          <span className="ml-2 text-[10px] font-mono font-normal text-muted-foreground normal-case tracking-normal">
+            (superseded / dry-run-first strategies &amp; diagnostics)
+          </span>
+        </summary>
+        {legacyOpen && <div className="p-4 space-y-4">
+          {/* Mounted only while open — the legacy cluster must not poll while hidden. */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
 
         {/* Left Column */}
@@ -561,13 +734,20 @@ export default function Dashboard() {
           </Card>
 
           {/* Status pill */}
-          <Card className={cn(liveMode ? "border-destructive border-4" : "")}>
+          <Card className={cn(liveMode ? "border-destructive border-4" : "border-amber-500 border-2")}>
             <CardContent className="p-4 flex flex-col gap-2">
-              <div className="flex items-center gap-2 text-sm font-bold uppercase mb-2">
+              <div className={cn(
+                "flex items-center gap-2 text-sm font-bold uppercase mb-2",
+                liveMode ? "text-destructive" : "text-amber-500",
+              )}>
                 {liveMode ? (
-                  <><ShieldAlert className="h-4 w-4 text-destructive" /> WARNING: LIVE TRADING ACTIVE</>
+                  <><ShieldAlert className="h-4 w-4 text-destructive" /> LIVE — REAL MONEY, REAL ORDERS</>
                 ) : (
-                  <><ShieldAlert className="h-4 w-4 text-primary" /> DRY RUN MODE ACTIVE</>
+                  <>
+                    <ShieldAlert className="h-4 w-4 text-amber-500" />
+                    <span className="px-1.5 py-0.5 border border-amber-500 bg-amber-500/10 text-amber-500">PAPER</span>
+                    PAPER MODE — NO REAL ORDERS
+                  </>
                 )}
               </div>
               {(() => {
@@ -672,54 +852,14 @@ export default function Dashboard() {
         </div>
       </div>
 
-      {/* All-Pairs Breakdown */}
-      <AllPairsCard activePair={latestPriceData?.pair ?? null} feesAndSlipPct={settings.totalFees + settings.slippage} enabledPairs={enabledPairsForScan} />
-
-      {/* Multi-Coin Opportunity Ranker */}
-      <MultiCoinRankerCard settings={settings} />
-
-      {/* Triangular Arb Opportunities */}
-      {/* Inventory Mode Opportunities — shown only when the feature is toggled on in Config */}
-      {settings.inventoryModeEnabled && <InventoryCard />}
-
-      {/* PRIMARY profit-seeking strategy: maker-hedge engine */}
-      <CbMmCard />
-
-      {/* Read-only cross-venue discovery scan (never trades) */}
-      <DiscoveryCard />
-
-      {/* 24h Profit Hunter evidence collector (never trades) */}
-      <ProfitHunterCard />
-      <TwoXScannerCard />
-      <CrossVenueScannerCard />
-
-      {/* Diagnostics & plumbing tests — collapsed, never auto-run, NOT profit strategies */}
-      <details className="rounded-lg border border-border" data-testid="section-diagnostics">
-        <summary className="cursor-pointer px-4 py-3 text-sm font-medium text-muted-foreground select-none">
-          Diagnostics &amp; plumbing tests <span className="text-red-500/80">(manual only — NOT profit strategies; the taker-taker test loses ~$0.16 per $10 run)</span>
-        </summary>
-        <div className="p-4 space-y-4">
-          {/* Legacy Kraken-maker strategy (superseded by the maker-hedge engine above) */}
+          {/* Legacy 2X scanner (LIVE-gated but superseded by the engines above) */}
+          <TwoXScannerCard />
+          {/* Legacy Kraken-maker strategy — dry-run-first DRY controls */}
           <CrossMmCard />
-          {/* One-shot two-exchange taker-taker diagnostic */}
+          {/* One-shot two-exchange taker-taker diagnostic (loses ~$0.16 per $10 run) */}
           <TwoExchangeTestCard />
-          <TriangularCard
-            opportunities={triOpportunities}
-            isRunning={isRunning}
-            isExecutingTri={isExecutingTriangular}
-            priceSource={triPriceSource}
-            btcTriStatus={btcTriStatus}
-            blockedBy={isAutoExecutingOb ? "OB" : isExecutingCross ? "CROSS" : null}
-          />
-        </div>
+        </div>}
       </details>
-      <OrderBookHunterCard />
-      <GraphEngineCard />
-      <RealizedPnlCard />
-      <ExecutionQualityCard />
-
-      {/* Trade History Table */}
-      <TradeHistoryTable />
     </div>
   );
 }
@@ -1766,11 +1906,12 @@ function TriangularCard({
 const EXCHANGE_BADGE: Record<string, string> = {
   kraken:   "bg-primary/20 text-primary border-primary/40",
   coinbase: "bg-blue-500/20 text-blue-400 border-blue-500/40",
+  gemini:   "bg-purple-500/20 text-purple-400 border-purple-500/40",
   bridge:   "bg-muted/50 text-muted-foreground border-border",
 };
 
 function HopBadge({ hop }: { hop: GraphRouteHop }) {
-  const tag = hop.exchange === "bridge" ? "⇌" : hop.exchange === "kraken" ? "K" : "CB";
+  const tag = hop.exchange === "bridge" ? "⇌" : hop.exchange === "kraken" ? "K" : hop.exchange === "gemini" ? "GEM" : "CB";
   return (
     <span className={cn("text-[8px] font-bold px-1 border rounded-sm", EXCHANGE_BADGE[hop.exchange] ?? EXCHANGE_BADGE.bridge)}>
       {tag}
@@ -1860,6 +2001,10 @@ function GraphEngineCard() {
       .catch(() => { if (live) setAccountId(undefined); });
     return () => { live = false; };
   }, [credentials.krakenKey, credentials.coinbaseKey, credentials.coinbaseSecret]);
+  // Optional Gemini keys (SCAN-ONLY): when present, Gemini USD books feed the
+  // graph and Gemini fees are DETECTED. Any route through Gemini is ALWAYS
+  // research-only (executable:false) — the graph executor has no Gemini wiring.
+  const hasGeminiCreds = !!credentials.geminiKey && !!credentials.geminiSecret;
   const params = {
     tradeSizeUsd:    tradeSize,
     krakenFeesPct:   actualFee ?? settings.obFeesPct,
@@ -1867,6 +2012,7 @@ function GraphEngineCard() {
     maxHops:         4,
     executionStyle:  scanStyle,
     ...(accountId ? { accountId } : {}),
+    ...(hasGeminiCreds ? { geminiKey: credentials.geminiKey, geminiSecret: credentials.geminiSecret } : {}),
   };
   // Cadence aligned with the OB Hunter (5s refetch / 4s stale) and the
   // server's 5s REST order-book cache TTL: when the WS stream is down and
@@ -2074,7 +2220,8 @@ function GraphEngineCard() {
     : null;
   /** Per-route reject reason for the table (pre-execution checks only). */
   const routeRejectReason = (r: (typeof routes)[number]): string | null =>
-    !r.executable ? "Unsupported route shape — live executor handles Kraken triangles & 2-leg cross only"
+    r.hasGeminiLeg ? "SCAN-ONLY — Gemini legs not wired to graph executor"
+    : !r.executable ? (r.researchReason ?? "Unsupported route shape — live executor handles Kraken triangles & 2-leg cross only")
     : missingInventory(r, cachedBalances).length > 0 ? `Missing inventory — need ${formatInventoryReqs(missingInventory(r, cachedBalances))}`
     : r.netProfitUsd <= 0 ? "Fees exceed gross edge"
     : r.netProfitUsd <= minProfit ? `Edge below your $${minProfit.toFixed(2)} min-profit floor`
@@ -2404,7 +2551,11 @@ function GraphEngineCard() {
                     r.status === "VIABLE" ? "bg-success/10" : i % 2 === 0 ? "" : "bg-muted/20",
                   )}>
                     <td className="px-3 py-1.5 text-muted-foreground">{i + 1}</td>
-                    <td className="px-3 py-1.5 font-bold text-foreground whitespace-nowrap max-w-[240px] truncate" title={r.description}>
+                    <td className="px-3 py-1.5 font-bold text-foreground whitespace-nowrap max-w-[240px] truncate"
+                      title={r.hasGeminiLeg
+                        ? `${r.description}\n\nContains a Gemini leg — SCAN-ONLY (not wired to the graph executor).${r.geminiBookAgeCaveat ? `\nGemini book: ${r.geminiBookAgeCaveat}` : r.geminiBookAgeMs != null ? `\nGemini book age ${Math.round(r.geminiBookAgeMs)}ms (measured from local arrival — Gemini's feed carries no exchange timestamp)` : ""}${r.geminiFeesDetected != null ? `\nGemini fees ${r.geminiFeesDetected ? "DETECTED" : "ASSUMED — connect Gemini keys"}` : ""}`
+                        : r.description}>
+                      {r.hasGeminiLeg && <span className="mr-1 text-[8px] font-bold px-1 border rounded-sm bg-purple-500/20 text-purple-400 border-purple-500/40">GEM</span>}
                       {r.description}
                     </td>
                     <td className="px-3 py-1.5">
@@ -2445,13 +2596,15 @@ function GraphEngineCard() {
                     </td>
                     <td className="px-3 py-1.5">
                       <span className={cn("text-[9px] font-bold px-1 border whitespace-nowrap",
-                        !r.executable
+                        r.hasGeminiLeg
+                          ? "text-purple-400 border-purple-500/40 border-dashed"
+                          : !r.executable
                           ? "text-muted-foreground border-border/50 border-dashed"
                           : r.status === "VIABLE"
                             ? "text-success border-success"
                             : "text-muted-foreground border-border"
                       )} title={routeRejectReason(r) ?? "Clears every pre-execution check — eligible for AUTO / Execute Top Route."}>
-                        {!r.executable ? "◌ SCAN ONLY" : r.status === "VIABLE" ? "✅ VIABLE" : "✕ REJECTED"}
+                        {r.hasGeminiLeg ? "◌ SCAN-ONLY (Gemini)" : !r.executable ? "◌ SCAN ONLY" : r.status === "VIABLE" ? "✅ VIABLE" : "✕ REJECTED"}
                       </span>
                       {routeRejectReason(r) && (
                         <div className="text-[8px] text-muted-foreground mt-0.5 whitespace-nowrap">{routeRejectReason(r)}</div>

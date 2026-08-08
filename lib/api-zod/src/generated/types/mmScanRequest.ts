@@ -11,6 +11,9 @@ export interface MmScanRequest {
   krakenSecret: string;
   coinbaseKey: string;
   coinbaseSecret: string;
+  /** optional — when provided, Gemini-inclusive maker→hedge structures are scanned and Gemini fees are DETECTED instead of assumed */
+  geminiKey?: string;
+  geminiSecret?: string;
   /** Configurable positive profit floor; default $0.01 net after all costs; never accepted below $0.01 */
   minNetUsd?: number | null;
   bufferUsd?: number | null;

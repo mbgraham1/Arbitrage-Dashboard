@@ -149,6 +149,18 @@ vi.mock("../lib/book-stream.js", () => ({
   coinbaseBookKey: vi.fn(() => ""),
   coinbaseStreamStats: vi.fn(() => ({})),
   getCoinbaseStreamBook: vi.fn(() => null),
+  getGeminiStreamBook: vi.fn(() => null),
+  startGeminiBookStream: vi.fn(),
+  geminiStreamStats: vi.fn(() => ({ connected: false, books: 0, tracked: 0 })),
+}));
+
+vi.mock("../lib/gemini-exec.js", () => ({
+  geminiSymbols: vi.fn(() => Promise.resolve([])),
+  geminiSymbolDetails: vi.fn(() => Promise.reject(new Error("no gemini in test"))),
+}));
+
+vi.mock("../lib/gemini.js", () => ({
+  geminiVerify: vi.fn(() => Promise.reject(new Error("no gemini in test"))),
 }));
 
 import arbRouter from "./arb.js";

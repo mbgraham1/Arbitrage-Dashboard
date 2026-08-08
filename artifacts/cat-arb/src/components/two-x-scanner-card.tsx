@@ -88,6 +88,9 @@ export function TwoXScannerCard() {
             (Kraken↔Coinbase both directions · ETH/BTC/SOL · $10 validation size · fires only when net &gt; floor + buffer)
           </span>
         </CardTitle>
+        <div className="text-[11px] text-muted-foreground font-normal mt-0.5" data-testid="text-2x-subtitle">
+          Legacy Kraken↔Coinbase only — the Cross-Venue Scanner covers all three venues incl. Gemini
+        </div>
       </CardHeader>
       <CardContent className="space-y-2 text-xs">
         {params && (

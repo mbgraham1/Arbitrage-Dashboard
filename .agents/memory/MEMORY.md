@@ -13,3 +13,4 @@
 - [Pre-fire consistency rules](pre-fire-consistency.md) — 200ms hard freshness (recheck too), consecutive re-projection consistency block, buffer-inclusive display nets, SHA-256 cred-cache keys, fees in lib/fees.ts.
 - [Exchange id casing](exchange-id-casing.md) — scan maps key lowercase ids (kraken/coinbase) but opportunities carry display-cased labels; always normalize before lookup or safety gates silently no-op.
 - [Regional venue constraints](regional-venue-constraints.md) — PR user; Binance.US region-blocked = context only, never actionable; Gemini/Crypto.com are the accessible candidates (public-data-only until keys verified).
+- [Merge clobber recovery](merge-clobber-recovery.md) — task merges can silently revert uncommitted work (exports, route mounts, openapi spec); check git stash@{0} first, tsc + endpoint smoke after every merge.

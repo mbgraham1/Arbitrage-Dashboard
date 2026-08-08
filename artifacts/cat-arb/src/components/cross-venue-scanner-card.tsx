@@ -21,13 +21,38 @@ import { useBotContext } from "@/store/bot-context";
 import { useToast } from "@/hooks/use-toast";
 import {
   useXvScan, useXvExecute, useXvStats, getXvStatsQueryKey,
+  useXvAutoStart, useXvAutoStop, useXvAutoStatus, getXvAutoStatusQueryKey,
+  useXvPlan,
   XvScanResult, XvRoute, XvVenueStatus, XvProjection, XvExecuteResult,
+  XvAutoStatus, XvAutoStartError, XvAutoVenueVerify, XvAutoLogEntry,
+  XvPlan, XvPlanRoute, XvPlanRequirement, XvPlanFundingVenue,
 } from "@workspace/api-client-react";
 import { useQueryClient } from "@tanstack/react-query";
 import { AlertTriangle } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 const fmt = (v: number | null | undefined, d = 4) => (v == null ? "—" : `$${v.toFixed(d)}`);
+
+/** Colour a plain-English blocker/READY label. */
+function blockerClasses(blocker: string): string {
+  const b = blocker.toUpperCase();
+  if (b.startsWith("READY")) return "bg-green-500/15 text-green-500";
+  if (b.startsWith("STALE") || b.includes("UNVERIFIED") || b.startsWith("NEED") || b.includes("NEGATIVE")) return "bg-red-500/15 text-red-500";
+  if (b.includes("ASSUMED") || b.includes("FLOOR") || b.includes("BELOW") || b.includes("MINIMUM")) return "bg-amber-500/15 text-amber-500";
+  return "bg-muted text-muted-foreground";
+}
+
+function BlockerBadge({ blocker }: { blocker: string }) {
+  return (
+    <span
+      className={cn("rounded px-1.5 py-0.5 font-mono font-semibold uppercase tracking-tight whitespace-nowrap", blockerClasses(blocker))}
+      data-testid="badge-xv-blocker"
+      title={blocker}
+    >
+      {blocker}
+    </span>
+  );
+}
 const qty = (v: number | null | undefined, d = 6) => (v == null ? "—" : v.toFixed(d));
 
 // The outcomes that mean an unhedged / unknown position — LOUD red alert.
@@ -93,7 +118,7 @@ function RouteBreakdown({ r }: { r: XvRoute }) {
   const g = r.bestFeasible ?? r.best;
   return (
     <tr data-testid={`xv-breakdown-${r.asset}-${r.buyVenue}-${r.sellVenue}`}>
-      <td colSpan={7} className="pb-2">
+      <td colSpan={8} className="pb-2">
         <div className="rounded border border-border bg-muted/30 p-2 space-y-2">
           {g && (
             <div className="grid grid-cols-2 gap-x-6 gap-y-0.5 md:grid-cols-3">
@@ -162,6 +187,330 @@ function RouteBreakdown({ r }: { r: XvRoute }) {
   );
 }
 
+/** Collapsible viewer of the auto-executor's decision log (newest first). */
+function DecisionLog({ log }: { log: XvAutoLogEntry[] }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div data-testid="xv-auto-log">
+      <button className="text-violet-300 underline-offset-2 hover:underline" onClick={() => setOpen(o => !o)} data-testid="button-xv-auto-log-toggle">
+        {open ? "hide" : "show"} decision log ({log.length})
+      </button>
+      {open && (
+        <div className="overflow-x-auto mt-1">
+          {log.length === 0 ? (
+            <div className="text-muted-foreground">no decisions logged yet — the log records near-positives and fires only.</div>
+          ) : (
+            <table className="w-full text-left whitespace-nowrap">
+              <thead className="text-muted-foreground">
+                <tr>
+                  <th className="pr-3">time</th><th className="pr-3">asset</th><th className="pr-3">route</th>
+                  <th className="pr-3 text-right">size</th><th className="pr-3 text-right">buy age</th><th className="pr-3 text-right">sell age</th>
+                  <th className="pr-3">fees</th><th className="pr-3 text-right">scanner net</th><th className="pr-3 text-right">exec net</th>
+                  <th className="pr-3 text-right">floor</th><th className="pr-3">decision</th><th className="pr-3">outcome</th>
+                  <th className="pr-3 text-right">realized</th><th>reason</th>
+                </tr>
+              </thead>
+              <tbody>
+                {log.map((e, i) => (
+                  <tr key={i} data-testid={`row-xv-auto-log-${i}`}>
+                    <td className="pr-3">{new Date(e.at).toLocaleTimeString()}</td>
+                    <td className="pr-3">{e.asset}</td>
+                    <td className="pr-3 capitalize">{e.buyVenue}→{e.sellVenue}</td>
+                    <td className="pr-3 text-right">${e.sizeUsd}</td>
+                    <td className="pr-3 text-right">{e.buyAgeMs}ms</td>
+                    <td className="pr-3 text-right">{e.sellAgeMs}ms</td>
+                    <td className="pr-3">
+                      <span className={e.feeSourceBuy === "detected" ? "text-green-500" : "text-amber-500"}>{e.feeSourceBuy}</span>/
+                      <span className={e.feeSourceSell === "detected" ? "text-green-500" : "text-amber-500"}>{e.feeSourceSell}</span>
+                    </td>
+                    <td className={cn("pr-3 text-right", e.scannerNetUsd > 0 ? "text-green-500" : "text-red-500")}>{fmt(e.scannerNetUsd, 4)}</td>
+                    <td className={cn("pr-3 text-right", e.executableNetUsd > 0 ? "text-green-500" : "text-red-500")}>{fmt(e.executableNetUsd, 4)}</td>
+                    <td className="pr-3 text-right">{fmt(e.floorUsd, 2)}</td>
+                    <td className={cn("pr-3 font-semibold", e.decision === "FIRE" ? "text-green-500" : "text-muted-foreground")}>{e.decision}</td>
+                    <td className={cn("pr-3", UNSAFE_OUTCOMES.has(e.outcome ?? "") ? "text-red-500 font-semibold" : "text-muted-foreground")}>{e.outcome ?? "—"}</td>
+                    <td className={cn("pr-3 text-right", e.realizedUsd == null ? "text-muted-foreground" : e.realizedUsd >= 0 ? "text-green-500" : "text-red-500")}>{e.realizedUsd == null ? "—" : fmt(e.realizedUsd, 4)}</td>
+                    <td className="text-muted-foreground max-w-[420px] truncate" title={e.reason}>{e.reason}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Auto-Execute engine controls + status. Uses the SAME saved creds the scanner
+ * uses and arms with the CURRENT scanner floor. Auto never transfers assets
+ * between exchanges and cannot loosen freshness past the 200ms hard gate; it
+ * runs the identical hard guards as manual Execute.
+ */
+function AutoExecutePanel({ floorUsd }: { floorUsd: number | null | undefined }) {
+  const { credentials } = useBotContext();
+  const { toast } = useToast();
+  const qc = useQueryClient();
+  const { krakenKey, krakenSecret, coinbaseKey, coinbaseSecret, geminiKey, geminiSecret } = credentials;
+  const [busy, setBusy] = useState(false);
+  const [venueWhy, setVenueWhy] = useState<XvAutoVenueVerify[] | null>(null);
+
+  const status = useXvAutoStatus({ query: { queryKey: getXvAutoStatusQueryKey(), refetchInterval: 3_000 } });
+  const start = useXvAutoStart();
+  const stop = useXvAutoStop();
+  const st: XvAutoStatus | undefined = status.data;
+  const armed = st?.armed ?? false;
+
+  const savedCreds = () => ({
+    ...(krakenKey && krakenSecret ? { krakenKey, krakenSecret } : {}),
+    ...(coinbaseKey && coinbaseSecret ? { coinbaseKey, coinbaseSecret } : {}),
+    ...(geminiKey && geminiSecret ? { geminiKey, geminiSecret } : {}),
+  });
+
+  const arm = async () => {
+    setBusy(true);
+    setVenueWhy(null);
+    try {
+      await start.mutateAsync({ data: { ...savedCreds(), ...(floorUsd != null ? { minNetUsd: floorUsd } : {}) } });
+      qc.invalidateQueries({ queryKey: getXvAutoStatusQueryKey() });
+      toast({ title: "Auto-Execute armed", description: "Event-driven — fires only when every hard guard passes." });
+    } catch (e) {
+      // 400 → per-venue verification reasons; show them verbatim.
+      const body = (e as { data?: XvAutoStartError }).data;
+      if (body?.venues) { setVenueWhy(body.venues); toast({ title: "Cannot arm", description: body.error, variant: "destructive" }); }
+      else toast({ title: "Cannot arm auto-execute", description: (e as Error).message, variant: "destructive" });
+    } finally { setBusy(false); }
+  };
+
+  const disarm = async () => {
+    setBusy(true);
+    try {
+      await stop.mutateAsync();
+      qc.invalidateQueries({ queryKey: getXvAutoStatusQueryKey() });
+      toast({ title: "Auto-Execute disarmed", description: "Keys wiped from memory." });
+    } catch (e) {
+      toast({ title: "Stop failed", description: (e as Error).message, variant: "destructive" });
+    } finally { setBusy(false); }
+  };
+
+  return (
+    <div className="rounded border border-violet-500/40 p-2 space-y-2" data-testid="xv-auto-panel">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="font-semibold text-violet-300">Auto-Execute</span>
+        <span className={cn("rounded px-1.5 py-0.5 font-semibold", armed ? "bg-green-500/15 text-green-500" : "bg-muted text-muted-foreground")}>
+          {armed ? "ARMED" : "DISARMED"}
+        </span>
+        {armed
+          ? <Button size="sm" variant="destructive" className="h-6 px-3 font-bold" disabled={busy} onClick={disarm} data-testid="button-xv-auto-stop">{busy ? "…" : "STOP"}</Button>
+          : <Button size="sm" className="h-6 px-3" disabled={busy} onClick={arm} data-testid="button-xv-auto-start">{busy ? "…" : "Arm auto-execute"}</Button>}
+        {st?.startedAt && armed && <span className="text-muted-foreground">since {new Date(st.startedAt).toLocaleTimeString()}</span>}
+      </div>
+
+      <div className="text-muted-foreground">
+        Arms with your saved keys + the current floor {fmt(floorUsd, 2)}. Event-driven: every book tick re-checks the affected asset and fires the SAME execution core with the SAME hard guards as manual Execute (auto is not an override). Auto NEVER transfers assets between exchanges. Freshness and floor can only be tightened — never loosened past the 200ms hard gate.
+      </div>
+
+      {/* Live-runs reconcile lock — loud red. */}
+      {st?.liveNeedsReconcile && (
+        <div className="border border-red-500 bg-red-500/10 rounded p-2 font-bold text-red-500" data-testid="text-xv-auto-reconcile">
+          ⚠ LIVE RUNS LOCKED — {st.liveNeedsReconcile}. Verify on the exchange, then restart the server.
+        </div>
+      )}
+      {/* Engine self-pause — loud red. */}
+      {st?.pausedReason && (
+        <div className="border border-red-500 bg-red-500/10 rounded p-2 font-bold text-red-500" data-testid="text-xv-auto-paused">
+          ⚠ AUTO-EXECUTE PAUSED — {st.pausedReason}
+        </div>
+      )}
+
+      {/* Per-venue verification failure (400 on arm) — verbatim reasons. */}
+      {venueWhy && (
+        <div className="border border-amber-500/60 bg-amber-500/10 rounded p-2 space-y-1" data-testid="text-xv-auto-venue-why">
+          <div className="text-amber-500 font-semibold flex items-center gap-1"><AlertTriangle className="h-3.5 w-3.5" /> Need ≥2 fully-verified venues to arm:</div>
+          {venueWhy.map(v => (
+            <div key={v.id}>
+              <span className="capitalize font-medium">{v.id}</span>:{" "}
+              {v.verified ? <span className="text-green-500">verified</span> : <span className="text-amber-400">{v.why ?? "not verified"}</span>}
+            </div>
+          ))}
+        </div>
+      )}
+
+      {armed && (
+        <div className="flex flex-wrap gap-x-6 gap-y-1 text-muted-foreground" data-testid="text-xv-auto-counters">
+          <span>verified venues: <span className="text-green-500 capitalize">{(st?.verifiedVenues ?? []).join(", ") || "—"}</span></span>
+          <span>floor: {fmt(st?.minNetUsd, 2)}</span>
+          <span>max quote age: {st?.maxQuoteAgeMs ?? "—"}ms</span>
+          <span>evals: {st?.evals ?? 0}</span>
+          <span>fires: <span className={cn((st?.fires ?? 0) > 0 && "text-green-500 font-semibold")}>{st?.fires ?? 0}</span></span>
+          <span>last fire: {st?.lastFireAt ? new Date(st.lastFireAt).toLocaleTimeString() : "—"}</span>
+        </div>
+      )}
+
+      <DecisionLog log={st?.log ?? []} />
+    </div>
+  );
+}
+
+/** Format a base-asset quantity compactly (large qtys as locale ints). */
+const qtyLabel = (v: number, asset: string) =>
+  `${v >= 1000 ? v.toLocaleString(undefined, { maximumFractionDigits: 0 }) : v.toFixed(6)} ${asset}`;
+
+/** READY / SHORT / UNVERIFIED chip with the honest UNVERIFIED copy. */
+function StatusChip({ status, shortBy, unit }: { status: string; shortBy?: number | null; unit?: string }) {
+  if (status === "READY")
+    return <span className="rounded px-1.5 py-0.5 font-semibold bg-green-500/15 text-green-500" data-testid="chip-plan-ready">READY</span>;
+  if (status === "SHORT")
+    return (
+      <span className="rounded px-1.5 py-0.5 font-semibold bg-red-500/15 text-red-500" data-testid="chip-plan-short">
+        SHORT{shortBy != null ? ` — short by ${unit === "USD" ? `$${shortBy.toFixed(2)}` : (unit ? qtyLabel(shortBy, unit) : shortBy.toFixed(6))}` : ""}
+      </span>
+    );
+  return (
+    <span className="rounded px-1.5 py-0.5 font-semibold bg-amber-500/15 text-amber-500" title="balance unverified — connect/fix keys, never assumed" data-testid="chip-plan-unverified">
+      UNVERIFIED
+    </span>
+  );
+}
+
+/** One requirement row inside a planned route. */
+function RequirementRow({ req }: { req: XvPlanRequirement }) {
+  const isQuote = req.kind === "quote";
+  const unit = isQuote ? "USD" : req.asset;
+  const required = isQuote ? `$${req.requiredAmount.toFixed(2)}` : `${qtyLabel(req.requiredAmount, req.asset)} (~$${req.requiredUsdValue.toFixed(2)})`;
+  const have = req.haveAmount == null ? "UNVERIFIED" : isQuote ? `$${req.haveAmount.toFixed(2)}` : qtyLabel(req.haveAmount, req.asset);
+  return (
+    <tr data-testid={`row-plan-req-${req.venue}-${req.asset}`}>
+      <td className="pr-3 capitalize">{req.venue}</td>
+      <td className="pr-3">{req.asset}</td>
+      <td className="pr-3">{required}</td>
+      <td className={cn("pr-3", req.haveAmount == null && "text-amber-500")}>{have}</td>
+      <td><StatusChip status={req.status} shortBy={req.shortBy} unit={unit} /></td>
+    </tr>
+  );
+}
+
+/**
+ * INVENTORY PLANNER — for every positive-net route, exactly what to fund WHERE
+ * before execution (assets are never transferred during a trade). Balances are
+ * only ever READY / SHORT by an exact amount / UNVERIFIED — never assumed.
+ */
+function InventoryPlanner({ savedCreds, floorUsd }: { savedCreds: () => Record<string, string>; floorUsd: number | null | undefined }) {
+  const [open, setOpen] = useState(false);
+  const [plan, setPlan] = useState<XvPlan | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const planM = useXvPlan();
+
+  // Refetch every 15s only while the section is expanded.
+  useEffect(() => {
+    if (!open) return;
+    let cancelled = false;
+    const params = floorUsd != null ? { minNetUsd: floorUsd } : undefined;
+    const tick = async () => {
+      try {
+        const r = await planM.mutateAsync({ data: savedCreds(), params });
+        if (!cancelled) { setPlan(r); setError(null); }
+      } catch (e) {
+        if (!cancelled) setError((e as Error).message);
+      }
+    };
+    tick();
+    const id = setInterval(tick, 15_000);
+    return () => { cancelled = true; clearInterval(id); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, floorUsd]);
+
+  const fundingVenues: Array<[string, XvPlanFundingVenue]> = plan
+    ? (Object.entries(plan.funding) as Array<[string, XvPlanFundingVenue]>).filter(([, f]) => f.usdNeeded > 0 || f.assets.length > 0)
+    : [];
+
+  return (
+    <div className="rounded border border-violet-500/40 p-2 space-y-2" data-testid="xv-planner">
+      <button className="font-semibold text-violet-300 underline-offset-2 hover:underline" onClick={() => setOpen(o => !o)} data-testid="button-xv-planner-toggle">
+        {open ? "▾" : "▸"} Inventory Planner — what to fund where
+      </button>
+
+      {open && (
+        <div className="space-y-3">
+          {error && <div className="text-red-500" data-testid="text-xv-planner-error">Planner failed: {error}</div>}
+          {!plan && !error && <div className="text-muted-foreground">Computing funding requirements on current books…</div>}
+
+          {plan && plan.routes.length === 0 && (
+            <div className="text-muted-foreground" data-testid="text-xv-planner-empty">
+              No positive-net routes right now — nothing worth pre-positioning.
+            </div>
+          )}
+
+          {plan && plan.routes.length > 0 && (
+            <>
+              {/* Per positive route + its two requirements. */}
+              <div className="space-y-2">
+                {plan.routes.map((r: XvPlanRoute) => {
+                  const key = `${r.asset}-${r.buyVenue}-${r.sellVenue}`;
+                  return (
+                    <div key={key} className="rounded bg-muted/30 p-2 space-y-1" data-testid={`plan-route-${key}`}>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="font-medium">{r.asset}</span>
+                        <span className="capitalize text-muted-foreground">{r.buyVenue} → {r.sellVenue}</span>
+                        <span>${r.sizeUsd.toFixed(0)}</span>
+                        <span className={cn("font-semibold", r.netAfterBufferUsd >= 0 ? "text-green-500" : "text-red-500")}>net {fmt(r.netAfterBufferUsd)}</span>
+                        {r.blocker && <BlockerBadge blocker={r.blocker} />}
+                      </div>
+                      <table className="w-full text-left">
+                        <thead className="text-muted-foreground">
+                          <tr><th className="pr-3">venue</th><th className="pr-3">asset</th><th className="pr-3">required</th><th className="pr-3">have</th><th>status</th></tr>
+                        </thead>
+                        <tbody>
+                          {r.requirements.map((req, i) => <RequirementRow key={i} req={req} />)}
+                        </tbody>
+                      </table>
+                    </div>
+                  );
+                })}
+              </div>
+
+              {/* Consolidated "what to fund where" per venue. */}
+              {fundingVenues.length > 0 && (
+                <div className="space-y-2">
+                  <div className="font-semibold text-violet-300">What to fund where</div>
+                  <div className="grid gap-2 sm:grid-cols-3">
+                    {fundingVenues.map(([venue, f]) => (
+                      <div key={venue} className="rounded border border-border p-2 space-y-1" data-testid={`plan-fund-${venue}`}>
+                        <div className="font-medium capitalize">{venue}</div>
+                        {f.usdNeeded > 0 && (
+                          <div>
+                            USD needed <span className="font-semibold">${f.usdNeeded.toFixed(2)}</span>{" "}
+                            <span className="text-muted-foreground">
+                              (have {f.usdHave == null ? <span className="text-amber-500">UNVERIFIED</span> : `$${f.usdHave.toFixed(2)}`})
+                            </span>
+                          </div>
+                        )}
+                        {f.assets.map((a) => (
+                          <div key={a.asset} data-testid={`plan-fund-${venue}-${a.asset}`}>
+                            <span className="font-semibold">{qtyLabel(a.qtyNeeded, a.asset)}</span> <span className="text-muted-foreground">(~${a.usdValue.toFixed(2)})</span>{" — "}
+                            {a.have == null ? <span className="text-amber-500">UNVERIFIED</span> : <>have {qtyLabel(a.have, a.asset)}</>}
+                            {a.status === "SHORT" && a.shortBy != null && <span className="text-red-500">, short by {qtyLabel(a.shortBy, a.asset)}</span>}
+                          </div>
+                        ))}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </>
+          )}
+
+          {plan && (
+            <div className="text-muted-foreground text-[11px] leading-snug" data-testid="text-xv-planner-note">
+              planned {new Date(plan.plannedAt).toLocaleTimeString()} · floor {fmt(plan.minNetUsd, 2)}. {plan.note}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function CrossVenueScannerCard() {
   const { credentials, liveMode, addLog } = useBotContext();
   const { toast } = useToast();
@@ -204,6 +553,13 @@ export function CrossVenueScannerCard() {
 
   const routes = data?.routes ?? [];
   const params = data?.params;
+
+  // Same saved creds the scanner uses — shared with the inventory planner.
+  const savedCreds = () => ({
+    ...(krakenKey && krakenSecret ? { krakenKey, krakenSecret } : {}),
+    ...(coinbaseKey && coinbaseSecret ? { coinbaseKey, coinbaseSecret } : {}),
+    ...(geminiKey && geminiSecret ? { geminiKey, geminiSecret } : {}),
+  });
 
   const doExecute = async (r: XvRoute) => {
     setConfirm(null);
@@ -275,6 +631,13 @@ export function CrossVenueScannerCard() {
 
         {!liveMode && <div className="text-muted-foreground">LIVE mode is off — scanner shows decisions but cannot fire.</div>}
 
+        {/* Auto-Execute engine */}
+        <AutoExecutePanel floorUsd={params?.minNetUsd} />
+
+        <div className="text-muted-foreground">
+          Manual EXECUTE obeys the EXACT same hard guards as auto (detected fees on both legs, fresh books ≤200ms, verified balances, positive net after buffer) — it is not an override.
+        </div>
+
         {/* Route table */}
         <div className="overflow-x-auto">
           <table className="w-full text-left" data-testid="table-xv-routes">
@@ -285,6 +648,7 @@ export function CrossVenueScannerCard() {
                 <th className="pr-2">Fees</th>
                 <th className="pr-2 text-right">Net a/buffer</th>
                 <th className="pr-2">Decision</th>
+                <th className="pr-2">Blocker</th>
                 <th className="pr-2"></th>
                 <th></th>
               </tr>
@@ -310,14 +674,23 @@ export function CrossVenueScannerCard() {
                         {" / "}
                         <FeeBadge source={r.feeSourceSell} pct={r.sellTakerPct} />
                       </td>
-                      <td className={cn("pr-2 text-right", isFire ? "text-green-500 font-semibold" : (g?.netAfterBufferUsd ?? -1) > 0 ? "text-amber-500" : "text-muted-foreground")}>
+                      <td className={cn("pr-2 text-right", isFire ? "text-green-500 font-semibold" : (g?.netAfterBufferUsd ?? -1) > 0 ? "text-amber-500" : "text-muted-foreground")}
+                          title="Canonical executable net: raw spread − verified fees − depth/slippage − safety buffer (fill-risk allowance). All-USD taker routes: transfer/basis cost is $0 by design — no transfers ever.">
                         {fmt(g?.netAfterBufferUsd)}
-                        {!isFire && (g?.netAfterBufferUsd ?? -1) > 0 && <span className="ml-1 text-muted-foreground" title="positive projection but NOT executable — see reason">(not executable)</span>}
                       </td>
                       <td className="pr-2">
-                        <span className={cn("rounded px-1.5 py-0.5 font-semibold", isFire ? "bg-green-500/15 text-green-500" : "bg-muted text-muted-foreground")} title={r.reason}>
-                          {r.decision}
+                        <span
+                          className={cn("rounded px-1.5 py-0.5 font-semibold",
+                            isFire ? "bg-green-500/15 text-green-500"
+                            : (g?.netAfterBufferUsd ?? -1) > 0 ? "bg-red-500/15 text-red-400"
+                            : "bg-muted text-muted-foreground")}
+                          title={r.reason}
+                        >
+                          {isFire ? "FIRE" : (g?.netAfterBufferUsd ?? -1) > 0 ? "BLOCKED" : "SKIP"}
                         </span>
+                      </td>
+                      <td className="pr-2">
+                        {r.blocker && <BlockerBadge blocker={r.blocker} />}
                       </td>
                       <td className="pr-2">
                         <button className="text-violet-300 underline-offset-2 hover:underline" onClick={() => setExpanded(isOpen ? null : key)} data-testid={`button-xv-expand-${key}`}>
@@ -329,21 +702,39 @@ export function CrossVenueScannerCard() {
                           <Tooltip>
                             <TooltipTrigger asChild>
                               <span>
-                                <Button
-                                  size="sm"
-                                  className="h-6 px-2"
-                                  disabled={!isFire || running || !liveMode}
-                                  onClick={() => setConfirm(r)}
-                                  data-testid={`button-xv-fire-${key}`}
-                                >
-                                  {running && confirm == null ? "…" : `Execute $${g?.sizeUsd ?? 10}`}
-                                </Button>
+                                {isFire ? (
+                                  <Button
+                                    size="sm"
+                                    className="h-6 px-2"
+                                    disabled={running || !liveMode}
+                                    onClick={() => setConfirm(r)}
+                                    data-testid={`button-xv-fire-${key}`}
+                                  >
+                                    {running && confirm == null ? "…" : `Execute $${g?.sizeUsd ?? 10}`}
+                                  </Button>
+                                ) : (
+                                  <span
+                                    className="inline-flex h-6 cursor-not-allowed items-center rounded border border-red-500/30 bg-red-500/10 px-2 font-semibold text-red-400"
+                                    data-testid={`blocked-xv-${key}`}
+                                  >
+                                    ⛔ BLOCKED
+                                  </span>
+                                )}
                               </span>
                             </TooltipTrigger>
-                            <TooltipContent className="max-w-[380px]">
+                            <TooltipContent className="max-w-[420px] space-y-1">
                               {isFire
-                                ? (liveMode ? "Executes one $10-capped cycle on CURRENT books with detected fees." : "Enable LIVE mode to fire.")
-                                : r.reason}
+                                ? (liveMode ? "Executes one $10-capped cycle on CURRENT books with detected fees — preflight re-runs every gate (≤200ms freshness) on the same live snapshot first." : "Enable LIVE mode to fire.")
+                                : (<>
+                                    <div className="font-semibold">{r.blocker ?? "blocked"}</div>
+                                    <div>{r.reason}</div>
+                                    {r.requiredBalances?.buyUsd != null && r.requiredBalances?.sellAssetQty != null && (
+                                      <div>
+                                        To make this executable: ${r.requiredBalances.buyUsd.toFixed(2)} USD on {r.buyVenue}
+                                        {" + "}~{r.requiredBalances.sellAssetQty >= 1000 ? r.requiredBalances.sellAssetQty.toLocaleString(undefined, { maximumFractionDigits: 0 }) : r.requiredBalances.sellAssetQty.toFixed(6)} {r.asset} pre-positioned on {r.sellVenue}. No transfers are ever done automatically.
+                                      </div>
+                                    )}
+                                  </>)}
                             </TooltipContent>
                           </Tooltip>
                         </TooltipProvider>
@@ -353,10 +744,13 @@ export function CrossVenueScannerCard() {
                   </Fragment>
                 );
               })}
-              {routes.length === 0 && data && <tr><td colSpan={7} className="text-muted-foreground py-2">no routes — waiting for live books…</td></tr>}
+              {routes.length === 0 && data && <tr><td colSpan={8} className="text-muted-foreground py-2">no routes — waiting for live books…</td></tr>}
             </tbody>
           </table>
         </div>
+
+        {/* Inventory / pre-positioning planner */}
+        <InventoryPlanner savedCreds={savedCreds} floorUsd={params?.minNetUsd} />
 
         {data?.note && <div className="text-muted-foreground">{data.note}</div>}
 

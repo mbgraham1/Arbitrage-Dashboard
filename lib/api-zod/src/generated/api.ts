@@ -924,8 +924,12 @@ export const ExecuteCbMmBody = zod.object({
   "krakenSecret": zod.string(),
   "coinbaseKey": zod.string(),
   "coinbaseSecret": zod.string(),
+  "geminiKey": zod.string().optional().describe('optional — required when either venue is gemini'),
+  "geminiSecret": zod.string().optional(),
   "asset": zod.string().describe('ETH | BTC | SOL'),
-  "direction": zod.enum(['buy', 'sell']).optional().describe('Side of the Coinbase maker order; omit to auto-pick the better projection'),
+  "direction": zod.enum(['buy', 'sell']).optional().describe('Side of the maker order; omit to auto-pick the better projection'),
+  "makerVenue": zod.enum(['kraken', 'coinbase', 'gemini']).optional().describe('optional explicit maker venue; MUST be provided together with hedgeVenue and must differ. Omit BOTH for the legacy hardened Coinbase-maker → Kraken-hedge default.'),
+  "hedgeVenue": zod.enum(['kraken', 'coinbase', 'gemini']).optional().describe('optional explicit hedge venue; MUST be provided together with makerVenue and must differ'),
   "sizeUsd": zod.number().max(executeCbMmBodySizeUsdMax).optional(),
   "minNetUsd": zod.number().optional().describe('Configurable positive profit floor; default $0.01 net after all costs; never accepted below $0.01'),
   "bufferUsd": zod.number().optional(),
@@ -962,6 +966,9 @@ export const ExecuteCbMmResponse = zod.object({
   "latencyMs": zod.number().optional()
 }).nullish(),
   "realizedProfitUsd": zod.number().nullish(),
+  "makerVenue": zod.string().optional().describe('kraken | coinbase | gemini — present on venue-generic executions'),
+  "hedgeVenue": zod.string().optional().describe('kraken | coinbase | gemini — present on venue-generic executions'),
+  "structure": zod.string().optional().describe('human-readable structure label, e.g. \'gemini(maker)→kraken(hedge)\' — present on venue-generic executions'),
   "projection": zod.record(zod.string(), zod.unknown()).nullish()
 })
 
@@ -992,6 +999,8 @@ export const MmScanBody = zod.object({
   "krakenSecret": zod.string(),
   "coinbaseKey": zod.string(),
   "coinbaseSecret": zod.string(),
+  "geminiKey": zod.string().optional().describe('optional — when provided, Gemini-inclusive maker→hedge structures are scanned and Gemini fees are DETECTED instead of assumed'),
+  "geminiSecret": zod.string().optional(),
   "minNetUsd": zod.number().nullish().describe('Configurable positive profit floor; default $0.01 net after all costs; never accepted below $0.01'),
   "bufferUsd": zod.number().nullish()
 })
@@ -1021,13 +1030,14 @@ export const MmScanResponse = zod.object({
   "at": zod.string().optional(),
   "best": zod.object({
   "asset": zod.string().optional(),
-  "structure": zod.string().optional().describe('cbMaker (Coinbase maker + Kraken hedge) | kMaker (reverse) | takerKtoC (buy Kraken, sell Coinbase, taker both) | takerCtoK'),
+  "structure": zod.string().optional().describe('cbMaker (Coinbase maker + Kraken hedge) | kMaker (reverse) | takerKtoC (buy Kraken, sell Coinbase, taker both) | takerCtoK | venueMaker (venue-generic maker→hedge, includes any Gemini leg)'),
+  "structureLabel": zod.string().optional().describe('human-readable structure, e.g. \'gemini(maker)→kraken(hedge)\''),
   "direction": zod.string().optional(),
   "available": zod.boolean().optional(),
-  "makerVenue": zod.string().optional(),
-  "hedgeVenue": zod.string().optional(),
-  "makerFeePct": zod.number().nullish(),
-  "hedgeFeePct": zod.number().nullish(),
+  "makerVenue": zod.string().optional().describe('kraken | coinbase | gemini'),
+  "hedgeVenue": zod.string().optional().describe('kraken | coinbase | gemini'),
+  "makerFeePct": zod.number().nullish().describe('null = fee tier NOT detected for the maker venue (shown as ASSUMED)'),
+  "hedgeFeePct": zod.number().nullish().describe('null = fee tier NOT detected for the hedge venue (shown as ASSUMED)'),
   "makerPrice": zod.number().optional(),
   "makerQty": zod.number().optional(),
   "hedgeVwapPx": zod.number().optional(),
@@ -1047,13 +1057,14 @@ export const MmScanResponse = zod.object({
 }).nullish(),
   "rows": zod.array(zod.object({
   "asset": zod.string().optional(),
-  "structure": zod.string().optional().describe('cbMaker (Coinbase maker + Kraken hedge) | kMaker (reverse) | takerKtoC (buy Kraken, sell Coinbase, taker both) | takerCtoK'),
+  "structure": zod.string().optional().describe('cbMaker (Coinbase maker + Kraken hedge) | kMaker (reverse) | takerKtoC (buy Kraken, sell Coinbase, taker both) | takerCtoK | venueMaker (venue-generic maker→hedge, includes any Gemini leg)'),
+  "structureLabel": zod.string().optional().describe('human-readable structure, e.g. \'gemini(maker)→kraken(hedge)\''),
   "direction": zod.string().optional(),
   "available": zod.boolean().optional(),
-  "makerVenue": zod.string().optional(),
-  "hedgeVenue": zod.string().optional(),
-  "makerFeePct": zod.number().nullish(),
-  "hedgeFeePct": zod.number().nullish(),
+  "makerVenue": zod.string().optional().describe('kraken | coinbase | gemini'),
+  "hedgeVenue": zod.string().optional().describe('kraken | coinbase | gemini'),
+  "makerFeePct": zod.number().nullish().describe('null = fee tier NOT detected for the maker venue (shown as ASSUMED)'),
+  "hedgeFeePct": zod.number().nullish().describe('null = fee tier NOT detected for the hedge venue (shown as ASSUMED)'),
   "makerPrice": zod.number().optional(),
   "makerQty": zod.number().optional(),
   "hedgeVwapPx": zod.number().optional(),
@@ -1119,13 +1130,14 @@ export const MmAutoStatusResponse = zod.object({
   "reconcileLatch": zod.string().nullish(),
   "lastBest": zod.object({
   "asset": zod.string().optional(),
-  "structure": zod.string().optional().describe('cbMaker (Coinbase maker + Kraken hedge) | kMaker (reverse) | takerKtoC (buy Kraken, sell Coinbase, taker both) | takerCtoK'),
+  "structure": zod.string().optional().describe('cbMaker (Coinbase maker + Kraken hedge) | kMaker (reverse) | takerKtoC (buy Kraken, sell Coinbase, taker both) | takerCtoK | venueMaker (venue-generic maker→hedge, includes any Gemini leg)'),
+  "structureLabel": zod.string().optional().describe('human-readable structure, e.g. \'gemini(maker)→kraken(hedge)\''),
   "direction": zod.string().optional(),
   "available": zod.boolean().optional(),
-  "makerVenue": zod.string().optional(),
-  "hedgeVenue": zod.string().optional(),
-  "makerFeePct": zod.number().nullish(),
-  "hedgeFeePct": zod.number().nullish(),
+  "makerVenue": zod.string().optional().describe('kraken | coinbase | gemini'),
+  "hedgeVenue": zod.string().optional().describe('kraken | coinbase | gemini'),
+  "makerFeePct": zod.number().nullish().describe('null = fee tier NOT detected for the maker venue (shown as ASSUMED)'),
+  "hedgeFeePct": zod.number().nullish().describe('null = fee tier NOT detected for the hedge venue (shown as ASSUMED)'),
   "makerPrice": zod.number().optional(),
   "makerQty": zod.number().optional(),
   "hedgeVwapPx": zod.number().optional(),
@@ -1502,7 +1514,8 @@ export const XvScanResponse = zod.object({
   "sellAssetQty": zod.number().optional()
 }).nullish(),
   "balancesOk": zod.boolean().nullish().describe('null = unknown (keys missing)'),
-  "minNotionalUsd": zod.number().nullish().describe('exchange-minimum notional for this pair when known (Gemini legs)')
+  "minNotionalUsd": zod.number().nullish().describe('exchange-minimum notional for this pair when known (Gemini legs)'),
+  "blocker": zod.string().optional().describe('plain-English FIRST current blocker or READY label, e.g. \'STALE KRAKEN BOOK 2572ms\', \'NEED 4.08M BONK ON KRAKEN\', \'GEMINI BALANCE UNVERIFIED\', \'KRAKEN FEES ASSUMED — CONNECT KEYS\', \'NET NEGATIVE AFTER COSTS\', \'READY TO FIRE\', \'READY TO AUTO-FIRE\'')
 })),
   "note": zod.string()
 })
@@ -1584,6 +1597,355 @@ export const XvStatsResponse = zod.object({
   "completed": zod.number(),
   "incomplete": zod.number(),
   "cumulativeRealizedUsd": zod.number().describe('sum of realized P&L from confirmed fills only')
+})
+
+
+/**
+ * Arms an event-driven engine that re-evaluates the affected asset on every WebSocket book tick and fires the shared execution core ONLY when every hard guard passes on that same fresh snapshot — identical guards to the manual Execute path (this is not an override). Requires at least TWO venues with verified keys, DETECTED fee tiers, and verified balances. Freshness can only be tightened, never loosened past the 200ms hard gate. Auto never transfers assets between exchanges. Keys are held in memory only and wiped on stop or server restart.
+ * @summary Arm the event-driven cross-venue Auto-Execute engine
+ */
+export const XvAutoStartBody = zod.object({
+  "krakenKey": zod.string().optional(),
+  "krakenSecret": zod.string().optional(),
+  "coinbaseKey": zod.string().optional(),
+  "coinbaseSecret": zod.string().optional(),
+  "geminiKey": zod.string().optional(),
+  "geminiSecret": zod.string().optional(),
+  "minNetUsd": zod.number().optional().describe('net-after-buffer floor a route must clear to auto-fire'),
+  "maxQuoteAgeMs": zod.number().optional().describe('tighten-only; clamped to the 200ms hard gate')
+}).describe('Optional per-venue credentials plus optional tighter guards.')
+
+export const XvAutoStartResponse = zod.object({
+  "armed": zod.boolean(),
+  "startedAt": zod.string(),
+  "verifiedVenues": zod.array(zod.string()),
+  "minNetUsd": zod.number().optional(),
+  "maxQuoteAgeMs": zod.number().optional(),
+  "note": zod.string().describe('verbatim engine note')
+})
+
+
+/**
+ * @summary Disarm the cross-venue Auto-Execute engine (wipes in-memory keys)
+ */
+export const XvAutoStopResponse = zod.object({
+  "armed": zod.boolean(),
+  "note": zod.string()
+})
+
+
+/**
+ * @summary Cross-venue Auto-Execute engine status + decision log
+ */
+export const XvAutoStatusResponse = zod.object({
+  "armed": zod.boolean(),
+  "startedAt": zod.string().nullish(),
+  "pausedReason": zod.string().nullish().describe('engine paused itself (e.g. after an unhedged\/indeterminate outcome) — shown as a loud alert'),
+  "liveNeedsReconcile": zod.string().nullable().describe('live runs locked pending manual reconciliation'),
+  "verifiedVenues": zod.array(zod.string()),
+  "minNetUsd": zod.number().nullish(),
+  "maxQuoteAgeMs": zod.number().nullish(),
+  "evals": zod.number(),
+  "fires": zod.number(),
+  "lastFireAt": zod.string().nullish(),
+  "log": zod.array(zod.object({
+  "at": zod.string(),
+  "asset": zod.string(),
+  "buyVenue": zod.string(),
+  "sellVenue": zod.string(),
+  "sizeUsd": zod.number(),
+  "buyAgeMs": zod.number(),
+  "sellAgeMs": zod.number(),
+  "feeSourceBuy": zod.string().describe('detected | assumed'),
+  "feeSourceSell": zod.string().describe('detected | assumed'),
+  "balancesOk": zod.boolean().nullish(),
+  "depthOk": zod.boolean(),
+  "scannerNetUsd": zod.number().describe('net profit before buffer (what the scanner ranks by)'),
+  "executableNetUsd": zod.number().describe('net after buffer — must clear the floor to fire'),
+  "floorUsd": zod.number(),
+  "decision": zod.string().describe('FIRE | SKIP'),
+  "reason": zod.string().describe('verbatim decision reason'),
+  "outcome": zod.string().nullish().describe('execution outcome once a FIRE resolves (null for SKIPs)'),
+  "realizedUsd": zod.number().nullish().describe('realized P&L from confirmed fills only (null otherwise)')
+})).describe('recent decision log, newest first (≤100)')
+})
+
+
+/**
+ * For every positive-net route on CURRENT books, computes exactly what must sit WHERE before execution — no assets are ever transferred during a trade. Buy side needs notional + taker fee + 1% margin; sell side needs base qty + 2% margin (the same margins the executor enforces). Requirements are compared against VERIFIED live balances only: READY, SHORT by an exact amount, or UNVERIFIED (never treated as $0 or as sufficient). Planning uses a relaxed 60s book-age window so funding advice doesn't flap; execution still requires ≤200ms freshness. NEVER trades.
+ * @summary Cross-venue inventory / pre-positioning planner (never trades)
+ */
+export const XvPlanQueryParams = zod.object({
+  "minNetUsd": zod.coerce.number().optional().describe('net-after-buffer floor a route must clear to be planned (default 0.01)')
+})
+
+export const XvPlanBody = zod.object({
+  "krakenKey": zod.string().optional(),
+  "krakenSecret": zod.string().optional(),
+  "coinbaseKey": zod.string().optional(),
+  "coinbaseSecret": zod.string().optional(),
+  "geminiKey": zod.string().optional(),
+  "geminiSecret": zod.string().optional()
+}).describe('Optional per-venue credentials. Providing a venue\'s keys upgrades its fees from ASSUMED (labeled) to DETECTED and verifies its balances. A route only ever FIREs when both legs\' fees are DETECTED.\n')
+
+export const XvPlanResponse = zod.object({
+  "plannedAt": zod.string(),
+  "minNetUsd": zod.number(),
+  "note": zod.string().describe('verbatim planning note — must be shown as-is'),
+  "venues": zod.array(zod.object({
+  "id": zod.string().describe('kraken | coinbase | gemini'),
+  "feeSource": zod.string().describe('detected | assumed'),
+  "takerPct": zod.number(),
+  "usd": zod.number().nullish(),
+  "balancesVerified": zod.boolean(),
+  "error": zod.string().nullish()
+})),
+  "routes": zod.array(zod.object({
+  "asset": zod.string(),
+  "buyVenue": zod.string().describe('kraken | coinbase | gemini'),
+  "sellVenue": zod.string().describe('kraken | coinbase | gemini'),
+  "sizeUsd": zod.number(),
+  "netAfterBufferUsd": zod.number(),
+  "quoteAgeMs": zod.number(),
+  "feeSourceBuy": zod.string().describe('detected | assumed'),
+  "feeSourceSell": zod.string().describe('detected | assumed'),
+  "minNotionalUsd": zod.number().nullish(),
+  "requirements": zod.array(zod.object({
+  "venue": zod.string().describe('kraken | coinbase | gemini'),
+  "kind": zod.string().describe('quote (USD needed to buy) | base (asset qty needed to sell)'),
+  "asset": zod.string().describe('USD for quote-side, the base asset for base-side'),
+  "requiredAmount": zod.number().describe('USD for quote-side, base qty for base-side'),
+  "requiredUsdValue": zod.number().describe('approximate USD value of the requirement'),
+  "haveAmount": zod.number().nullish().describe('verified balance in the same unit; null = UNVERIFIED (never assumed $0 or sufficient)'),
+  "status": zod.string().describe('READY | SHORT | UNVERIFIED'),
+  "shortBy": zod.number().nullish().describe('exact missing amount (same unit as requiredAmount) when SHORT; null otherwise')
+})),
+  "executableNow": zod.boolean().describe('both requirements READY and fees detected on both legs'),
+  "blocker": zod.string().describe('plain-English first current blocker or READY label')
+})).describe('positive-net routes, highest net first (≤12)'),
+  "funding": zod.object({
+  "kraken": zod.object({
+  "usdNeeded": zod.number().describe('max quote USD needed across positive routes buying on this venue'),
+  "usdHave": zod.number().nullish().describe('verified spendable USD; null = UNVERIFIED'),
+  "assets": zod.array(zod.object({
+  "asset": zod.string(),
+  "qtyNeeded": zod.number(),
+  "usdValue": zod.number(),
+  "have": zod.number().nullish().describe('verified balance; null = UNVERIFIED'),
+  "status": zod.string().describe('READY | SHORT | UNVERIFIED'),
+  "shortBy": zod.number().nullish()
+}))
+}),
+  "coinbase": zod.object({
+  "usdNeeded": zod.number().describe('max quote USD needed across positive routes buying on this venue'),
+  "usdHave": zod.number().nullish().describe('verified spendable USD; null = UNVERIFIED'),
+  "assets": zod.array(zod.object({
+  "asset": zod.string(),
+  "qtyNeeded": zod.number(),
+  "usdValue": zod.number(),
+  "have": zod.number().nullish().describe('verified balance; null = UNVERIFIED'),
+  "status": zod.string().describe('READY | SHORT | UNVERIFIED'),
+  "shortBy": zod.number().nullish()
+}))
+}),
+  "gemini": zod.object({
+  "usdNeeded": zod.number().describe('max quote USD needed across positive routes buying on this venue'),
+  "usdHave": zod.number().nullish().describe('verified spendable USD; null = UNVERIFIED'),
+  "assets": zod.array(zod.object({
+  "asset": zod.string(),
+  "qtyNeeded": zod.number(),
+  "usdValue": zod.number(),
+  "have": zod.number().nullish().describe('verified balance; null = UNVERIFIED'),
+  "status": zod.string().describe('READY | SHORT | UNVERIFIED'),
+  "shortBy": zod.number().nullish()
+}))
+})
+})
+})
+
+
+/**
+ * Fail-closed capability probe: a venue can only participate in an action kind this proves it supports. Missing permissions are reported verbatim with the EXACT setting to change — never silently skipped.
+ * @summary Probe each venue's rebalance capabilities (local buy / withdraw)
+ */
+export const RebalanceCapsBody = zod.object({
+  "krakenKey": zod.string().optional(),
+  "krakenSecret": zod.string().optional(),
+  "coinbaseKey": zod.string().optional(),
+  "coinbaseSecret": zod.string().optional(),
+  "geminiKey": zod.string().optional(),
+  "geminiSecret": zod.string().optional()
+}).describe('Optional per-venue credentials. Providing a venue\'s keys upgrades its fees from ASSUMED (labeled) to DETECTED and verifies its balances. A route only ever FIREs when both legs\' fees are DETECTED.\n')
+
+export const RebalanceCapsResponse = zod.object({
+  "venues": zod.array(zod.object({
+  "venue": zod.string().describe('kraken | coinbase | gemini'),
+  "localBuy": zod.boolean().describe('can place orders on this venue (trade permission)'),
+  "withdraw": zod.boolean(),
+  "whitelist": zod.array(zod.object({
+  "asset": zod.string(),
+  "key": zod.string().describe('the named Kraken withdrawal key'),
+  "method": zod.string().nullish()
+})).describe('Kraken named withdrawal keys'),
+  "missing": zod.string().nullish().describe('verbatim exact permission\/setup that is missing — must be shown as-is; null when nothing is missing')
+}))
+})
+
+
+/**
+ * For the top positive-net cross-venue routes, plans the cheapest funding action to make each executable — LOCAL_BUY (buy the base asset on the venue that needs it, using USD already there) or TRANSFER (Kraken → elsewhere via a whitelisted named key). An action is only BENEFICIAL for routes with DETECTED fees on BOTH legs and VERIFIED balances, when the route's projected net still exceeds the action's full overhead; it is revalidated on ≤2s-fresh books immediately before a BOUNDED IOC limit order (never an unbounded market order). Transfers are planned with real withdrawal fees but NEVER auto-executed in v1. The daily cap is a rolling 24h ledger that survives restarts. Projections, not guarantees. NEVER trades.
+ * @summary Plan pre-positioning actions for the best positive-net routes (never fires)
+ */
+export const RebalancePlanBody = zod.object({
+  "krakenKey": zod.string().optional(),
+  "krakenSecret": zod.string().optional(),
+  "coinbaseKey": zod.string().optional(),
+  "coinbaseSecret": zod.string().optional(),
+  "geminiKey": zod.string().optional(),
+  "geminiSecret": zod.string().optional()
+}).describe('Optional per-venue credentials. Providing a venue\'s keys upgrades its fees from ASSUMED (labeled) to DETECTED and verifies its balances. A route only ever FIREs when both legs\' fees are DETECTED.\n')
+
+export const RebalancePlanResponse = zod.object({
+  "plannedAt": zod.string(),
+  "routesConsidered": zod.number(),
+  "caps": zod.array(zod.object({
+  "venue": zod.string().describe('kraken | coinbase | gemini'),
+  "localBuy": zod.boolean().describe('can place orders on this venue (trade permission)'),
+  "withdraw": zod.boolean(),
+  "whitelist": zod.array(zod.object({
+  "asset": zod.string(),
+  "key": zod.string().describe('the named Kraken withdrawal key'),
+  "method": zod.string().nullish()
+})).describe('Kraken named withdrawal keys'),
+  "missing": zod.string().nullish().describe('verbatim exact permission\/setup that is missing — must be shown as-is; null when nothing is missing')
+})),
+  "actions": zod.array(zod.object({
+  "kind": zod.string().describe('LOCAL_BUY | TRANSFER'),
+  "asset": zod.string(),
+  "venue": zod.string().describe('where the inventory must END UP'),
+  "sourceVenue": zod.string().nullish().describe('transfer source (null for LOCAL_BUY)'),
+  "qty": zod.number(),
+  "estNotionalUsd": zod.number(),
+  "overheadUsd": zod.number().describe('full estimated cost of the action (fees + slippage + withdrawal fee)'),
+  "routeNetUsd": zod.number().describe('the route this action unlocks'),
+  "netAfterOverheadUsd": zod.number().describe('routeNet − overhead, first-cycle basis'),
+  "beneficial": zod.boolean().describe('true only when net positive after overhead, detected fees, within caps\/reserves (transfers are always false in v1)'),
+  "reason": zod.string().describe('verbatim exact math or exact refusal — must be shown as-is'),
+  "transferRisk": zod.string().nullish().describe('verbatim transfer-delay risk note (null for LOCAL_BUY)'),
+  "withdrawKey": zod.string().nullish().describe('the Kraken whitelist name used for a transfer')
+})),
+  "latch": zod.string().nullish().describe('durable reconciliation latch — an earlier order\'s outcome is unverified; the engine refuses to arm\/act until cleared. null when unset. Shown verbatim.'),
+  "rolling24hSpendUsd": zod.number().optional().describe('USD spent in the trailing rolling 24h (survives restarts)'),
+  "note": zod.string().describe('verbatim planning note — must be shown as-is')
+})
+
+
+/**
+ * Arms an engine that, once per 30s tick, executes the single best BENEFICIAL LOCAL_BUY within the per-action cap, rolling 24h daily cap, and per-venue USD reserves — as a BOUNDED IOC limit order (never an unbounded market order) after a ≤2s-fresh revalidation of fees, depth, and net edge. Transfers are never fired automatically. Keys are held in memory only and wiped on stop. Refuses to act on assumed fees or unverified balances, or while the reconciliation latch is set (409).
+ * @summary Arm the Auto Rebalance funding engine (executes LOCAL BUYS only)
+ */
+export const rebalanceArmBodyPerActionCapUsdDefault = 15;
+export const rebalanceArmBodyPerActionCapUsdMax = 25;
+
+export const rebalanceArmBodyDailyCapUsdDefault = 30;
+export const rebalanceArmBodyDailyCapUsdMax = 100;
+
+export const rebalanceArmBodyReservesUsdKrakenDefault = 0;
+export const rebalanceArmBodyReservesUsdKrakenMin = 0;
+
+export const rebalanceArmBodyReservesUsdCoinbaseDefault = 0;
+export const rebalanceArmBodyReservesUsdCoinbaseMin = 0;
+
+export const rebalanceArmBodyReservesUsdGeminiDefault = 0;
+export const rebalanceArmBodyReservesUsdGeminiMin = 0;
+
+
+
+export const RebalanceArmBody = zod.object({
+  "krakenKey": zod.string().optional(),
+  "krakenSecret": zod.string().optional(),
+  "coinbaseKey": zod.string().optional(),
+  "coinbaseSecret": zod.string().optional(),
+  "geminiKey": zod.string().optional(),
+  "geminiSecret": zod.string().optional(),
+  "perActionCapUsd": zod.number().max(rebalanceArmBodyPerActionCapUsdMax).default(rebalanceArmBodyPerActionCapUsdDefault).describe('max USD notional per action (hard ceiling 25)'),
+  "dailyCapUsd": zod.number().max(rebalanceArmBodyDailyCapUsdMax).default(rebalanceArmBodyDailyCapUsdDefault).describe('rolling daily USD cap'),
+  "reservesUsd": zod.object({
+  "kraken": zod.number().min(rebalanceArmBodyReservesUsdKrakenMin).default(rebalanceArmBodyReservesUsdKrakenDefault),
+  "coinbase": zod.number().min(rebalanceArmBodyReservesUsdCoinbaseMin).default(rebalanceArmBodyReservesUsdCoinbaseDefault),
+  "gemini": zod.number().min(rebalanceArmBodyReservesUsdGeminiMin).default(rebalanceArmBodyReservesUsdGeminiDefault)
+}).optional()
+}).describe('Optional per-venue credentials plus engine safety limits.')
+
+export const RebalanceArmResponse = zod.object({
+  "armed": zod.boolean()
+})
+
+
+/**
+ * @summary EMERGENCY STOP — disarm the rebalance engine and wipe in-memory keys
+ */
+export const RebalanceStopResponse = zod.object({
+  "armed": zod.boolean()
+})
+
+
+/**
+ * Clears the durable reconciliation latch that was set when an earlier order's outcome could not be confirmed terminal. ONLY clear this AFTER checking the venue's order history to verify what actually happened — clearing lets the engine arm and act again. Requires an explicit `{ "confirm": true }` body.
+ * @summary Clear the durable reconciliation latch (only after checking the exchange)
+ */
+export const RebalanceClearLatchBody = zod.object({
+  "confirm": zod.literal(true).describe('must be true — explicit acknowledgement you checked the exchange first')
+})
+
+export const RebalanceClearLatchResponse = zod.object({
+  "cleared": zod.boolean()
+})
+
+
+/**
+ * @summary Auto Rebalance engine status + activity log
+ */
+export const rebalanceStatusResponseCfgOneReservesUsdKrakenDefault = 0;
+export const rebalanceStatusResponseCfgOneReservesUsdKrakenMin = 0;
+
+export const rebalanceStatusResponseCfgOneReservesUsdCoinbaseDefault = 0;
+export const rebalanceStatusResponseCfgOneReservesUsdCoinbaseMin = 0;
+
+export const rebalanceStatusResponseCfgOneReservesUsdGeminiDefault = 0;
+export const rebalanceStatusResponseCfgOneReservesUsdGeminiMin = 0;
+
+
+
+export const RebalanceStatusResponse = zod.object({
+  "armed": zod.boolean(),
+  "pausedReason": zod.string().nullish().describe('engine paused itself (e.g. after a failed action) — shown as a loud alert'),
+  "latch": zod.string().nullish().describe('durable reconciliation latch — an earlier order\'s outcome is unverified; the engine refuses to arm\/act until cleared. null when unset. Shown verbatim.'),
+  "cfg": zod.object({
+  "perActionCapUsd": zod.number(),
+  "dailyCapUsd": zod.number(),
+  "reservesUsd": zod.object({
+  "kraken": zod.number().min(rebalanceStatusResponseCfgOneReservesUsdKrakenMin).default(rebalanceStatusResponseCfgOneReservesUsdKrakenDefault),
+  "coinbase": zod.number().min(rebalanceStatusResponseCfgOneReservesUsdCoinbaseMin).default(rebalanceStatusResponseCfgOneReservesUsdCoinbaseDefault),
+  "gemini": zod.number().min(rebalanceStatusResponseCfgOneReservesUsdGeminiMin).default(rebalanceStatusResponseCfgOneReservesUsdGeminiDefault)
+})
+}).nullish(),
+  "dailyUsedUsd": zod.number().describe('USD spent in the trailing rolling 24h (survives restarts), NOT calendar-day'),
+  "ticks": zod.number(),
+  "actionsDone": zod.number(),
+  "log": zod.array(zod.object({
+  "at": zod.string(),
+  "kind": zod.string().describe('LOCAL_BUY | TRANSFER | ARM | STOP | CLEAR_LATCH'),
+  "asset": zod.string(),
+  "fromVenue": zod.string().nullish(),
+  "toVenue": zod.string(),
+  "qty": zod.number(),
+  "notionalUsd": zod.number().nullish(),
+  "feeUsd": zod.number().nullish(),
+  "status": zod.string().describe('done | partial | failed | skipped | refused'),
+  "detail": zod.string(),
+  "orderId": zod.string().nullish()
+})).describe('recent activity log, newest first (≤100)')
 })
 
 
@@ -1721,13 +2083,14 @@ export const GetGraphScanResponse = zod.object({
   "hops": zod.array(zod.object({
   "from": zod.string(),
   "to": zod.string(),
-  "exchange": zod.enum(['kraken', 'coinbase', 'bridge']),
+  "exchange": zod.enum(['kraken', 'coinbase', 'gemini', 'bridge']),
   "pair": zod.string(),
   "side": zod.enum(['buy', 'sell', 'bridge']),
   "amountIn": zod.number(),
   "amountOut": zod.number(),
   "feePct": zod.number(),
-  "limitPrice": zod.number()
+  "limitPrice": zod.number(),
+  "streamed": zod.boolean().optional().describe('true = leg priced from a LIVE stream book; false = REST fallback')
 })),
   "description": zod.string(),
   "startUsd": zod.number(),
@@ -1742,7 +2105,12 @@ export const GetGraphScanResponse = zod.object({
   "histFillRate": zod.number().nullish().describe('Historical live fill rate 0..1; null until the route has ≥10 live attempts (insufficient history to judge).'),
   "quoteAgeMs": zod.number().nullish().describe('Age (ms) of the streamed book snapshot this route\'s netProfitUsd was priced from; null when stream pricing was unavailable'),
   "pricedFrom": zod.string().nullish().describe('Pricing source for netProfitUsd: \'stream\' = executor-grade simulator on live streamed books (matches the pre-fire math exactly); \'graph\' = graph engine estimate (stream unavailable)'),
-  "effectiveScoreUsd": zod.number().optional().describe('Ranking score: net profit × historical fill rate (0.7 neutral prior when history is insufficient). Approximates expected realized profit.')
+  "effectiveScoreUsd": zod.number().optional().describe('Ranking score: net profit × historical fill rate (0.7 neutral prior when history is insufficient). Approximates expected realized profit.'),
+  "researchReason": zod.string().nullish().describe('Non-null when NOT executable — an honest reason the route is research-only (e.g. Gemini scan-only, unsupported shape, REST-priced, fees assumed). Shown verbatim.'),
+  "hasGeminiLeg": zod.boolean().optional().describe('true when the route contains at least one Gemini hop. Such routes are ALWAYS research-only (executable:false) — the graph executor has no Gemini wiring. Additive; K\/CB routes leave it false.'),
+  "geminiFeesDetected": zod.boolean().nullish().describe('whether Gemini fees on this route were DETECTED (keys present) or ASSUMED. null when the route has no Gemini hop.'),
+  "geminiBookAgeMs": zod.number().nullish().describe('age (ms) of the OLDEST Gemini leg\'s live l2 book, measured from LOCAL ARRIVAL (Gemini l2 carries no exchange timestamp). null when no Gemini hop.'),
+  "geminiBookAgeCaveat": zod.string().nullish().describe('honest freshness caveat for the Gemini book age. null when no Gemini hop. Shown verbatim in the route tooltip.')
 })),
   "tradeSizeUsd": zod.number(),
   "krakenFeesPct": zod.number(),
@@ -2006,10 +2374,12 @@ export const GetTradeSummaryResponse = zod.object({
   "totalProfitUsd": zod.number(),
   "avgNetEdgePct": zod.number(),
   "bestTradeProfitUsd": zod.number(),
-  "verifiedTrades": zod.number().optional().describe('Rows where every leg has confirmed exchange fill data + order IDs.'),
+  "verifiedTrades": zod.number().optional().describe('Rows where every leg has confirmed exchange fill data + order IDs AND a non-null realized P&L (excludes indeterminate\/partial rows).'),
   "failedTrades": zod.number().optional().describe('Live attempts that did not complete (incl. unwinds).'),
   "simulatedTrades": zod.number().optional().describe('Dry runs, scanner estimates, and legacy rows without fill proof.'),
-  "realizedPnlUsd": zod.number().optional().describe('SUM of realizedProfitUsd over VERIFIED rows only — real money, never estimates.'),
+  "realizedPnlUsd": zod.number().optional().describe('SUM of realizedProfitUsd over VERIFIED rows with a non-null realized figure only — real money, never estimates\/dry runs.'),
+  "liveCompletedCycles": zod.number().optional().describe('Count of live (isDryRun=false), fully-completed, verified-fill cycles across ALL strategies (triangles, graph-cross, INV, MM2, XV, 2X\/2XTEST).'),
+  "liveRealizedPnlUsd": zod.number().optional().describe('SUM of realizedProfitUsd over live verified fills only (isDryRun=false, status=verified, realized non-null).'),
   "bestVerifiedProfitUsd": zod.number().nullish(),
   "recentTrades": zod.array(zod.object({
   "id": zod.number(),

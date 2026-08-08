@@ -144,12 +144,29 @@ function StatusIndicator() {
       <div className="h-4 w-px bg-border" />
       <ForceModeControls />
       <div className="h-4 w-px bg-border" />
-      <div className="flex items-center gap-2">
-        <div className={cn("h-3 w-3 rounded-none", liveMode ? "bg-destructive animate-pulse" : "bg-primary")} />
-        <span className={cn("text-xs font-bold uppercase tracking-wider", liveMode ? "text-destructive" : "text-primary")}>
-          {liveMode ? "MODE: LIVE" : "MODE: DRY RUN"}
-        </span>
-      </div>
+      {liveMode ? (
+        <div
+          className="flex items-center gap-2 px-2 py-1 border-2 border-destructive bg-destructive/10 animate-pulse"
+          data-testid="badge-mode"
+          title="LIVE mode — every actionable engine places REAL orders with REAL money on your connected accounts."
+        >
+          <Skull className="h-3.5 w-3.5 text-destructive" />
+          <span className="text-xs font-bold uppercase tracking-wider text-destructive">
+            LIVE — real money
+          </span>
+        </div>
+      ) : (
+        <div
+          className="flex items-center gap-2 px-2 py-1 border-2 border-amber-500 bg-amber-500/10"
+          data-testid="badge-mode"
+          title="PAPER mode — engines simulate fills and record to the ledger, but NO real orders are placed."
+        >
+          <span className="h-3 w-3 rounded-none bg-amber-500" />
+          <span className="text-xs font-bold uppercase tracking-wider text-amber-500">
+            PAPER MODE — no real orders
+          </span>
+        </div>
+      )}
       <div className="h-4 w-px bg-border" />
       <TooltipProvider>
         <Tooltip>

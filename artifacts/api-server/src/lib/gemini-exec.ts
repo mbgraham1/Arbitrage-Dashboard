@@ -182,3 +182,46 @@ export async function geminiOrderStatus(creds: GeminiCreds, orderId: string): Pr
   const o = await geminiOrderApi<GeminiOrderResponse>(creds, "/v1/order/status", { order_id: orderId });
   return toInfo(o);
 }
+
+/**
+ * POST-ONLY maker order via Gemini's "maker-or-cancel" option: the exchange
+ * rests the order ONLY if it would not immediately cross; if it would take, it
+ * is cancelled instantly (never fills as taker). That cancellation is a clean
+ * "would-have-crossed" post-rejection — NOT a fill. `limitPrice` must already
+ * join the caller's side of a fresh book. Callers MUST poll geminiOrderStatus
+ * until terminal before trusting fills. A returned {terminal:true, filledQty:0}
+ * means the maker-or-cancel was rejected (crossed) and nothing rested.
+ */
+export async function geminiMakerOrCancelOrder(
+  creds: GeminiCreds,
+  side: "buy" | "sell",
+  symbol: string,
+  qty: number,
+  limitPrice: number,
+  details: GeminiSymbolDetails,
+): Promise<GeminiOrderInfo> {
+  const amount = geminiQuantizeQty(qty, details.tickSize);
+  const price = geminiQuantizePrice(limitPrice, details.quoteIncrement);
+  if (amount < details.minOrderSize) {
+    throw new Error(`InvalidQuantity: ${amount} below Gemini min order size ${details.minOrderSize} for ${symbol}`);
+  }
+  const o = await geminiOrderApi<GeminiOrderResponse>(creds, "/v1/order/new", {
+    symbol: symbol.toLowerCase(),
+    amount: String(amount),
+    price: String(price),
+    side,
+    type: "exchange limit",
+    options: ["maker-or-cancel"],
+  });
+  return toInfo(o);
+}
+
+/**
+ * Cancel an order. The cancel response is an ACK, NOT proof of a terminal
+ * state — callers MUST poll geminiOrderStatus until terminal to confirm the
+ * order is truly off the book (parity with the Kraken/Coinbase cancel-confirm).
+ */
+export async function geminiCancelOrder(creds: GeminiCreds, orderId: string): Promise<GeminiOrderInfo> {
+  const o = await geminiOrderApi<GeminiOrderResponse>(creds, "/v1/order/cancel", { order_id: orderId });
+  return toInfo(o);
+}

@@ -43,8 +43,10 @@ export function CbMmCard() {
   const autoStatus = useMmAutoStatus({ query: { queryKey: getMmAutoStatusQueryKey(), refetchInterval: 5_000 } });
   const stats = useGetCbMmStats({ query: { queryKey: getGetCbMmStatsQueryKey(), refetchInterval: 15_000 } });
 
-  const { krakenKey, krakenSecret, coinbaseKey, coinbaseSecret } = credentials;
+  const { krakenKey, krakenSecret, coinbaseKey, coinbaseSecret, geminiKey, geminiSecret } = credentials;
   const hasCreds = !!krakenKey && !!krakenSecret && !!coinbaseKey && !!coinbaseSecret;
+  const hasGemini = !!geminiKey && !!geminiSecret;
+  const gemCreds = hasGemini ? { geminiKey, geminiSecret } : {};
   const floorNum = Math.max(0.01, parseFloat(floorUsd) || 0.01);
   const scanBusy = useRef(false);
 
@@ -56,7 +58,7 @@ export function CbMmCard() {
       if (scanBusy.current) return;
       scanBusy.current = true;
       try {
-        const r = await mmScan.mutateAsync({ data: { krakenKey, krakenSecret, coinbaseKey, coinbaseSecret, minNetUsd: floorNum } });
+        const r = await mmScan.mutateAsync({ data: { krakenKey, krakenSecret, coinbaseKey, coinbaseSecret, ...gemCreds, minNetUsd: floorNum } });
         if (!cancelled) { setScan(r); setScanError(null); }
       } catch (e) {
         if (!cancelled) setScanError((e as Error).message);
@@ -66,21 +68,39 @@ export function CbMmCard() {
     const iv = setInterval(tick, 4_000);
     return () => { cancelled = true; clearInterval(iv); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [krakenKey, krakenSecret, coinbaseKey, coinbaseSecret, floorNum]);
+  }, [krakenKey, krakenSecret, coinbaseKey, coinbaseSecret, geminiKey, geminiSecret, floorNum]);
 
   const best = scan?.best ?? null;
   const runnable = (scan?.rows ?? []).filter(r => r.verdict === "RUN");
-  const manualCandidate = runnable.find(r => r.autoExecutable) ?? null;
+  // A row is executable from THIS card when the venue-generic executor can run
+  // it: legacy Coinbase-maker→Kraken-hedge (autoExecutable), OR any explicit
+  // maker→hedge structure whose venues both have creds (Gemini legs need
+  // Gemini keys). Taker-taker rows are diagnostics-only and never fired here.
+  const canExecuteRow = (r: MmScanRow): boolean => {
+    if (r.structure === "takerKtoC" || r.structure === "takerCtoK") return false;
+    if (r.autoExecutable) return true;
+    const venuesHaveCreds = (v: string | undefined) => v === "kraken" ? hasCreds : v === "coinbase" ? hasCreds : v === "gemini" ? hasGemini : false;
+    return venuesHaveCreds(r.makerVenue) && venuesHaveCreds(r.hedgeVenue);
+  };
+  const manualCandidate = runnable.find(canExecuteRow) ?? null;
   const auto = autoStatus.data;
   const autoRunning = !!auto?.running;
 
   const run = async () => {
     if (!hasCreds || !liveMode || !manualCandidate) return;
     setRunning(true);
-    addLog("info", `MM2: firing ${manualCandidate.asset} ${manualCandidate.direction} (projected ${fmt(manualCandidate.projectedNetUsd)})`);
+    const label = manualCandidate.structureLabel ?? `${manualCandidate.makerVenue}(maker)→${manualCandidate.hedgeVenue}(hedge)`;
+    addLog("info", `MM2: firing ${manualCandidate.asset} ${label} ${manualCandidate.direction} (projected ${fmt(manualCandidate.projectedNetUsd)})`);
+    // Legacy CB-maker→K-hedge fires with venues omitted (unchanged hardened
+    // path). Any other structure passes explicit makerVenue/hedgeVenue so the
+    // backend routes to the venue-generic executor.
+    const explicitVenues = manualCandidate.autoExecutable
+      ? {}
+      : { makerVenue: (manualCandidate.makerVenue ?? "coinbase") as "kraken" | "coinbase" | "gemini", hedgeVenue: (manualCandidate.hedgeVenue ?? "kraken") as "kraken" | "coinbase" | "gemini" };
     try {
       const r = await exec.mutateAsync({ data: {
-        krakenKey, krakenSecret, coinbaseKey, coinbaseSecret,
+        krakenKey, krakenSecret, coinbaseKey, coinbaseSecret, ...gemCreds,
+        ...explicitVenues,
         asset: manualCandidate.asset!, direction: manualCandidate.direction as "buy" | "sell",
         sizeUsd: 10, minNetUsd: floorNum,
         restWindowSec: Math.min(120, Math.max(5, parseFloat(restWindowSec) || 30)),
@@ -119,7 +139,20 @@ export function CbMmCard() {
   const rowLabel = (r: MmScanRow) =>
     r.structure === "takerKtoC" ? `${r.asset} · taker: buy K → sell CB`
       : r.structure === "takerCtoK" ? `${r.asset} · taker: buy CB → sell K`
-        : `${r.asset} · ${r.structure === "cbMaker" ? "CB-maker→K-hedge" : "K-maker→CB-hedge"} · ${r.direction}`;
+        // Prefer the backend's venue-generic structureLabel (e.g.
+        // "gemini(maker)→kraken(hedge)"); fall back to the legacy K/CB label.
+        : `${r.asset} · ${r.structureLabel ?? (r.structure === "cbMaker" ? "coinbase(maker)→kraken(hedge)" : "kraken(maker)→coinbase(hedge)")} · ${r.direction}`;
+
+  const gemVenue = (v: string | undefined) => v === "gemini";
+  // Per-venue fee chip: DETECTED when the pct is present, ASSUMED (amber) when
+  // null. Never resolve an assumed fee to a green/executable number.
+  const FeeChip = ({ venue, pct }: { venue: string | undefined; pct: number | null | undefined }) => (
+    <span className={cn("inline-flex items-center gap-0.5 rounded px-1 py-0.5 mr-1",
+      pct == null ? "bg-amber-500/15 text-amber-500" : "bg-muted text-muted-foreground")}
+      title={pct == null ? `${venue} fee tier NOT detected — connect ${venue} keys (assumptions never gate live execution)` : `${venue} detected fee ${pct}%`}>
+      {gemVenue(venue) ? "GEM " : ""}{venue}: {pct == null ? "ASSUMED" : `${pct}%`}
+    </span>
+  );
 
   const oppRows = (scan?.rows ?? []).filter(r => r.available).slice(0, 10);
   const anyFire = oppRows.some(r => r.fire === "FIRE");
@@ -149,21 +182,34 @@ export function CbMmCard() {
             <div className="overflow-x-auto">
               <table className="w-full text-left whitespace-nowrap">
                 <thead className="text-muted-foreground">
-                  <tr><th>#</th><th>route</th><th className="text-right">gross edge</th><th className="text-right">fees</th><th className="text-right">slip</th><th className="text-right">proj. net</th><th>needs</th><th>verdict · why</th></tr>
+                  <tr><th>#</th><th>route</th><th>fees (per venue)</th><th className="text-right">gross edge</th><th className="text-right">slip</th><th className="text-right">proj. net</th><th>needs</th><th>verdict · why</th></tr>
                 </thead>
                 <tbody>
-                  {oppRows.map((r, i) => (
+                  {oppRows.map((r, i) => {
+                    const executableHere = canExecuteRow(r);
+                    return (
                     <tr key={i} data-testid={`row-opp-${i}`}>
                       <td className="text-muted-foreground pr-1">{i + 1}</td>
                       <td className="pr-2">{rowLabel(r)}</td>
+                      <td className="pr-2 whitespace-nowrap">
+                        <FeeChip venue={r.makerVenue} pct={r.makerFeePct} />
+                        <FeeChip venue={r.hedgeVenue} pct={r.hedgeFeePct} />
+                      </td>
                       <td className="text-right pr-2">{fmt(r.grossEdgeUsd)}</td>
-                      <td className="text-right pr-2 text-red-400">{fmt((r.makerFeeUsd ?? 0) + (r.hedgeFeeUsd ?? 0), 3)}</td>
                       <td className="text-right pr-2 text-red-400">{fmt(r.hedgeSlippageUsd, 3)}</td>
                       <td className={cn("text-right pr-2 font-semibold", (r.projectedNetUsd ?? 0) > 0 ? "text-green-500" : "text-red-500")}>{fmt(r.projectedNetUsd)}</td>
                       <td className={cn("pr-2", r.inventoryReady ? "" : "text-amber-500")} title={r.inventoryReason}>{r.requiredBalances}{r.inventoryReady ? " ✓" : " ✗"}</td>
-                      <td className={fireColor(r.fire)} title={r.reason}>{r.fire} · <span className="font-normal text-muted-foreground">{r.reason}</span></td>
+                      <td className={fireColor(r.fire)} title={r.reason}>
+                        {r.fire} · <span className="font-normal text-muted-foreground">{r.reason}</span>
+                        {r.verdict === "RUN" && !executableHere && (
+                          <span className="ml-1 rounded bg-muted px-1 py-0.5 text-[10px] font-normal text-muted-foreground"
+                            title={(r.structure === "takerKtoC" || r.structure === "takerCtoK") ? "Taker-taker is evaluation-only — run manually from Diagnostics" : "Connect keys for both venues on this leg to execute it here"}>
+                            {(r.structure === "takerKtoC" || r.structure === "takerCtoK") ? "DIAGNOSTICS-ONLY" : "CONNECT KEYS TO EXECUTE"}
+                          </span>
+                        )}
+                      </td>
                     </tr>
-                  ))}
+                  ); })}
                   {oppRows.length === 0 && <tr><td colSpan={8} className="text-muted-foreground">Books warming up — no projectable route yet.</td></tr>}
                 </tbody>
               </table>
@@ -245,13 +291,43 @@ export function CbMmCard() {
           <input value={floorUsd} onChange={e => setFloorUsd(e.target.value)} className="bg-background border rounded px-2 py-1 w-16" data-testid="input-mm2-floor" />
           <label className="text-muted-foreground">rest (s)</label>
           <input value={restWindowSec} onChange={e => setRestWindowSec(e.target.value)} className="bg-background border rounded px-2 py-1 w-14" data-testid="input-mm2-rest" />
-          <Button size="sm" variant={autoRunning ? "destructive" : "default"} disabled={!hasCreds || !liveMode || autoStart.isPending || autoStop.isPending} onClick={toggleAuto} data-testid="button-mm2-auto">
+          <Button
+            size="sm"
+            variant={autoRunning ? "destructive" : "default"}
+            disabled={!hasCreds || !liveMode || autoStart.isPending || autoStop.isPending}
+            onClick={toggleAuto}
+            data-testid="button-mm2-auto"
+            title={!hasCreds
+              ? "Add Kraken + Coinbase API keys in Config — live mode places real orders"
+              : !liveMode
+                ? "Flip MODE to LIVE — AUTO places real maker-hedge orders"
+                : autoRunning ? "Stop the AUTO maker-hedge engine" : "Start AUTO — watches and fires hardened $10 cycles"}
+          >
             {autoRunning ? "Stop AUTO" : "Start AUTO (watch & fire $10 cycles)"}
           </Button>
-          <Button size="sm" variant="secondary" disabled={running || autoRunning || !hasCreds || !liveMode || !manualCandidate} onClick={run} data-testid="button-mm2-run">
-            {running ? "resting…" : manualCandidate ? `Fire ${manualCandidate.asset} ${manualCandidate.direction} once` : "No route clears the gate"}
+          <Button
+            size="sm"
+            variant="secondary"
+            disabled={running || autoRunning || !hasCreds || !liveMode || !manualCandidate}
+            onClick={run}
+            data-testid="button-mm2-run"
+            title={!hasCreds
+              ? "Add Kraken + Coinbase API keys in Config — live mode places real orders"
+              : !liveMode
+                ? "Flip MODE to LIVE — this fires a real order"
+                : !manualCandidate ? "No executable route clears the gate" : "Fire one hardened maker-hedge cycle on live books"}
+          >
+            {running ? "resting…" : manualCandidate ? `Fire ${manualCandidate.asset} ${manualCandidate.structureLabel ?? `${manualCandidate.makerVenue}→${manualCandidate.hedgeVenue}`} ${manualCandidate.direction} once` : "No executable route clears the gate"}
           </Button>
-          {!liveMode && <span className="text-muted-foreground">LIVE mode off</span>}
+          {!hasCreds && (
+            <span className="text-amber-500 font-bold" data-testid="text-mm2-nocreds-buttons">
+              Add Kraken + Coinbase API keys in Config — live mode places real orders
+            </span>
+          )}
+          {hasCreds && !liveMode && <span className="text-amber-500">PAPER MODE — flip MODE to LIVE to fire real orders</span>}
+        </div>
+        <div className="text-muted-foreground" data-testid="text-mm2-auto-scope">
+          AUTO still fires only the hardened Coinbase-maker → Kraken-hedge path. Gemini-inclusive and Kraken-maker structures are SCAN-ONLY here — fire them one at a time with the manual button above (each does a fresh ≤200ms revalidation on live books before placing a bounded order).
         </div>
 
         {auto && (auto.running || auto.stopReason || (auto.events?.length ?? 0) > 0) && (

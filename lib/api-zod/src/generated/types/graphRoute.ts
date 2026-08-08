@@ -30,4 +30,14 @@ export interface GraphRoute {
   pricedFrom?: string | null;
   /** Ranking score: net profit × historical fill rate (0.7 neutral prior when history is insufficient). Approximates expected realized profit. */
   effectiveScoreUsd?: number;
+  /** Non-null when NOT executable — an honest reason the route is research-only (e.g. Gemini scan-only, unsupported shape, REST-priced, fees assumed). Shown verbatim. */
+  researchReason?: string | null;
+  /** true when the route contains at least one Gemini hop. Such routes are ALWAYS research-only (executable:false) — the graph executor has no Gemini wiring. Additive; K/CB routes leave it false. */
+  hasGeminiLeg?: boolean;
+  /** whether Gemini fees on this route were DETECTED (keys present) or ASSUMED. null when the route has no Gemini hop. */
+  geminiFeesDetected?: boolean | null;
+  /** age (ms) of the OLDEST Gemini leg's live l2 book, measured from LOCAL ARRIVAL (Gemini l2 carries no exchange timestamp). null when no Gemini hop. */
+  geminiBookAgeMs?: number | null;
+  /** honest freshness caveat for the Gemini book age. null when no Gemini hop. Shown verbatim in the route tooltip. */
+  geminiBookAgeCaveat?: string | null;
 }

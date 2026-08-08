@@ -14,14 +14,18 @@ export interface TradeSummary {
   totalProfitUsd: number;
   avgNetEdgePct: number;
   bestTradeProfitUsd: number;
-  /** Rows where every leg has confirmed exchange fill data + order IDs. */
+  /** Rows where every leg has confirmed exchange fill data + order IDs AND a non-null realized P&L (excludes indeterminate/partial rows). */
   verifiedTrades?: number;
   /** Live attempts that did not complete (incl. unwinds). */
   failedTrades?: number;
   /** Dry runs, scanner estimates, and legacy rows without fill proof. */
   simulatedTrades?: number;
-  /** SUM of realizedProfitUsd over VERIFIED rows only — real money, never estimates. */
+  /** SUM of realizedProfitUsd over VERIFIED rows with a non-null realized figure only — real money, never estimates/dry runs. */
   realizedPnlUsd?: number;
+  /** Count of live (isDryRun=false), fully-completed, verified-fill cycles across ALL strategies (triangles, graph-cross, INV, MM2, XV, 2X/2XTEST). */
+  liveCompletedCycles?: number;
+  /** SUM of realizedProfitUsd over live verified fills only (isDryRun=false, status=verified, realized non-null). */
+  liveRealizedPnlUsd?: number;
   /** @nullable */
   bestVerifiedProfitUsd?: number | null;
   recentTrades: TradeRecord[];

@@ -18,5 +18,11 @@ export interface CbMmExecuteResult {
   makerLeg?: CbMmLeg | null;
   hedgeLeg?: CbMmLeg | null;
   realizedProfitUsd?: number | null;
+  /** kraken | coinbase | gemini — present on venue-generic executions */
+  makerVenue?: string;
+  /** kraken | coinbase | gemini — present on venue-generic executions */
+  hedgeVenue?: string;
+  /** human-readable structure label, e.g. 'gemini(maker)→kraken(hedge)' — present on venue-generic executions */
+  structure?: string;
   projection?: CbMmExecuteResultProjection;
 }

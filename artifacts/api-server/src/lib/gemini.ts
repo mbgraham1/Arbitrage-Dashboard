@@ -62,7 +62,7 @@ export type GeminiAccount = {
   detectedAt: number;
 };
 
-const READONLY_ALLOWED = new Set(["/v1/notionalvolume", "/v1/balances", "/v1/account", "/v1/account/list"]);
+const READONLY_ALLOWED = new Set(["/v1/notionalvolume", "/v1/balances", "/v1/account", "/v1/account/list", "/v1/roles"]);
 
 // Monotonic per-process nonce shared by ALL Gemini private callers (this module
 // and gemini-exec). Gemini nonces are per-key: two modules with independent
@@ -123,10 +123,13 @@ const cacheKey = (c: GeminiCreds) => crypto.createHash("sha256").update(`${c.gem
  * scopeIssue set so callers can show the exact problem (and must treat
  * balances as UNVERIFIED — usdBalance/balances are zeroed in that case).
  */
-export async function geminiVerify(creds: GeminiCreds): Promise<GeminiAccount> {
+export async function geminiVerify(creds: GeminiCreds, opts: { maxAgeMs?: number } = {}): Promise<GeminiAccount> {
   const key = cacheKey(creds);
   const hit = cache.get(key);
-  if (hit && Date.now() - hit.at < CACHE_MS) return hit.acct;
+  // Live execution paths pass maxAgeMs: 0 — balances must be re-read fresh;
+  // only display/scan paths may accept the multi-minute cache.
+  const maxAge = Math.min(CACHE_MS, opts.maxAgeMs ?? CACHE_MS);
+  if (hit && Date.now() - hit.at < maxAge) return hit.acct;
 
   // 1. Fee tier — hard requirement; failure here means the key is unusable.
   const vol = await geminiPrivate<{ api_maker_fee_bps?: number; api_taker_fee_bps?: number; web_maker_fee_bps?: number; web_taker_fee_bps?: number }>(creds, "/v1/notionalvolume");
@@ -196,4 +199,11 @@ export async function geminiVerify(creds: GeminiCreds): Promise<GeminiAccount> {
   };
   cache.set(key, { at: Date.now(), acct });
   return acct;
+}
+
+/** Read-only probe of the key's roles — withdrawals require the Fund Manager
+ * role AND (when enabled) an approved-address whitelist. Never guesses. */
+export async function geminiRoles(creds: GeminiCreds): Promise<{ isFundManager: boolean; isTrader: boolean; raw: Record<string, unknown> }> {
+  const r = await geminiPrivate<Record<string, unknown>>(creds, "/v1/roles");
+  return { isFundManager: r.isFundManager === true, isTrader: r.isTrader === true, raw: r };
 }

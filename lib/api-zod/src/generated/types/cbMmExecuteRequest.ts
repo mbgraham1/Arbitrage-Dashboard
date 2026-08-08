@@ -6,16 +6,25 @@
  * OpenAPI spec version: 0.1.0
  */
 import type { CbMmExecuteRequestDirection } from './cbMmExecuteRequestDirection';
+import type { CbMmExecuteRequestHedgeVenue } from './cbMmExecuteRequestHedgeVenue';
+import type { CbMmExecuteRequestMakerVenue } from './cbMmExecuteRequestMakerVenue';
 
 export interface CbMmExecuteRequest {
   krakenKey: string;
   krakenSecret: string;
   coinbaseKey: string;
   coinbaseSecret: string;
+  /** optional — required when either venue is gemini */
+  geminiKey?: string;
+  geminiSecret?: string;
   /** ETH | BTC | SOL */
   asset: string;
-  /** Side of the Coinbase maker order; omit to auto-pick the better projection */
+  /** Side of the maker order; omit to auto-pick the better projection */
   direction?: CbMmExecuteRequestDirection;
+  /** optional explicit maker venue; MUST be provided together with hedgeVenue and must differ. Omit BOTH for the legacy hardened Coinbase-maker → Kraken-hedge default. */
+  makerVenue?: CbMmExecuteRequestMakerVenue;
+  /** optional explicit hedge venue; MUST be provided together with makerVenue and must differ */
+  hedgeVenue?: CbMmExecuteRequestHedgeVenue;
   /** @maximum 10 */
   sizeUsd?: number;
   /** Configurable positive profit floor; default $0.01 net after all costs; never accepted below $0.01 */

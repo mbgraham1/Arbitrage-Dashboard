@@ -962,6 +962,243 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/XvStats"
+  /arb/xv-auto/start:
+    post:
+      operationId: xvAutoStart
+      tags: [trades]
+      summary: Arm the event-driven cross-venue Auto-Execute engine
+      description: >
+        Arms an event-driven engine that re-evaluates the affected asset on
+        every WebSocket book tick and fires the shared execution core ONLY when
+        every hard guard passes on that same fresh snapshot — identical guards
+        to the manual Execute path (this is not an override). Requires at least
+        TWO venues with verified keys, DETECTED fee tiers, and verified
+        balances. Freshness can only be tightened, never loosened past the
+        200ms hard gate. Auto never transfers assets between exchanges. Keys are
+        held in memory only and wiped on stop or server restart.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/XvAutoStartRequest"
+      responses:
+        "200":
+          description: Auto-execute armed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/XvAutoStartResult"
+        "400":
+          description: Fewer than two verified venues — per-venue reasons returned
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/XvAutoStartError"
+        "409":
+          description: Already armed, or live runs locked pending manual reconciliation
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /arb/xv-auto/stop:
+    post:
+      operationId: xvAutoStop
+      tags: [trades]
+      summary: Disarm the cross-venue Auto-Execute engine (wipes in-memory keys)
+      responses:
+        "200":
+          description: Auto-execute disarmed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/XvAutoStopResult"
+  /arb/xv-auto/status:
+    get:
+      operationId: xvAutoStatus
+      tags: [trades]
+      summary: Cross-venue Auto-Execute engine status + decision log
+      responses:
+        "200":
+          description: Armed state, verified venues, counters, pause/lock reasons, and the recent decision log (newest first, ≤100)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/XvAutoStatus"
+  /arb/xv-plan:
+    post:
+      operationId: xvPlan
+      tags: [trades]
+      summary: Cross-venue inventory / pre-positioning planner (never trades)
+      description: >
+        For every positive-net route on CURRENT books, computes exactly what
+        must sit WHERE before execution — no assets are ever transferred during
+        a trade. Buy side needs notional + taker fee + 1% margin; sell side
+        needs base qty + 2% margin (the same margins the executor enforces).
+        Requirements are compared against VERIFIED live balances only: READY,
+        SHORT by an exact amount, or UNVERIFIED (never treated as $0 or as
+        sufficient). Planning uses a relaxed 60s book-age window so funding
+        advice doesn't flap; execution still requires ≤200ms freshness. NEVER
+        trades.
+      parameters:
+        - { name: minNetUsd, in: query, schema: { type: number }, description: "net-after-buffer floor a route must clear to be planned (default 0.01)" }
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/XvScanRequest"
+      responses:
+        "200":
+          description: Per-route funding requirements and a consolidated "what to fund where" summary per venue
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/XvPlan"
+  /rebalance/caps:
+    post:
+      operationId: rebalanceCaps
+      tags: [trades]
+      summary: Probe each venue's rebalance capabilities (local buy / withdraw)
+      description: >
+        Fail-closed capability probe: a venue can only participate in an action
+        kind this proves it supports. Missing permissions are reported verbatim
+        with the EXACT setting to change — never silently skipped.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/XvScanRequest"
+      responses:
+        "200":
+          description: Per-venue capabilities, whitelisted withdrawal keys, and verbatim missing-permission guidance
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RebalanceCaps"
+  /rebalance/plan:
+    post:
+      operationId: rebalancePlan
+      tags: [trades]
+      summary: Plan pre-positioning actions for the best positive-net routes (never fires)
+      description: >
+        For the top positive-net cross-venue routes, plans the cheapest funding
+        action to make each executable — LOCAL_BUY (buy the base asset on the
+        venue that needs it, using USD already there) or TRANSFER (Kraken →
+        elsewhere via a whitelisted named key). An action is only BENEFICIAL for
+        routes with DETECTED fees on BOTH legs and VERIFIED balances, when the
+        route's projected net still exceeds the action's full overhead; it is
+        revalidated on ≤2s-fresh books immediately before a BOUNDED IOC limit
+        order (never an unbounded market order). Transfers are planned with real
+        withdrawal fees but NEVER auto-executed in v1. The daily cap is a
+        rolling 24h ledger that survives restarts. Projections, not guarantees.
+        NEVER trades.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/XvScanRequest"
+      responses:
+        "200":
+          description: Planned actions with overhead math, benefit decision, and verbatim reasons/risks
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RebalancePlan"
+  /rebalance/arm:
+    post:
+      operationId: rebalanceArm
+      tags: [trades]
+      summary: Arm the Auto Rebalance funding engine (executes LOCAL BUYS only)
+      description: >
+        Arms an engine that, once per 30s tick, executes the single best
+        BENEFICIAL LOCAL_BUY within the per-action cap, rolling 24h daily cap,
+        and per-venue USD reserves — as a BOUNDED IOC limit order (never an
+        unbounded market order) after a ≤2s-fresh revalidation of fees, depth,
+        and net edge. Transfers are never fired automatically. Keys are held in
+        memory only and wiped on stop. Refuses to act on assumed fees or
+        unverified balances, or while the reconciliation latch is set (409).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RebalanceArmRequest"
+      responses:
+        "200":
+          description: Engine armed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RebalanceArmed"
+        "400":
+          description: Bad config or no API keys provided
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: Already armed, or reconciliation latch set
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /rebalance/stop:
+    post:
+      operationId: rebalanceStop
+      tags: [trades]
+      summary: EMERGENCY STOP — disarm the rebalance engine and wipe in-memory keys
+      responses:
+        "200":
+          description: Engine disarmed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RebalanceArmed"
+  /rebalance/clear-latch:
+    post:
+      operationId: rebalanceClearLatch
+      tags: [trades]
+      summary: Clear the durable reconciliation latch (only after checking the exchange)
+      description: >
+        Clears the durable reconciliation latch that was set when an earlier
+        order's outcome could not be confirmed terminal. ONLY clear this AFTER
+        checking the venue's order history to verify what actually happened —
+        clearing lets the engine arm and act again. Requires an explicit
+        `{ "confirm": true }` body.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RebalanceClearLatchRequest"
+      responses:
+        "200":
+          description: Latch cleared
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RebalanceClearLatchResult"
+        "400":
+          description: Missing explicit confirmation
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /rebalance/status:
+    get:
+      operationId: rebalanceStatus
+      tags: [trades]
+      summary: Auto Rebalance engine status + activity log
+      responses:
+        "200":
+          description: Armed state, pause reason, latch, config, rolling-24h usage, counters, and the recent activity log (newest first, ≤100)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RebalanceStatus"
   /arb/hunter/start:
     post:
       operationId: hunterStart
@@ -2184,8 +2421,12 @@ components:
         krakenSecret: { type: string }
         coinbaseKey: { type: string }
         coinbaseSecret: { type: string }
+        geminiKey: { type: string, description: "optional — required when either venue is gemini" }
+        geminiSecret: { type: string }
         asset: { type: string, description: "ETH | BTC | SOL" }
-        direction: { type: string, enum: [buy, sell], description: "Side of the Coinbase maker order; omit to auto-pick the better projection" }
+        direction: { type: string, enum: [buy, sell], description: "Side of the maker order; omit to auto-pick the better projection" }
+        makerVenue: { type: string, enum: [kraken, coinbase, gemini], description: "optional explicit maker venue; MUST be provided together with hedgeVenue and must differ. Omit BOTH for the legacy hardened Coinbase-maker → Kraken-hedge default." }
+        hedgeVenue: { type: string, enum: [kraken, coinbase, gemini], description: "optional explicit hedge venue; MUST be provided together with makerVenue and must differ" }
         sizeUsd: { type: number, maximum: 10 }
         minNetUsd: { type: number, description: "Configurable positive profit floor; default $0.01 net after all costs; never accepted below $0.01" }
         bufferUsd: { type: number }
@@ -2218,6 +2459,9 @@ components:
           allOf: [{ $ref: "#/components/schemas/CbMmLeg" }]
           nullable: true
         realizedProfitUsd: { type: number, nullable: true }
+        makerVenue: { type: string, description: "kraken | coinbase | gemini — present on venue-generic executions" }
+        hedgeVenue: { type: string, description: "kraken | coinbase | gemini — present on venue-generic executions" }
+        structure: { type: string, description: "human-readable structure label, e.g. 'gemini(maker)→kraken(hedge)' — present on venue-generic executions" }
         projection:
           type: object
           nullable: true
@@ -2230,19 +2474,22 @@ components:
         krakenSecret: { type: string }
         coinbaseKey: { type: string }
         coinbaseSecret: { type: string }
+        geminiKey: { type: string, description: "optional — when provided, Gemini-inclusive maker→hedge structures are scanned and Gemini fees are DETECTED instead of assumed" }
+        geminiSecret: { type: string }
         minNetUsd: { type: number, nullable: true, description: "Configurable positive profit floor; default $0.01 net after all costs; never accepted below $0.01" }
         bufferUsd: { type: number, nullable: true }
     MmScanRow:
       type: object
       properties:
         asset: { type: string }
-        structure: { type: string, description: "cbMaker (Coinbase maker + Kraken hedge) | kMaker (reverse) | takerKtoC (buy Kraken, sell Coinbase, taker both) | takerCtoK" }
+        structure: { type: string, description: "cbMaker (Coinbase maker + Kraken hedge) | kMaker (reverse) | takerKtoC (buy Kraken, sell Coinbase, taker both) | takerCtoK | venueMaker (venue-generic maker→hedge, includes any Gemini leg)" }
+        structureLabel: { type: string, description: "human-readable structure, e.g. 'gemini(maker)→kraken(hedge)'" }
         direction: { type: string }
         available: { type: boolean }
-        makerVenue: { type: string }
-        hedgeVenue: { type: string }
-        makerFeePct: { type: number, nullable: true }
-        hedgeFeePct: { type: number, nullable: true }
+        makerVenue: { type: string, description: "kraken | coinbase | gemini" }
+        hedgeVenue: { type: string, description: "kraken | coinbase | gemini" }
+        makerFeePct: { type: number, nullable: true, description: "null = fee tier NOT detected for the maker venue (shown as ASSUMED)" }
+        hedgeFeePct: { type: number, nullable: true, description: "null = fee tier NOT detected for the hedge venue (shown as ASSUMED)" }
         makerPrice: { type: number }
         makerQty: { type: number }
         hedgeVwapPx: { type: number }
@@ -2547,6 +2794,7 @@ components:
             sellAssetQty: { type: number }
         balancesOk: { type: boolean, nullable: true, description: "null = unknown (keys missing)" }
         minNotionalUsd: { type: number, nullable: true, description: "exchange-minimum notional for this pair when known (Gemini legs)" }
+        blocker: { type: string, description: "plain-English FIRST current blocker or READY label, e.g. 'STALE KRAKEN BOOK 2572ms', 'NEED 4.08M BONK ON KRAKEN', 'GEMINI BALANCE UNVERIFIED', 'KRAKEN FEES ASSUMED — CONNECT KEYS', 'NET NEGATIVE AFTER COSTS', 'READY TO FIRE', 'READY TO AUTO-FIRE'" }
     XvScanResult:
       type: object
       required: [scannedAt, params, venues, fireCount, routes, note]
@@ -2629,6 +2877,305 @@ components:
         completed: { type: integer }
         incomplete: { type: integer }
         cumulativeRealizedUsd: { type: number, description: "sum of realized P&L from confirmed fills only" }
+    XvAutoStartRequest:
+      type: object
+      description: Optional per-venue credentials plus optional tighter guards.
+      properties:
+        krakenKey: { type: string }
+        krakenSecret: { type: string }
+        coinbaseKey: { type: string }
+        coinbaseSecret: { type: string }
+        geminiKey: { type: string }
+        geminiSecret: { type: string }
+        minNetUsd: { type: number, description: "net-after-buffer floor a route must clear to auto-fire" }
+        maxQuoteAgeMs: { type: number, description: "tighten-only; clamped to the 200ms hard gate" }
+    XvAutoStartResult:
+      type: object
+      required: [armed, startedAt, verifiedVenues, note]
+      properties:
+        armed: { type: boolean }
+        startedAt: { type: string }
+        verifiedVenues:
+          type: array
+          items: { type: string }
+        minNetUsd: { type: number }
+        maxQuoteAgeMs: { type: number }
+        note: { type: string, description: "verbatim engine note" }
+    XvAutoVenueVerify:
+      type: object
+      required: [id, verified]
+      properties:
+        id: { type: string }
+        verified: { type: boolean }
+        why: { type: string, nullable: true, description: "verbatim reason this venue is not verified (null when verified)" }
+    XvAutoStartError:
+      type: object
+      required: [error, venues]
+      properties:
+        error: { type: string }
+        venues:
+          type: array
+          items: { $ref: "#/components/schemas/XvAutoVenueVerify" }
+    XvAutoStopResult:
+      type: object
+      required: [armed, note]
+      properties:
+        armed: { type: boolean }
+        note: { type: string }
+    XvAutoLogEntry:
+      type: object
+      required: [at, asset, buyVenue, sellVenue, sizeUsd, buyAgeMs, sellAgeMs, feeSourceBuy, feeSourceSell, depthOk, scannerNetUsd, executableNetUsd, floorUsd, decision, reason]
+      properties:
+        at: { type: string }
+        asset: { type: string }
+        buyVenue: { type: string }
+        sellVenue: { type: string }
+        sizeUsd: { type: number }
+        buyAgeMs: { type: number }
+        sellAgeMs: { type: number }
+        feeSourceBuy: { type: string, description: "detected | assumed" }
+        feeSourceSell: { type: string, description: "detected | assumed" }
+        balancesOk: { type: boolean, nullable: true }
+        depthOk: { type: boolean }
+        scannerNetUsd: { type: number, description: "net profit before buffer (what the scanner ranks by)" }
+        executableNetUsd: { type: number, description: "net after buffer — must clear the floor to fire" }
+        floorUsd: { type: number }
+        decision: { type: string, description: "FIRE | SKIP" }
+        reason: { type: string, description: "verbatim decision reason" }
+        outcome: { type: string, nullable: true, description: "execution outcome once a FIRE resolves (null for SKIPs)" }
+        realizedUsd: { type: number, nullable: true, description: "realized P&L from confirmed fills only (null otherwise)" }
+    XvAutoStatus:
+      type: object
+      required: [armed, liveNeedsReconcile, verifiedVenues, evals, fires, log]
+      properties:
+        armed: { type: boolean }
+        startedAt: { type: string, nullable: true }
+        pausedReason: { type: string, nullable: true, description: "engine paused itself (e.g. after an unhedged/indeterminate outcome) — shown as a loud alert" }
+        liveNeedsReconcile: { type: string, nullable: true, description: "live runs locked pending manual reconciliation" }
+        verifiedVenues:
+          type: array
+          items: { type: string }
+        minNetUsd: { type: number, nullable: true }
+        maxQuoteAgeMs: { type: number, nullable: true }
+        evals: { type: integer }
+        fires: { type: integer }
+        lastFireAt: { type: string, nullable: true }
+        log:
+          type: array
+          description: "recent decision log, newest first (≤100)"
+          items: { $ref: "#/components/schemas/XvAutoLogEntry" }
+    XvPlanRequirement:
+      type: object
+      required: [venue, kind, asset, requiredAmount, requiredUsdValue, status]
+      properties:
+        venue: { type: string, description: "kraken | coinbase | gemini" }
+        kind: { type: string, description: "quote (USD needed to buy) | base (asset qty needed to sell)" }
+        asset: { type: string, description: "USD for quote-side, the base asset for base-side" }
+        requiredAmount: { type: number, description: "USD for quote-side, base qty for base-side" }
+        requiredUsdValue: { type: number, description: "approximate USD value of the requirement" }
+        haveAmount: { type: number, nullable: true, description: "verified balance in the same unit; null = UNVERIFIED (never assumed $0 or sufficient)" }
+        status: { type: string, description: "READY | SHORT | UNVERIFIED" }
+        shortBy: { type: number, nullable: true, description: "exact missing amount (same unit as requiredAmount) when SHORT; null otherwise" }
+    XvPlanRoute:
+      type: object
+      required: [asset, buyVenue, sellVenue, sizeUsd, netAfterBufferUsd, quoteAgeMs, feeSourceBuy, feeSourceSell, requirements, executableNow, blocker]
+      properties:
+        asset: { type: string }
+        buyVenue: { type: string, description: "kraken | coinbase | gemini" }
+        sellVenue: { type: string, description: "kraken | coinbase | gemini" }
+        sizeUsd: { type: number }
+        netAfterBufferUsd: { type: number }
+        quoteAgeMs: { type: number }
+        feeSourceBuy: { type: string, description: "detected | assumed" }
+        feeSourceSell: { type: string, description: "detected | assumed" }
+        minNotionalUsd: { type: number, nullable: true }
+        requirements:
+          type: array
+          items: { $ref: "#/components/schemas/XvPlanRequirement" }
+        executableNow: { type: boolean, description: "both requirements READY and fees detected on both legs" }
+        blocker: { type: string, description: "plain-English first current blocker or READY label" }
+    XvPlanFundingAsset:
+      type: object
+      required: [asset, qtyNeeded, usdValue, status]
+      properties:
+        asset: { type: string }
+        qtyNeeded: { type: number }
+        usdValue: { type: number }
+        have: { type: number, nullable: true, description: "verified balance; null = UNVERIFIED" }
+        status: { type: string, description: "READY | SHORT | UNVERIFIED" }
+        shortBy: { type: number, nullable: true }
+    XvPlanFundingVenue:
+      type: object
+      required: [usdNeeded, assets]
+      properties:
+        usdNeeded: { type: number, description: "max quote USD needed across positive routes buying on this venue" }
+        usdHave: { type: number, nullable: true, description: "verified spendable USD; null = UNVERIFIED" }
+        assets:
+          type: array
+          items: { $ref: "#/components/schemas/XvPlanFundingAsset" }
+    XvPlanFunding:
+      type: object
+      required: [kraken, coinbase, gemini]
+      properties:
+        kraken: { $ref: "#/components/schemas/XvPlanFundingVenue" }
+        coinbase: { $ref: "#/components/schemas/XvPlanFundingVenue" }
+        gemini: { $ref: "#/components/schemas/XvPlanFundingVenue" }
+    XvPlanVenue:
+      type: object
+      required: [id, feeSource, takerPct, balancesVerified]
+      properties:
+        id: { type: string, description: "kraken | coinbase | gemini" }
+        feeSource: { type: string, description: "detected | assumed" }
+        takerPct: { type: number }
+        usd: { type: number, nullable: true }
+        balancesVerified: { type: boolean }
+        error: { type: string, nullable: true }
+    XvPlan:
+      type: object
+      required: [plannedAt, minNetUsd, note, venues, routes, funding]
+      properties:
+        plannedAt: { type: string }
+        minNetUsd: { type: number }
+        note: { type: string, description: "verbatim planning note — must be shown as-is" }
+        venues:
+          type: array
+          items: { $ref: "#/components/schemas/XvPlanVenue" }
+        routes:
+          type: array
+          description: "positive-net routes, highest net first (≤12)"
+          items: { $ref: "#/components/schemas/XvPlanRoute" }
+        funding: { $ref: "#/components/schemas/XvPlanFunding" }
+    RebalanceWhitelistKey:
+      type: object
+      required: [asset, key]
+      properties:
+        asset: { type: string }
+        key: { type: string, description: "the named Kraken withdrawal key" }
+        method: { type: string, nullable: true }
+    RebalanceVenueCaps:
+      type: object
+      required: [venue, localBuy, withdraw, whitelist]
+      properties:
+        venue: { type: string, description: "kraken | coinbase | gemini" }
+        localBuy: { type: boolean, description: "can place orders on this venue (trade permission)" }
+        withdraw: { type: boolean }
+        whitelist:
+          type: array
+          description: "Kraken named withdrawal keys"
+          items: { $ref: "#/components/schemas/RebalanceWhitelistKey" }
+        missing: { type: string, nullable: true, description: "verbatim exact permission/setup that is missing — must be shown as-is; null when nothing is missing" }
+    RebalanceCaps:
+      type: object
+      required: [venues]
+      properties:
+        venues:
+          type: array
+          items: { $ref: "#/components/schemas/RebalanceVenueCaps" }
+    RebalanceAction:
+      type: object
+      required: [kind, asset, venue, qty, estNotionalUsd, overheadUsd, routeNetUsd, netAfterOverheadUsd, beneficial, reason]
+      properties:
+        kind: { type: string, description: "LOCAL_BUY | TRANSFER" }
+        asset: { type: string }
+        venue: { type: string, description: "where the inventory must END UP" }
+        sourceVenue: { type: string, nullable: true, description: "transfer source (null for LOCAL_BUY)" }
+        qty: { type: number }
+        estNotionalUsd: { type: number }
+        overheadUsd: { type: number, description: "full estimated cost of the action (fees + slippage + withdrawal fee)" }
+        routeNetUsd: { type: number, description: "the route this action unlocks" }
+        netAfterOverheadUsd: { type: number, description: "routeNet − overhead, first-cycle basis" }
+        beneficial: { type: boolean, description: "true only when net positive after overhead, detected fees, within caps/reserves (transfers are always false in v1)" }
+        reason: { type: string, description: "verbatim exact math or exact refusal — must be shown as-is" }
+        transferRisk: { type: string, nullable: true, description: "verbatim transfer-delay risk note (null for LOCAL_BUY)" }
+        withdrawKey: { type: string, nullable: true, description: "the Kraken whitelist name used for a transfer" }
+    RebalancePlan:
+      type: object
+      required: [plannedAt, routesConsidered, caps, actions, note]
+      properties:
+        plannedAt: { type: string }
+        routesConsidered: { type: integer }
+        caps:
+          type: array
+          items: { $ref: "#/components/schemas/RebalanceVenueCaps" }
+        actions:
+          type: array
+          items: { $ref: "#/components/schemas/RebalanceAction" }
+        latch: { type: string, nullable: true, description: "durable reconciliation latch — an earlier order's outcome is unverified; the engine refuses to arm/act until cleared. null when unset. Shown verbatim." }
+        rolling24hSpendUsd: { type: number, description: "USD spent in the trailing rolling 24h (survives restarts)" }
+        note: { type: string, description: "verbatim planning note — must be shown as-is" }
+    RebalanceReserves:
+      type: object
+      properties:
+        kraken: { type: number, minimum: 0, default: 0 }
+        coinbase: { type: number, minimum: 0, default: 0 }
+        gemini: { type: number, minimum: 0, default: 0 }
+    RebalanceArmRequest:
+      type: object
+      description: Optional per-venue credentials plus engine safety limits.
+      properties:
+        krakenKey: { type: string }
+        krakenSecret: { type: string }
+        coinbaseKey: { type: string }
+        coinbaseSecret: { type: string }
+        geminiKey: { type: string }
+        geminiSecret: { type: string }
+        perActionCapUsd: { type: number, default: 15, maximum: 25, description: "max USD notional per action (hard ceiling 25)" }
+        dailyCapUsd: { type: number, default: 30, maximum: 100, description: "rolling daily USD cap" }
+        reservesUsd: { $ref: "#/components/schemas/RebalanceReserves" }
+    RebalanceArmed:
+      type: object
+      required: [armed]
+      properties:
+        armed: { type: boolean }
+    RebalanceClearLatchRequest:
+      type: object
+      required: [confirm]
+      properties:
+        confirm: { type: boolean, enum: [true], description: "must be true — explicit acknowledgement you checked the exchange first" }
+    RebalanceClearLatchResult:
+      type: object
+      required: [cleared]
+      properties:
+        cleared: { type: boolean }
+    RebalanceConfig:
+      type: object
+      required: [perActionCapUsd, dailyCapUsd, reservesUsd]
+      properties:
+        perActionCapUsd: { type: number }
+        dailyCapUsd: { type: number }
+        reservesUsd: { $ref: "#/components/schemas/RebalanceReserves" }
+    RebalanceLogEntry:
+      type: object
+      required: [at, kind, asset, toVenue, qty, status, detail]
+      properties:
+        at: { type: string }
+        kind: { type: string, description: "LOCAL_BUY | TRANSFER | ARM | STOP | CLEAR_LATCH" }
+        asset: { type: string }
+        fromVenue: { type: string, nullable: true }
+        toVenue: { type: string }
+        qty: { type: number }
+        notionalUsd: { type: number, nullable: true }
+        feeUsd: { type: number, nullable: true }
+        status: { type: string, description: "done | partial | failed | skipped | refused" }
+        detail: { type: string }
+        orderId: { type: string, nullable: true }
+    RebalanceStatus:
+      type: object
+      required: [armed, dailyUsedUsd, ticks, actionsDone, log]
+      properties:
+        armed: { type: boolean }
+        pausedReason: { type: string, nullable: true, description: "engine paused itself (e.g. after a failed action) — shown as a loud alert" }
+        latch: { type: string, nullable: true, description: "durable reconciliation latch — an earlier order's outcome is unverified; the engine refuses to arm/act until cleared. null when unset. Shown verbatim." }
+        cfg:
+          nullable: true
+          allOf: [{ $ref: "#/components/schemas/RebalanceConfig" }]
+        dailyUsedUsd: { type: number, description: "USD spent in the trailing rolling 24h (survives restarts), NOT calendar-day" }
+        ticks: { type: integer }
+        actionsDone: { type: integer }
+        log:
+          type: array
+          description: "recent activity log, newest first (≤100)"
+          items: { $ref: "#/components/schemas/RebalanceLogEntry" }
     HunterOpp:
       type: object
       properties:
@@ -2814,13 +3361,14 @@ components:
       properties:
         from: { type: string }
         to: { type: string }
-        exchange: { type: string, enum: [kraken, coinbase, bridge] }
+        exchange: { type: string, enum: [kraken, coinbase, gemini, bridge] }
         pair: { type: string }
         side: { type: string, enum: [buy, sell, bridge] }
         amountIn: { type: number }
         amountOut: { type: number }
         feePct: { type: number }
         limitPrice: { type: number }
+        streamed: { type: boolean, description: "true = leg priced from a LIVE stream book; false = REST fallback" }
 
     GraphRoute:
       type: object
@@ -2858,6 +3406,25 @@ components:
         effectiveScoreUsd:
           type: number
           description: "Ranking score: net profit × historical fill rate (0.7 neutral prior when history is insufficient). Approximates expected realized profit."
+        researchReason:
+          type: string
+          nullable: true
+          description: "Non-null when NOT executable — an honest reason the route is research-only (e.g. Gemini scan-only, unsupported shape, REST-priced, fees assumed). Shown verbatim."
+        hasGeminiLeg:
+          type: boolean
+          description: "true when the route contains at least one Gemini hop. Such routes are ALWAYS research-only (executable:false) — the graph executor has no Gemini wiring. Additive; K/CB routes leave it false."
+        geminiFeesDetected:
+          type: boolean
+          nullable: true
+          description: "whether Gemini fees on this route were DETECTED (keys present) or ASSUMED. null when the route has no Gemini hop."
+        geminiBookAgeMs:
+          type: number
+          nullable: true
+          description: "age (ms) of the OLDEST Gemini leg's live l2 book, measured from LOCAL ARRIVAL (Gemini l2 carries no exchange timestamp). null when no Gemini hop."
+        geminiBookAgeCaveat:
+          type: string
+          nullable: true
+          description: "honest freshness caveat for the Gemini book age. null when no Gemini hop. Shown verbatim in the route tooltip."
 
     GraphScanResult:
       type: object
@@ -3285,7 +3852,7 @@ components:
           type: number
         verifiedTrades:
           type: integer
-          description: Rows where every leg has confirmed exchange fill data + order IDs.
+          description: Rows where every leg has confirmed exchange fill data + order IDs AND a non-null realized P&L (excludes indeterminate/partial rows).
         failedTrades:
           type: integer
           description: Live attempts that did not complete (incl. unwinds).
@@ -3294,7 +3861,13 @@ components:
           description: Dry runs, scanner estimates, and legacy rows without fill proof.
         realizedPnlUsd:
           type: number
-          description: SUM of realizedProfitUsd over VERIFIED rows only — real money, never estimates.
+          description: SUM of realizedProfitUsd over VERIFIED rows with a non-null realized figure only — real money, never estimates/dry runs.
+        liveCompletedCycles:
+          type: integer
+          description: Count of live (isDryRun=false), fully-completed, verified-fill cycles across ALL strategies (triangles, graph-cross, INV, MM2, XV, 2X/2XTEST).
+        liveRealizedPnlUsd:
+          type: number
+          description: SUM of realizedProfitUsd over live verified fills only (isDryRun=false, status=verified, realized non-null).
         bestVerifiedProfitUsd:
           type: ["number", "null"]
         recentTrades:

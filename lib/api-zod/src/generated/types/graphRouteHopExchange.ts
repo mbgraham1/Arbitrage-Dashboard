@@ -12,5 +12,6 @@ export type GraphRouteHopExchange = typeof GraphRouteHopExchange[keyof typeof Gr
 export const GraphRouteHopExchange = {
   kraken: 'kraken',
   coinbase: 'coinbase',
+  gemini: 'gemini',
   bridge: 'bridge',
 } as const;

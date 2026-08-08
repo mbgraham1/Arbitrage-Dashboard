@@ -38,4 +38,6 @@ export interface XvRoute {
   balancesOk?: boolean | null;
   /** exchange-minimum notional for this pair when known (Gemini legs) */
   minNotionalUsd?: number | null;
+  /** plain-English FIRST current blocker or READY label, e.g. 'STALE KRAKEN BOOK 2572ms', 'NEED 4.08M BONK ON KRAKEN', 'GEMINI BALANCE UNVERIFIED', 'KRAKEN FEES ASSUMED — CONNECT KEYS', 'NET NEGATIVE AFTER COSTS', 'READY TO FIRE', 'READY TO AUTO-FIRE' */
+  blocker?: string;
 }

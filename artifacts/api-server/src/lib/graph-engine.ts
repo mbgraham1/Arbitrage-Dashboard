@@ -33,6 +33,36 @@ import {
 } from "./order-book";
 import { getCoinbaseOrderBook, type Pair } from "./exchange";
 
+// ── Gemini SCAN-ONLY input ────────────────────────────────────────────────────
+// The graph route feeds Gemini live USD books in here so cross-venue hops
+// through Gemini surface in ranked routes. STRICTLY scan-only: every route that
+// touches a Gemini hop is forced research-only (executable:false) with a plain
+// label — the graph executor has no Gemini wiring, so a Gemini edge must never
+// yield actionable profit.
+export interface GeminiEdgeBook {
+  asks: BookLevels;
+  bids: BookLevels;
+  /** Age (ms) of the live Gemini book, measured from LOCAL ARRIVAL of the last
+   *  l2 delta (Gemini v2 l2 carries no exchange-side timestamp — this is the
+   *  honest freshness bound). */
+  ageMs: number;
+  /** Gemini exchange minimum order size in BASE units (from /v1/symbols/details). */
+  minOrderSize: number;
+}
+export interface GeminiScanInput {
+  /** UPPER asset codes Gemini actually LISTS with a live USD book (never guessed). */
+  assets: string[];
+  /** asset (UPPER) → live Gemini USD book + age + minimum. */
+  books: Map<string, GeminiEdgeBook>;
+  /** Gemini taker fee %/leg applied on notional. */
+  feePct: number;
+  /** True when Gemini keys were in the request (detected tier); false = assumed+labeled. */
+  feesDetected: boolean;
+}
+
+/** Plain, non-actionable label carried by every route containing a Gemini hop. */
+export const GEMINI_SCAN_ONLY_LABEL = "SCAN-ONLY — Gemini legs not wired to graph executor";
+
 // ── Coinbase asset overlap ────────────────────────────────────────────────────
 
 /** Assets available on BOTH Kraken and Coinbase, mapped to their Coinbase Pair. */
@@ -59,7 +89,7 @@ const CB_ASSET_MAP: Partial<Record<ObAsset, Pair>> = {
 /** e.g. "kraken:BTC", "coinbase:ETH", "kraken:USD", "coinbase:USD" */
 export type GraphNode = string;
 
-export type ExchangeLabel = "kraken" | "coinbase" | "bridge";
+export type ExchangeLabel = "kraken" | "coinbase" | "gemini" | "bridge";
 
 export type EdgePricingSide = "buyBaseWithQuote" | "sellBaseForQuote" | "bridge";
 
@@ -81,6 +111,13 @@ export interface GraphEdge {
    *  route is only executable when EVERY real leg is stream-priced. Bridge
    *  edges are neutral (true). */
   streamed: boolean;
+  /** Gemini exchange minimum order size in BASE units (Gemini edges only). A
+   *  route whose Gemini leg would trade below this is UNPRICEABLE and dropped —
+   *  never surfaced as tradable size the venue would reject. */
+  minBaseSize?: number;
+  /** Age (ms) of a live NON-Kraken-stream book (Gemini l2, local-arrival based).
+   *  Recorded so the route's freshness fields can carry the oldest such leg. */
+  bookAgeMs?: number;
 }
 
 export interface GraphRouteHop {
@@ -135,6 +172,20 @@ export interface GraphRoute {
   marketUpdateMs?: number | null;
   /** Taker fee %/leg the stream repricing used — the pre-fire must decide with the same fee or re-price. */
   repricedFeePct?: number | null;
+  /** True when this route contains at least one Gemini hop. Such routes are
+   *  ALWAYS research-only (executable:false) — the graph executor has no Gemini
+   *  wiring. Additive field; K/CB routes leave it false. */
+  hasGeminiLeg?: boolean;
+  /** Whether Gemini fees on this route were DETECTED (keys present) or ASSUMED
+   *  (labeled). Null when the route has no Gemini hop. */
+  geminiFeesDetected?: boolean | null;
+  /** Age (ms) of the OLDEST Gemini leg's live l2 book on this route, measured
+   *  from LOCAL ARRIVAL (Gemini l2 carries no exchange timestamp — the honest
+   *  freshness bound). Null when the route has no Gemini hop. */
+  geminiBookAgeMs?: number | null;
+  /** Honest caveat string for the Gemini book age (freshness field). Null when
+   *  the route has no Gemini hop. */
+  geminiBookAgeCaveat?: string | null;
 }
 
 /** Mirror of the live executor's dispatch predicate — keep in lockstep with
@@ -167,6 +218,12 @@ export interface GraphScanResult {
   crossPairsDiscovered: number;
   /** Size of the dynamic scan universe (USD pairs) actually used. */
   universeUsdPairs: number;
+  /** Count of Gemini USD assets fed into the scan (SCAN-ONLY). 0/undefined when
+   *  no Gemini books were supplied. Additive — backward-compatible. */
+  geminiAssetsScanned?: number;
+  /** Whether Gemini fees used in the scan were detected (keys present) vs
+   *  assumed+labeled. Undefined when no Gemini books were supplied. */
+  geminiFeesDetected?: boolean;
   scannedAt: string;
 }
 
@@ -272,14 +329,19 @@ export function priceLeg(edge: GraphEdge, amountIn: number, maker: boolean): { a
     if (maker) {
       const bestBid = edge.bids[0]?.[0] ?? 0;
       if (!bestBid) return null;
-      return { amountOut: (amountIn / bestBid) * fee, slippagePct: 0 };
+      const out = (amountIn / bestBid) * fee;
+      if (belowGeminiMin(edge, out)) return null;
+      return { amountOut: out, slippagePct: 0 };
     }
     const q = takerBuyQuote(edge.asks, amountIn, edge.feePct);
     if (!q) return null;
     // grossRate = 1/vwap = base per quote; amountOut = amountIn × netRate.
-    return { amountOut: amountIn * q.netRate, slippagePct: q.slippagePct };
+    const out = amountIn * q.netRate;
+    if (belowGeminiMin(edge, out)) return null;
+    return { amountOut: out, slippagePct: q.slippagePct };
   }
   // sellBaseForQuote: amountIn is BASE currency; sell for quote.
+  if (belowGeminiMin(edge, amountIn)) return null;
   if (maker) {
     const bestAsk = edge.asks[0]?.[0] ?? 0;
     if (!bestAsk) return null;
@@ -290,11 +352,18 @@ export function priceLeg(edge: GraphEdge, amountIn: number, maker: boolean): { a
   return { amountOut: amountIn * q.netRate, slippagePct: q.slippagePct };
 }
 
+/** Gemini leg below the venue's exchange minimum (base units) → the leg would
+ *  be rejected, so the route is UNPRICEABLE and dropped rather than surfaced at
+ *  an un-tradable size. Non-Gemini edges (no minBaseSize) are unaffected. */
+function belowGeminiMin(edge: GraphEdge, baseQty: number): boolean {
+  return edge.exchange === "gemini" && edge.minBaseSize != null && edge.minBaseSize > 0 && baseQty < edge.minBaseSize;
+}
+
 // ── Node label helper ─────────────────────────────────────────────────────────
 
 function nodeLabel(node: GraphNode): string {
   const [ex, asset] = node.split(":");
-  const tag = ex === "kraken" ? "K" : "CB";
+  const tag = ex === "kraken" ? "K" : ex === "coinbase" ? "CB" : ex === "gemini" ? "GEM" : "?";
   return asset === "USD" ? `USD[${tag}]` : `${asset}[${tag}]`;
 }
 
@@ -314,6 +383,7 @@ function isStreamedPair(pair: string): boolean {
 async function buildGraph(
   krakenFeesPct: number,
   coinbaseFeesPct: number,
+  gemini?: GeminiScanInput,
 ): Promise<BuildResult> {
   const graph = new Map<GraphNode, GraphEdge[]>();
 
@@ -427,6 +497,37 @@ async function buildGraph(
     });
   }
 
+  // ── Gemini USD edges (SCAN-ONLY) ──────────────────────────────────────────
+  // Live Gemini USD books fed in by the graph route. Only assets Gemini
+  // ACTUALLY lists (USD books) — no synthetic pairs. These edges are `streamed:
+  // false` so they never satisfy the executable predicate, and every route
+  // that touches one is force-labeled research-only downstream. The Gemini
+  // exchange minimum rides on each edge (minBaseSize) so sub-minimum legs drop.
+  const geminiAssets = new Set<string>();
+  if (gemini) {
+    for (const asset of gemini.assets) {
+      const book = gemini.books.get(asset);
+      if (!book) continue;
+      const bestAsk = book.asks[0]?.[0] ?? 0;
+      const bestBid = book.bids[0]?.[0] ?? 0;
+      if (!bestAsk || !bestBid) continue;
+      geminiAssets.add(asset);
+
+      add("gemini:USD", {
+        to: `gemini:${asset}`, exchange: "gemini", pair: `${asset.toLowerCase()}usd`, side: "buy",
+        feePct: gemini.feePct, limitPrice: bestAsk,
+        pricingSide: "buyBaseWithQuote", asks: book.asks, bids: book.bids, streamed: false,
+        minBaseSize: book.minOrderSize, bookAgeMs: book.ageMs,
+      });
+      add(`gemini:${asset}`, {
+        to: "gemini:USD", exchange: "gemini", pair: `${asset.toLowerCase()}usd`, side: "sell",
+        feePct: gemini.feePct, limitPrice: bestBid,
+        pricingSide: "sellBaseForQuote", asks: book.asks, bids: book.bids, streamed: false,
+        minBaseSize: book.minOrderSize, bookAgeMs: book.ageMs,
+      });
+    }
+  }
+
   // ── Inventory bridge edges ────────────────────────────────────────────────
   // Simultaneous holdings on both exchanges. No fee or transfer delay.
 
@@ -442,6 +543,27 @@ async function buildGraph(
     }
   }
 
+  // ── Gemini inventory bridge edges (SCAN-ONLY) ─────────────────────────────
+  // Bridge Gemini holdings to/from Kraken & Coinbase inventory of the SAME
+  // asset so cross-venue cycles that route through Gemini surface in the scan.
+  // A bridge is fee-free/neutral like the K↔CB bridge; the Gemini SIDE leg's
+  // `streamed:false` keeps any such route research-only.
+  for (const asset of geminiAssets) {
+    const bridgeEdge = (to: GraphNode): GraphEdge => ({
+      to, exchange: "bridge", pair: asset, side: "bridge",
+      feePct: 0, limitPrice: 0,
+      pricingSide: "bridge", asks: [], bids: [], streamed: true,
+    });
+    if (krakenUsdBooks.has(asset as ObAsset)) {
+      add(`kraken:${asset}`, bridgeEdge(`gemini:${asset}`));
+      add(`gemini:${asset}`, bridgeEdge(`kraken:${asset}`));
+    }
+    if (cbBooks.has(asset)) {
+      add(`coinbase:${asset}`, bridgeEdge(`gemini:${asset}`));
+      add(`gemini:${asset}`,   bridgeEdge(`coinbase:${asset}`));
+    }
+  }
+
   // No USD↔USD bridge edge (avoids spurious duplicate Kraken-only cycles).
 
   return { graph, crossPairsDiscovered, universeUsdPairs: universe.usdPairs.size };
@@ -453,6 +575,8 @@ interface CycleContext {
   maker: boolean;
   feesDetected: boolean;
   safetyBufferUsd: number;
+  /** Whether Gemini fees came from detected tiers (keys present) or assumed. */
+  geminiFeesDetected: boolean;
 }
 
 function findCycles(
@@ -523,6 +647,14 @@ function findCycles(
         const netAfterBufferUsd = netProfitUsd - ctx.safetyBufferUsd;
         const { executable, researchReason } = classifyRoute(hops, ctx);
 
+        // Gemini freshness/labeling (additive). Oldest Gemini leg age carried so
+        // the freshness fields reflect the local-arrival bound honestly.
+        const geminiEdges = allEdges.filter(e => e.exchange === "gemini");
+        const hasGeminiLeg = geminiEdges.length > 0;
+        const geminiBookAgeMs = hasGeminiLeg
+          ? Math.max(...geminiEdges.map(e => e.bookAgeMs ?? 0))
+          : null;
+
         routes.push({
           hops,
           description: desc,
@@ -537,6 +669,12 @@ function findCycles(
           status: netAfterBufferUsd > 0 ? "VIABLE" : "REJECTED",
           executable,
           researchReason,
+          hasGeminiLeg,
+          geminiFeesDetected: hasGeminiLeg ? ctx.geminiFeesDetected : null,
+          geminiBookAgeMs,
+          geminiBookAgeCaveat: hasGeminiLeg
+            ? "Gemini l2 carries no exchange timestamp — age is local-arrival based"
+            : null,
         });
         continue;
       }
@@ -586,6 +724,12 @@ function computeGrossProfit(edges: GraphEdge[], startUsd: number, maker: boolean
  */
 function classifyRoute(hops: GraphRouteHop[], ctx: CycleContext): { executable: boolean; researchReason: string | null } {
   const realHops = hops.filter(h => h.exchange !== "bridge");
+  // Any Gemini hop → ALWAYS research-only. The graph executor has no Gemini
+  // wiring; a Gemini edge must never yield actionable profit. This check comes
+  // FIRST so it cannot be shadowed by any other classification.
+  if (hops.some(h => h.exchange === "gemini")) {
+    return { executable: false, researchReason: GEMINI_SCAN_ONLY_LABEL };
+  }
   if (!isRouteExecutable(hops)) {
     return { executable: false, researchReason: "unsupported route shape (4-leg / mixed) — projection only" };
   }
@@ -610,19 +754,26 @@ export async function scanGraphOpportunities(
   maxHops = 4,
   executionStyle: ExecutionStyle = "taker",
   feesDetected = false,
+  gemini?: GeminiScanInput,
 ): Promise<GraphScanResult> {
-  const { graph, crossPairsDiscovered, universeUsdPairs } = await buildGraph(krakenFeesPct, coinbaseFeesPct);
+  const { graph, crossPairsDiscovered, universeUsdPairs } = await buildGraph(krakenFeesPct, coinbaseFeesPct, gemini);
 
   // Safety buffer identical to the execution preflight in routes/arb.ts:
   //   Math.max(0.02, tradeSizeUsd * 0.0005)
   const safetyBufferUsd = Math.max(0.02, tradeSizeUsd * 0.0005);
-  const ctx: CycleContext = { maker: executionStyle === "maker", feesDetected, safetyBufferUsd };
+  const ctx: CycleContext = {
+    maker: executionStyle === "maker",
+    feesDetected,
+    safetyBufferUsd,
+    geminiFeesDetected: gemini?.feesDetected ?? false,
+  };
 
-  // Search from both USD nodes so we find cross-exchange cycles that begin on
-  // either Kraken or Coinbase (e.g. USD[CB]→BTC[CB]→BTC[K]→USD[K]).
+  // Search from every USD node so we find cross-exchange cycles that begin on
+  // any venue (e.g. USD[CB]→BTC[CB]→BTC[K]→USD[K], or a Gemini SCAN-ONLY hop).
   const allRoutes = [
     ...findCycles(graph, "kraken:USD",   tradeSizeUsd, maxHops, ctx),
     ...findCycles(graph, "coinbase:USD", tradeSizeUsd, maxHops, ctx),
+    ...(gemini ? findCycles(graph, "gemini:USD", tradeSizeUsd, maxHops, ctx) : []),
   ];
 
   // Deduplicate by description (same cycle can be discovered from either start).
@@ -650,6 +801,8 @@ export async function scanGraphOpportunities(
     assetsScanned,
     crossPairsDiscovered,
     universeUsdPairs,
+    geminiAssetsScanned: gemini ? gemini.books.size : undefined,
+    geminiFeesDetected: gemini ? gemini.feesDetected : undefined,
     routesEvaluated: allRoutes.length,
     scannedAt: new Date().toISOString(),
   };

@@ -767,7 +767,7 @@ export interface TwoXFeesResult {
 }
 
 /**
- * Side of the Coinbase maker order; omit to auto-pick the better projection
+ * Side of the maker order; omit to auto-pick the better projection
  */
 export type CbMmExecuteRequestDirection = typeof CbMmExecuteRequestDirection[keyof typeof CbMmExecuteRequestDirection];
 
@@ -777,15 +777,46 @@ export const CbMmExecuteRequestDirection = {
   sell: 'sell',
 } as const;
 
+/**
+ * optional explicit maker venue; MUST be provided together with hedgeVenue and must differ. Omit BOTH for the legacy hardened Coinbase-maker → Kraken-hedge default.
+ */
+export type CbMmExecuteRequestMakerVenue = typeof CbMmExecuteRequestMakerVenue[keyof typeof CbMmExecuteRequestMakerVenue];
+
+
+export const CbMmExecuteRequestMakerVenue = {
+  kraken: 'kraken',
+  coinbase: 'coinbase',
+  gemini: 'gemini',
+} as const;
+
+/**
+ * optional explicit hedge venue; MUST be provided together with makerVenue and must differ
+ */
+export type CbMmExecuteRequestHedgeVenue = typeof CbMmExecuteRequestHedgeVenue[keyof typeof CbMmExecuteRequestHedgeVenue];
+
+
+export const CbMmExecuteRequestHedgeVenue = {
+  kraken: 'kraken',
+  coinbase: 'coinbase',
+  gemini: 'gemini',
+} as const;
+
 export interface CbMmExecuteRequest {
   krakenKey: string;
   krakenSecret: string;
   coinbaseKey: string;
   coinbaseSecret: string;
+  /** optional — required when either venue is gemini */
+  geminiKey?: string;
+  geminiSecret?: string;
   /** ETH | BTC | SOL */
   asset: string;
-  /** Side of the Coinbase maker order; omit to auto-pick the better projection */
+  /** Side of the maker order; omit to auto-pick the better projection */
   direction?: CbMmExecuteRequestDirection;
+  /** optional explicit maker venue; MUST be provided together with hedgeVenue and must differ. Omit BOTH for the legacy hardened Coinbase-maker → Kraken-hedge default. */
+  makerVenue?: CbMmExecuteRequestMakerVenue;
+  /** optional explicit hedge venue; MUST be provided together with makerVenue and must differ */
+  hedgeVenue?: CbMmExecuteRequestHedgeVenue;
   /** @maximum 10 */
   sizeUsd?: number;
   /** Configurable positive profit floor; default $0.01 net after all costs; never accepted below $0.01 */
@@ -819,6 +850,12 @@ export interface CbMmExecuteResult {
   makerLeg?: CbMmLeg | null;
   hedgeLeg?: CbMmLeg | null;
   realizedProfitUsd?: number | null;
+  /** kraken | coinbase | gemini — present on venue-generic executions */
+  makerVenue?: string;
+  /** kraken | coinbase | gemini — present on venue-generic executions */
+  hedgeVenue?: string;
+  /** human-readable structure label, e.g. 'gemini(maker)→kraken(hedge)' — present on venue-generic executions */
+  structure?: string;
   projection?: CbMmExecuteResultProjection;
 }
 
@@ -827,6 +864,9 @@ export interface MmScanRequest {
   krakenSecret: string;
   coinbaseKey: string;
   coinbaseSecret: string;
+  /** optional — when provided, Gemini-inclusive maker→hedge structures are scanned and Gemini fees are DETECTED instead of assumed */
+  geminiKey?: string;
+  geminiSecret?: string;
   /** Configurable positive profit floor; default $0.01 net after all costs; never accepted below $0.01 */
   minNetUsd?: number | null;
   bufferUsd?: number | null;
@@ -834,13 +874,19 @@ export interface MmScanRequest {
 
 export interface MmScanRow {
   asset?: string;
-  /** cbMaker (Coinbase maker + Kraken hedge) | kMaker (reverse) | takerKtoC (buy Kraken, sell Coinbase, taker both) | takerCtoK */
+  /** cbMaker (Coinbase maker + Kraken hedge) | kMaker (reverse) | takerKtoC (buy Kraken, sell Coinbase, taker both) | takerCtoK | venueMaker (venue-generic maker→hedge, includes any Gemini leg) */
   structure?: string;
+  /** human-readable structure, e.g. 'gemini(maker)→kraken(hedge)' */
+  structureLabel?: string;
   direction?: string;
   available?: boolean;
+  /** kraken | coinbase | gemini */
   makerVenue?: string;
+  /** kraken | coinbase | gemini */
   hedgeVenue?: string;
+  /** null = fee tier NOT detected for the maker venue (shown as ASSUMED) */
   makerFeePct?: number | null;
+  /** null = fee tier NOT detected for the hedge venue (shown as ASSUMED) */
   hedgeFeePct?: number | null;
   makerPrice?: number;
   makerQty?: number;
@@ -1135,6 +1181,8 @@ export interface XvRoute {
   balancesOk?: boolean | null;
   /** exchange-minimum notional for this pair when known (Gemini legs) */
   minNotionalUsd?: number | null;
+  /** plain-English FIRST current blocker or READY label, e.g. 'STALE KRAKEN BOOK 2572ms', 'NEED 4.08M BONK ON KRAKEN', 'GEMINI BALANCE UNVERIFIED', 'KRAKEN FEES ASSUMED — CONNECT KEYS', 'NET NEGATIVE AFTER COSTS', 'READY TO FIRE', 'READY TO AUTO-FIRE' */
+  blocker?: string;
 }
 
 export type XvScanResultParams = {
@@ -1229,6 +1277,326 @@ export interface XvStats {
   incomplete: number;
   /** sum of realized P&L from confirmed fills only */
   cumulativeRealizedUsd: number;
+}
+
+/**
+ * Optional per-venue credentials plus optional tighter guards.
+ */
+export interface XvAutoStartRequest {
+  krakenKey?: string;
+  krakenSecret?: string;
+  coinbaseKey?: string;
+  coinbaseSecret?: string;
+  geminiKey?: string;
+  geminiSecret?: string;
+  /** net-after-buffer floor a route must clear to auto-fire */
+  minNetUsd?: number;
+  /** tighten-only; clamped to the 200ms hard gate */
+  maxQuoteAgeMs?: number;
+}
+
+export interface XvAutoStartResult {
+  armed: boolean;
+  startedAt: string;
+  verifiedVenues: string[];
+  minNetUsd?: number;
+  maxQuoteAgeMs?: number;
+  /** verbatim engine note */
+  note: string;
+}
+
+export interface XvAutoVenueVerify {
+  id: string;
+  verified: boolean;
+  /** verbatim reason this venue is not verified (null when verified) */
+  why?: string | null;
+}
+
+export interface XvAutoStartError {
+  error: string;
+  venues: XvAutoVenueVerify[];
+}
+
+export interface XvAutoStopResult {
+  armed: boolean;
+  note: string;
+}
+
+export interface XvAutoLogEntry {
+  at: string;
+  asset: string;
+  buyVenue: string;
+  sellVenue: string;
+  sizeUsd: number;
+  buyAgeMs: number;
+  sellAgeMs: number;
+  /** detected | assumed */
+  feeSourceBuy: string;
+  /** detected | assumed */
+  feeSourceSell: string;
+  balancesOk?: boolean | null;
+  depthOk: boolean;
+  /** net profit before buffer (what the scanner ranks by) */
+  scannerNetUsd: number;
+  /** net after buffer — must clear the floor to fire */
+  executableNetUsd: number;
+  floorUsd: number;
+  /** FIRE | SKIP */
+  decision: string;
+  /** verbatim decision reason */
+  reason: string;
+  /** execution outcome once a FIRE resolves (null for SKIPs) */
+  outcome?: string | null;
+  /** realized P&L from confirmed fills only (null otherwise) */
+  realizedUsd?: number | null;
+}
+
+export interface XvAutoStatus {
+  armed: boolean;
+  startedAt?: string | null;
+  /** engine paused itself (e.g. after an unhedged/indeterminate outcome) — shown as a loud alert */
+  pausedReason?: string | null;
+  /** live runs locked pending manual reconciliation */
+  liveNeedsReconcile: string | null;
+  verifiedVenues: string[];
+  minNetUsd?: number | null;
+  maxQuoteAgeMs?: number | null;
+  evals: number;
+  fires: number;
+  lastFireAt?: string | null;
+  /** recent decision log, newest first (≤100) */
+  log: XvAutoLogEntry[];
+}
+
+export interface XvPlanRequirement {
+  /** kraken | coinbase | gemini */
+  venue: string;
+  /** quote (USD needed to buy) | base (asset qty needed to sell) */
+  kind: string;
+  /** USD for quote-side, the base asset for base-side */
+  asset: string;
+  /** USD for quote-side, base qty for base-side */
+  requiredAmount: number;
+  /** approximate USD value of the requirement */
+  requiredUsdValue: number;
+  /** verified balance in the same unit; null = UNVERIFIED (never assumed $0 or sufficient) */
+  haveAmount?: number | null;
+  /** READY | SHORT | UNVERIFIED */
+  status: string;
+  /** exact missing amount (same unit as requiredAmount) when SHORT; null otherwise */
+  shortBy?: number | null;
+}
+
+export interface XvPlanRoute {
+  asset: string;
+  /** kraken | coinbase | gemini */
+  buyVenue: string;
+  /** kraken | coinbase | gemini */
+  sellVenue: string;
+  sizeUsd: number;
+  netAfterBufferUsd: number;
+  quoteAgeMs: number;
+  /** detected | assumed */
+  feeSourceBuy: string;
+  /** detected | assumed */
+  feeSourceSell: string;
+  minNotionalUsd?: number | null;
+  requirements: XvPlanRequirement[];
+  /** both requirements READY and fees detected on both legs */
+  executableNow: boolean;
+  /** plain-English first current blocker or READY label */
+  blocker: string;
+}
+
+export interface XvPlanFundingAsset {
+  asset: string;
+  qtyNeeded: number;
+  usdValue: number;
+  /** verified balance; null = UNVERIFIED */
+  have?: number | null;
+  /** READY | SHORT | UNVERIFIED */
+  status: string;
+  shortBy?: number | null;
+}
+
+export interface XvPlanFundingVenue {
+  /** max quote USD needed across positive routes buying on this venue */
+  usdNeeded: number;
+  /** verified spendable USD; null = UNVERIFIED */
+  usdHave?: number | null;
+  assets: XvPlanFundingAsset[];
+}
+
+export interface XvPlanFunding {
+  kraken: XvPlanFundingVenue;
+  coinbase: XvPlanFundingVenue;
+  gemini: XvPlanFundingVenue;
+}
+
+export interface XvPlanVenue {
+  /** kraken | coinbase | gemini */
+  id: string;
+  /** detected | assumed */
+  feeSource: string;
+  takerPct: number;
+  usd?: number | null;
+  balancesVerified: boolean;
+  error?: string | null;
+}
+
+export interface XvPlan {
+  plannedAt: string;
+  minNetUsd: number;
+  /** verbatim planning note — must be shown as-is */
+  note: string;
+  venues: XvPlanVenue[];
+  /** positive-net routes, highest net first (≤12) */
+  routes: XvPlanRoute[];
+  funding: XvPlanFunding;
+}
+
+export interface RebalanceWhitelistKey {
+  asset: string;
+  /** the named Kraken withdrawal key */
+  key: string;
+  method?: string | null;
+}
+
+export interface RebalanceVenueCaps {
+  /** kraken | coinbase | gemini */
+  venue: string;
+  /** can place orders on this venue (trade permission) */
+  localBuy: boolean;
+  withdraw: boolean;
+  /** Kraken named withdrawal keys */
+  whitelist: RebalanceWhitelistKey[];
+  /** verbatim exact permission/setup that is missing — must be shown as-is; null when nothing is missing */
+  missing?: string | null;
+}
+
+export interface RebalanceCaps {
+  venues: RebalanceVenueCaps[];
+}
+
+export interface RebalanceAction {
+  /** LOCAL_BUY | TRANSFER */
+  kind: string;
+  asset: string;
+  /** where the inventory must END UP */
+  venue: string;
+  /** transfer source (null for LOCAL_BUY) */
+  sourceVenue?: string | null;
+  qty: number;
+  estNotionalUsd: number;
+  /** full estimated cost of the action (fees + slippage + withdrawal fee) */
+  overheadUsd: number;
+  /** the route this action unlocks */
+  routeNetUsd: number;
+  /** routeNet − overhead, first-cycle basis */
+  netAfterOverheadUsd: number;
+  /** true only when net positive after overhead, detected fees, within caps/reserves (transfers are always false in v1) */
+  beneficial: boolean;
+  /** verbatim exact math or exact refusal — must be shown as-is */
+  reason: string;
+  /** verbatim transfer-delay risk note (null for LOCAL_BUY) */
+  transferRisk?: string | null;
+  /** the Kraken whitelist name used for a transfer */
+  withdrawKey?: string | null;
+}
+
+export interface RebalancePlan {
+  plannedAt: string;
+  routesConsidered: number;
+  caps: RebalanceVenueCaps[];
+  actions: RebalanceAction[];
+  /** durable reconciliation latch — an earlier order's outcome is unverified; the engine refuses to arm/act until cleared. null when unset. Shown verbatim. */
+  latch?: string | null;
+  /** USD spent in the trailing rolling 24h (survives restarts) */
+  rolling24hSpendUsd?: number;
+  /** verbatim planning note — must be shown as-is */
+  note: string;
+}
+
+export interface RebalanceReserves {
+  /** @minimum 0 */
+  kraken?: number;
+  /** @minimum 0 */
+  coinbase?: number;
+  /** @minimum 0 */
+  gemini?: number;
+}
+
+/**
+ * Optional per-venue credentials plus engine safety limits.
+ */
+export interface RebalanceArmRequest {
+  krakenKey?: string;
+  krakenSecret?: string;
+  coinbaseKey?: string;
+  coinbaseSecret?: string;
+  geminiKey?: string;
+  geminiSecret?: string;
+  /**
+     * max USD notional per action (hard ceiling 25)
+     * @maximum 25
+     */
+  perActionCapUsd?: number;
+  /**
+     * rolling daily USD cap
+     * @maximum 100
+     */
+  dailyCapUsd?: number;
+  reservesUsd?: RebalanceReserves;
+}
+
+export interface RebalanceArmed {
+  armed: boolean;
+}
+
+export interface RebalanceClearLatchRequest {
+  /** must be true — explicit acknowledgement you checked the exchange first */
+  confirm: true;
+}
+
+export interface RebalanceClearLatchResult {
+  cleared: boolean;
+}
+
+export interface RebalanceConfig {
+  perActionCapUsd: number;
+  dailyCapUsd: number;
+  reservesUsd: RebalanceReserves;
+}
+
+export interface RebalanceLogEntry {
+  at: string;
+  /** LOCAL_BUY | TRANSFER | ARM | STOP | CLEAR_LATCH */
+  kind: string;
+  asset: string;
+  fromVenue?: string | null;
+  toVenue: string;
+  qty: number;
+  notionalUsd?: number | null;
+  feeUsd?: number | null;
+  /** done | partial | failed | skipped | refused */
+  status: string;
+  detail: string;
+  orderId?: string | null;
+}
+
+export interface RebalanceStatus {
+  armed: boolean;
+  /** engine paused itself (e.g. after a failed action) — shown as a loud alert */
+  pausedReason?: string | null;
+  /** durable reconciliation latch — an earlier order's outcome is unverified; the engine refuses to arm/act until cleared. null when unset. Shown verbatim. */
+  latch?: string | null;
+  cfg?: RebalanceConfig | null;
+  /** USD spent in the trailing rolling 24h (survives restarts), NOT calendar-day */
+  dailyUsedUsd: number;
+  ticks: number;
+  actionsDone: number;
+  /** recent activity log, newest first (≤100) */
+  log: RebalanceLogEntry[];
 }
 
 export interface HunterOpp {
@@ -1404,6 +1772,7 @@ export type GraphRouteHopExchange = typeof GraphRouteHopExchange[keyof typeof Gr
 export const GraphRouteHopExchange = {
   kraken: 'kraken',
   coinbase: 'coinbase',
+  gemini: 'gemini',
   bridge: 'bridge',
 } as const;
 
@@ -1426,6 +1795,8 @@ export interface GraphRouteHop {
   amountOut: number;
   feePct: number;
   limitPrice: number;
+  /** true = leg priced from a LIVE stream book; false = REST fallback */
+  streamed?: boolean;
 }
 
 export type GraphRouteStatus = typeof GraphRouteStatus[keyof typeof GraphRouteStatus];
@@ -1458,6 +1829,16 @@ export interface GraphRoute {
   pricedFrom?: string | null;
   /** Ranking score: net profit × historical fill rate (0.7 neutral prior when history is insufficient). Approximates expected realized profit. */
   effectiveScoreUsd?: number;
+  /** Non-null when NOT executable — an honest reason the route is research-only (e.g. Gemini scan-only, unsupported shape, REST-priced, fees assumed). Shown verbatim. */
+  researchReason?: string | null;
+  /** true when the route contains at least one Gemini hop. Such routes are ALWAYS research-only (executable:false) — the graph executor has no Gemini wiring. Additive; K/CB routes leave it false. */
+  hasGeminiLeg?: boolean;
+  /** whether Gemini fees on this route were DETECTED (keys present) or ASSUMED. null when the route has no Gemini hop. */
+  geminiFeesDetected?: boolean | null;
+  /** age (ms) of the OLDEST Gemini leg's live l2 book, measured from LOCAL ARRIVAL (Gemini l2 carries no exchange timestamp). null when no Gemini hop. */
+  geminiBookAgeMs?: number | null;
+  /** honest freshness caveat for the Gemini book age. null when no Gemini hop. Shown verbatim in the route tooltip. */
+  geminiBookAgeCaveat?: string | null;
 }
 
 export type GraphScanResultExecutionStyle = typeof GraphScanResultExecutionStyle[keyof typeof GraphScanResultExecutionStyle];
@@ -1844,14 +2225,18 @@ export interface TradeSummary {
   totalProfitUsd: number;
   avgNetEdgePct: number;
   bestTradeProfitUsd: number;
-  /** Rows where every leg has confirmed exchange fill data + order IDs. */
+  /** Rows where every leg has confirmed exchange fill data + order IDs AND a non-null realized P&L (excludes indeterminate/partial rows). */
   verifiedTrades?: number;
   /** Live attempts that did not complete (incl. unwinds). */
   failedTrades?: number;
   /** Dry runs, scanner estimates, and legacy rows without fill proof. */
   simulatedTrades?: number;
-  /** SUM of realizedProfitUsd over VERIFIED rows only — real money, never estimates. */
+  /** SUM of realizedProfitUsd over VERIFIED rows with a non-null realized figure only — real money, never estimates/dry runs. */
   realizedPnlUsd?: number;
+  /** Count of live (isDryRun=false), fully-completed, verified-fill cycles across ALL strategies (triangles, graph-cross, INV, MM2, XV, 2X/2XTEST). */
+  liveCompletedCycles?: number;
+  /** SUM of realizedProfitUsd over live verified fills only (isDryRun=false, status=verified, realized non-null). */
+  liveRealizedPnlUsd?: number;
   /** @nullable */
   bestVerifiedProfitUsd?: number | null;
   recentTrades: TradeRecord[];
@@ -1956,6 +2341,13 @@ minNetUsd?: number;
  * max staleness of the oldest leg for a live decision (default 200)
  */
 maxQuoteAgeMs?: number;
+};
+
+export type XvPlanParams = {
+/**
+ * net-after-buffer floor a route must clear to be planned (default 0.01)
+ */
+minNetUsd?: number;
 };
 
 export type HunterStart200 = { [key: string]: unknown };
