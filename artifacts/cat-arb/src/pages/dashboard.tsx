@@ -562,7 +562,7 @@ export default function Dashboard() {
       </div>
 
       {/* All-Pairs Breakdown */}
-      <AllPairsCard activePair={latestPriceData?.pair ?? null} />
+      <AllPairsCard activePair={latestPriceData?.pair ?? null} feesAndSlipPct={settings.totalFees + settings.slippage} />
 
       {/* Multi-Coin Opportunity Ranker */}
       <MultiCoinRankerCard settings={settings} />
@@ -582,7 +582,7 @@ export default function Dashboard() {
 
 // ── All-Pairs Breakdown Card ───────────────────────────────────────────────────
 
-function AllPairsCard({ activePair }: { activePair: string | null }) {
+function AllPairsCard({ activePair, feesAndSlipPct }: { activePair: string | null; feesAndSlipPct: number }) {
   const query = useGetAllPairSnapshots({
     query: {
       queryKey: getGetAllPairSnapshotsQueryKey(),
@@ -622,7 +622,7 @@ function AllPairsCard({ activePair }: { activePair: string | null }) {
             <table className="w-full text-xs font-mono border-collapse">
               <thead>
                 <tr className="border-b-2 border-border bg-muted/50">
-                  {["#", "Pair", "Kraken Bid", "Kraken Ask", "Coinbase Bid", "Coinbase Ask", "Spread %", "Route"].map(h => (
+                  {["#", "Pair", "Kraken Bid", "Kraken Ask", "Coinbase Bid", "Coinbase Ask", "Spread %", "Net Edge %", "Route"].map(h => (
                     <th key={h} className="text-left px-3 py-2 text-[10px] uppercase font-bold text-muted-foreground whitespace-nowrap">{h}</th>
                   ))}
                 </tr>
@@ -662,6 +662,21 @@ function AllPairsCard({ activePair }: { activePair: string | null }) {
                             : "text-destructive",
                       )}>
                         {row.grossSpreadPct != null ? `${row.grossSpreadPct >= 0 ? "+" : ""}${row.grossSpreadPct.toFixed(3)}%` : "—"}
+                      </td>
+                      <td
+                        className={cn(
+                          "px-3 py-1.5 font-bold",
+                          row.grossSpreadPct == null
+                            ? "text-muted-foreground"
+                            : row.grossSpreadPct - feesAndSlipPct > 0
+                              ? "text-success"
+                              : "text-destructive",
+                        )}
+                        title={`Gross spread minus fees + slippage (${feesAndSlipPct.toFixed(2)}%) — what you'd actually keep`}
+                      >
+                        {row.grossSpreadPct != null
+                          ? `${row.grossSpreadPct - feesAndSlipPct >= 0 ? "+" : ""}${(row.grossSpreadPct - feesAndSlipPct).toFixed(3)}%`
+                          : "—"}
                       </td>
                       <td className="px-3 py-1.5 text-muted-foreground whitespace-nowrap">
                         {row.buyExchange != null
