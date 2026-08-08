@@ -77,6 +77,18 @@ export default function Trades() {
   const execRangeStart = execTotal === 0 ? 0 : execPage * EXEC_PAGE_SIZE + 1;
   const execRangeEnd = execPage * EXEC_PAGE_SIZE + trades.length;
 
+  const visibleTrades = trades.filter(t => {
+    if (statusFilter === "all") return true;
+    if (statusFilter === "verified") return t.status === "verified";
+    if (statusFilter === "failed") return t.status === "failed";
+    return t.status === "simulated" || t.status === "estimated" || t.status == null;
+  });
+  // Base asset for the Volume header — derived from each trade's pair (legacy
+  // rows without a pair are SOL/USD). If the visible page mixes assets, keep a
+  // generic header and per-row labels so units stay unambiguous.
+  const baseAssets = new Set(visibleTrades.map(t => (t.pair ?? "SOL/USD").split("/")[0]));
+  const volumeBase = baseAssets.size === 1 ? [...baseAssets][0] : baseAssets.size === 0 ? "SOL" : null;
+
   const triTotalPages = Math.max(1, Math.ceil(triTotal / TRI_PAGE_SIZE));
   const triRangeStart = triTotal === 0 ? 0 : triPage * TRI_PAGE_SIZE + 1;
   const triRangeEnd = Math.min((triPage + 1) * TRI_PAGE_SIZE, triTotal);
@@ -200,19 +212,16 @@ export default function Trades() {
                     <th className="px-4 py-3 text-left font-bold uppercase text-xs">Mode</th>
                     <th className="px-4 py-3 text-left font-bold uppercase text-xs">Pair</th>
                     <th className="px-4 py-3 text-left font-bold uppercase text-xs">Route</th>
-                    <th className="px-4 py-3 text-right font-bold uppercase text-xs">Volume</th>
+                    <th className="px-4 py-3 text-right font-bold uppercase text-xs">
+                      {volumeBase ? `Volume (${volumeBase})` : "Volume"}
+                    </th>
                     <th className="px-4 py-3 text-right font-bold uppercase text-xs">Net Edge</th>
                     <th className="px-4 py-3 text-right font-bold uppercase text-xs">Expected (USD)</th>
                     <th className="px-4 py-3 text-right font-bold uppercase text-xs">Realized (USD)</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y-2 divide-border">
-                  {trades.filter(t => {
-                    if (statusFilter === "all") return true;
-                    if (statusFilter === "verified") return t.status === "verified";
-                    if (statusFilter === "failed") return t.status === "failed";
-                    return t.status === "simulated" || t.status === "estimated" || t.status == null;
-                  }).map((trade) => {
+                  {visibleTrades.map((trade) => {
                     const verified = trade.status === "verified";
                     const failed = trade.status === "failed";
                     const fills = Array.isArray(trade.legFills) ? trade.legFills : [];
@@ -251,8 +260,13 @@ export default function Trades() {
                         </div>
                       </td>
                       <td className="px-4 py-3 text-right">
-                        {trade.volume.toFixed(4)}{" "}
-                        <span className="text-muted-foreground text-[10px]">{(trade.pair ?? "SOL/USD").split("/")[0]}</span>
+                        {trade.volume.toFixed(4)}
+                        {!volumeBase && (
+                          <>
+                            {" "}
+                            <span className="text-muted-foreground text-[10px]">{(trade.pair ?? "SOL/USD").split("/")[0]}</span>
+                          </>
+                        )}
                       </td>
                       <td className="px-4 py-3 text-right">
                         <span className={cn(trade.netEdgePct > 0 ? "text-success font-bold" : "")}>
