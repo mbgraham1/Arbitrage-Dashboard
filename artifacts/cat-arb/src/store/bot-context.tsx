@@ -26,6 +26,7 @@ import type { ExchangeCredentials, PriceData, BalanceData, TriangularOpportunity
 import { useQueryClient } from "@tanstack/react-query";
 import { maybeAutoExecuteOb } from "./ob-auto-execute";
 import { withExecutionLock } from "./execution-locks";
+import { selectTriAutoOpportunity } from "./tri-auto-select";
 
 export interface LogEntry {
   id: string;
@@ -402,11 +403,16 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
         !isAutoExecutingObRef.current &&
         now - lastTriTradeTimeRef.current >= cooldownMs
       ) {
-        // Pick best opportunity above threshold: prefer BTC variant, then ETH
-        const qualified = opps.filter(o => o.profitPct >= s.minNetEdge);
-        const bestBtc = qualified.filter(o => o.variant === "btc").sort((a, b) => b.profitPct - a.profitPct)[0];
-        const bestEth = qualified.filter(o => o.variant !== "btc").sort((a, b) => b.profitPct - a.profitPct)[0];
-        const best = bestBtc ?? bestEth;
+        // Pick best opportunity above threshold: prefer BTC variant, then ETH.
+        // ETH loops whose ETH/SOL leg is priced from a synthetic cross-rate are
+        // skipped with a warning — live trades must never fire on estimated
+        // prices (mirrors the Force Triangular button's block).
+        const best = selectTriAutoOpportunity(
+          opps,
+          triScan.data.priceSource ?? {},
+          s.minNetEdge,
+          (msg) => addLog("warning", msg),
+        );
 
         if (best) {
           const tag = best.variant === "btc" ? "TRI·BTC·AUTO" : "TRI·ETH·AUTO";
