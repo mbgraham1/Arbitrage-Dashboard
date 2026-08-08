@@ -13,6 +13,25 @@ export interface ErrorResponse {
   error: string;
 }
 
+export interface GeminiCredentials {
+  geminiKey: string;
+  geminiSecret: string;
+}
+
+export type GeminiTestResultBalances = {[key: string]: number};
+
+export interface GeminiTestResult {
+  ok: boolean;
+  message: string;
+  /** DETECTED maker fee tier, percent */
+  makerPct?: number | null;
+  /** DETECTED taker fee tier, percent */
+  takerPct?: number | null;
+  usdBalance?: number | null;
+  balances?: GeminiTestResultBalances;
+  note?: string | null;
+}
+
 export interface KrakenCredentials {
   krakenKey: string;
   krakenSecret: string;
@@ -28,6 +47,8 @@ export interface ExchangeCredentials {
   krakenSecret: string;
   coinbaseKey: string;
   coinbaseSecret: string;
+  geminiKey?: string;
+  geminiSecret?: string;
   /** Optional allow-list of pair symbols to scan (e.g. ['SOL/USD', 'BTC/USD']). Scans all pairs when omitted. */
   enabledPairs?: string[];
   /** Active trading pair (e.g. BTC/USD). When provided, base-asset balances for that pair are included in the response. */
@@ -894,13 +915,15 @@ export interface MmAutoStatus {
 }
 
 /**
- * Optional Kraken/Coinbase credentials for real fees + inventory
+ * Optional Kraken/Coinbase credentials for real fees + inventory; optional Gemini credentials for detected Gemini fees + balance-verified (read-only) candidate status
  */
 export interface DiscoveryRequest {
   krakenKey?: string;
   krakenSecret?: string;
   coinbaseKey?: string;
   coinbaseSecret?: string;
+  geminiKey?: string;
+  geminiSecret?: string;
 }
 
 export interface DiscoverySizeNet {
@@ -942,6 +965,8 @@ export interface DiscoveryRow {
   regionUnavailable?: boolean;
   /** for candidate venues (Gemini/Crypto.com): $10 net IF candidate legs paid published entry-tier MAKER fees — assumption analysis, never executable */
   entryTierMakerNet10?: number | null;
+  /** for Gemini routes with keys connected: the Gemini-side balance covers the $10 leg (read-only — still NOT executable from this app) */
+  geminiFunded?: boolean | null;
   /** executable_now | requires_setup | not_profitable */
   category?: string;
   requirement?: string;
@@ -962,6 +987,17 @@ export type DiscoveryResultVenuesItem = {
   assetsCovered?: number;
 };
 
+/**
+ * Gemini account status when keys are provided — read-only; live Gemini trading is never enabled
+ */
+export type DiscoveryResultGemini = {
+  connected?: boolean;
+  makerPct?: number | null;
+  takerPct?: number | null;
+  usdBalance?: number | null;
+  note?: string | null;
+} | null;
+
 export interface DiscoveryResult {
   at?: string;
   bestExecutable?: DiscoveryRow | null;
@@ -973,6 +1009,8 @@ export interface DiscoveryResult {
   venues?: DiscoveryResultVenuesItem[];
   coinbaseFeeDrag?: number;
   summary?: string;
+  /** Gemini account status when keys are provided — read-only; live Gemini trading is never enabled */
+  gemini?: DiscoveryResultGemini;
   /** routes touching PR-accessible candidate venues (Gemini, Crypto.com) — public-data discovery with entry-tier maker analysis; never executable until API access is connected + verified */
   candidateRoutes?: DiscoveryRow[];
   executableNow?: DiscoveryRow[];

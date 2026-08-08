@@ -5,6 +5,7 @@
  * CAT Arbitrage Dashboard API
  * OpenAPI spec version: 0.1.0
  */
+import type { DiscoveryResultGemini } from './discoveryResultGemini';
 import type { DiscoveryResultVenuesItem } from './discoveryResultVenuesItem';
 import type { DiscoveryRow } from './discoveryRow';
 
@@ -19,6 +20,8 @@ export interface DiscoveryResult {
   venues?: DiscoveryResultVenuesItem[];
   coinbaseFeeDrag?: number;
   summary?: string;
+  /** Gemini account status when keys are provided — read-only; live Gemini trading is never enabled */
+  gemini?: DiscoveryResultGemini;
   /** routes touching PR-accessible candidate venues (Gemini, Crypto.com) — public-data discovery with entry-tier maker analysis; never executable until API access is connected + verified */
   candidateRoutes?: DiscoveryRow[];
   executableNow?: DiscoveryRow[];

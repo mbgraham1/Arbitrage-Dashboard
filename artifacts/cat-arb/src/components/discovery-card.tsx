@@ -84,6 +84,8 @@ function RowTable({ rows, showRequirement }: { rows: DiscoveryRow[]; showRequire
                   {r.feeSource !== "detected" && <span className="text-muted-foreground" title="fee tiers are published assumptions, not detected"> *</span>}
                   {r.coinbaseFeeIsBlocker && <span className="text-orange-500" title="This route would flip positive at a ~0.10% taker tier — Coinbase's fee tier is what kills it."> CB-fee</span>}
                   {r.regionUnavailable && <span className="text-red-400" title="A leg is on a venue unavailable in your region — market context only, never actionable."> region✕</span>}
+                  {r.geminiFunded === true && <span className="text-green-500" title="Your Gemini balance covers the Gemini-side $10 leg — read-only: this app still cannot execute on Gemini."> funded✓</span>}
+                  {r.geminiFunded === false && <span className="text-amber-500" title="Gemini keys connected, but the Gemini-side balance does not cover the $10 leg."> unfunded</span>}
                   {r.entryTierMakerNet10 != null && (r.entryTierMakerNet10 ?? -1) > 0 && (
                     <span className="text-cyan-400" title={`Would project ${fmt(r.entryTierMakerNet10, 3)} net @ $10 if the candidate venue's legs paid its published ENTRY-TIER MAKER fee — assumption analysis, not executable until an account + API access is connected and verified.`}> maker-tier✓</span>
                   )}
@@ -110,8 +112,9 @@ export function DiscoveryCard() {
   const [error, setError] = useState<string | null>(null);
   const scan = useDiscoveryScan();
   const busy = useRef(false);
-  const { krakenKey, krakenSecret, coinbaseKey, coinbaseSecret } = credentials;
+  const { krakenKey, krakenSecret, coinbaseKey, coinbaseSecret, geminiKey, geminiSecret } = credentials;
   const hasCreds = !!krakenKey && !!krakenSecret && !!coinbaseKey && !!coinbaseSecret;
+  const hasGemini = !!geminiKey && !!geminiSecret;
 
   useEffect(() => {
     let cancelled = false;
@@ -119,7 +122,10 @@ export function DiscoveryCard() {
       if (busy.current) return;
       busy.current = true;
       try {
-        const r = await scan.mutateAsync({ data: hasCreds ? { krakenKey, krakenSecret, coinbaseKey, coinbaseSecret } : {} });
+        const r = await scan.mutateAsync({ data: {
+          ...(hasCreds ? { krakenKey, krakenSecret, coinbaseKey, coinbaseSecret } : {}),
+          ...(hasGemini ? { geminiKey, geminiSecret } : {}),
+        } });
         if (!cancelled) { setData(r); setError(null); }
       } catch (e) {
         if (!cancelled) setError((e as Error).message);
@@ -129,7 +135,7 @@ export function DiscoveryCard() {
     const iv = setInterval(tick, 20_000);
     return () => { cancelled = true; clearInterval(iv); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [krakenKey, krakenSecret, coinbaseKey, coinbaseSecret]);
+  }, [krakenKey, krakenSecret, coinbaseKey, coinbaseSecret, geminiKey, geminiSecret]);
 
   const okVenues = (data?.venues ?? []).filter(v => v.status === "ok" && (v.assetsCovered ?? 0) > 0);
   return (
@@ -171,8 +177,15 @@ export function DiscoveryCard() {
             {(data.candidateRoutes?.length ?? 0) > 0 && (
               <div>
                 <div className="font-semibold text-cyan-400 mb-1">★ Candidate venues — Gemini &amp; Crypto.com (PR-accessible, public data only until an account/API access is verified)</div>
+                {data.gemini && (
+                  <div className={cn("mb-1", data.gemini.connected ? "text-green-500" : "text-amber-500")} data-testid="text-gemini-status">
+                    {data.gemini.connected
+                      ? `Gemini CONNECTED (read-only): YOUR detected tier ${data.gemini.makerPct?.toFixed(3)}% maker / ${data.gemini.takerPct?.toFixed(3)}% taker · $${(data.gemini.usdBalance ?? 0).toFixed(2)} USD there. "funded✓" rows have the Gemini-side balance — still NOT executable from this app.`
+                      : data.gemini.note}
+                  </div>
+                )}
                 <div className="text-muted-foreground mb-1">
-                  "maker-tier✓" = would project positive at the venue's published entry-tier MAKER fee (Gemini 0.20% spot / ~0.03% stablecoin schedule; Crypto.com 0.25%) — assumption analysis, never auto-traded.
+                  "maker-tier✓" = would project positive at the venue's published entry-tier MAKER fee{data.gemini?.connected ? " (Gemini uses YOUR detected tiers)" : " (Gemini 0.20% spot / ~0.03% stablecoin schedule; Crypto.com 0.25%)"} — assumption analysis, never auto-traded.
                 </div>
                 <RowTable rows={data.candidateRoutes ?? []} showRequirement={true} />
               </div>

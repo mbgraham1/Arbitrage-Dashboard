@@ -53,7 +53,10 @@ export function ProfitHunterCard() {
   const onStart = async () => {
     setActionErr(null);
     try {
-      await start.mutateAsync({ data: hasCreds ? { krakenKey, krakenSecret, coinbaseKey, coinbaseSecret } : {} });
+      await start.mutateAsync({ data: {
+        ...(hasCreds ? { krakenKey, krakenSecret, coinbaseKey, coinbaseSecret } : {}),
+        ...(credentials.geminiKey && credentials.geminiSecret ? { geminiKey: credentials.geminiKey, geminiSecret: credentials.geminiSecret } : {}),
+      } });
       await report.refetch();
     } catch (e) { setActionErr((e as Error).message); }
   };

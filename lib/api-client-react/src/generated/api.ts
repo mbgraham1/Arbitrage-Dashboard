@@ -44,6 +44,8 @@ import type {
   ExecutionStatusResult,
   FeeTierRequest,
   FeeTierResult,
+  GeminiCredentials,
+  GeminiTestResult,
   Get2xScanParams,
   GetAllPairSnapshotsParams,
   GetGraphScanParams,
@@ -559,6 +561,77 @@ export const useTestCoinbase = <TError = ErrorType<ErrorResponse>,
         TContext
       > => {
       return useMutation(getTestCoinbaseMutationOptions(options));
+    }
+
+export const getTestGeminiUrl = () => {
+
+
+
+
+  return `/api/test-gemini`
+}
+
+/**
+ * @summary Test Gemini connection (read-only — balances + detected fee tier; live Gemini trading is never enabled)
+ */
+export const testGemini = async (geminiCredentials: GeminiCredentials, options?: RequestInit): Promise<GeminiTestResult> => {
+
+  return customFetch<GeminiTestResult>(getTestGeminiUrl(),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(geminiCredentials)
+  }
+);}
+
+
+
+
+
+export const getTestGeminiMutationOptions = <TError = ErrorType<ErrorResponse>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof testGemini>>, TError,{data: BodyType<GeminiCredentials>}, TContext>, request?: SecondParameter<typeof customFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof testGemini>>, TError,{data: BodyType<GeminiCredentials>}, TContext> => {
+
+const mutationKey = ['testGemini'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof testGemini>>, {data: BodyType<GeminiCredentials>}> = (props) => {
+          const {data} = props ?? {};
+
+          return  testGemini(data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type TestGeminiMutationResult = NonNullable<Awaited<ReturnType<typeof testGemini>>>
+    export type TestGeminiMutationBody = BodyType<GeminiCredentials>
+    export type TestGeminiMutationError = ErrorType<ErrorResponse>
+
+    /**
+ * @summary Test Gemini connection (read-only — balances + detected fee tier; live Gemini trading is never enabled)
+ */
+export const useTestGemini = <TError = ErrorType<ErrorResponse>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof testGemini>>, TError,{data: BodyType<GeminiCredentials>}, TContext>, request?: SecondParameter<typeof customFetch>}
+ ): UseMutationResult<
+        Awaited<ReturnType<typeof testGemini>>,
+        TError,
+        {data: BodyType<GeminiCredentials>},
+        TContext
+      > => {
+      return useMutation(getTestGeminiMutationOptions(options));
     }
 
 export const getExecuteTradeUrl = () => {

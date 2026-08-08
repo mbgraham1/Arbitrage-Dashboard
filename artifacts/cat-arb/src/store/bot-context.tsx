@@ -169,6 +169,8 @@ const EMPTY_CREDS: ExchangeCredentials = {
   krakenSecret: "",
   coinbaseKey: "",
   coinbaseSecret: "",
+  geminiKey: "",
+  geminiSecret: "",
 };
 
 const DEFAULT_SETTINGS: BotSettings = {

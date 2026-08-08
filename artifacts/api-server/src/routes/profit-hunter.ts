@@ -26,6 +26,8 @@ import { Router, type IRouter } from "express";
 import fs from "node:fs";
 import path from "node:path";
 import { MmScanBody } from "@workspace/api-zod";
+import { z } from "zod";
+import { geminiVerify, type GeminiAccount, type GeminiCreds } from "../lib/gemini";
 import { VENUES, fetchAllVenueBooks, walkBuyUsd, walkSellQty } from "../lib/venues";
 import { fetchStableBooks, fetchPerpBasis } from "../lib/hunter-sources";
 import { getStreamBook, getCoinbaseStreamBook } from "../lib/book-stream";
@@ -80,6 +82,8 @@ const hunter = {
 };
 let stats = new Map<string, OppStat>();
 let hunterCreds: Creds | null = null;
+// Gemini keys (read-only: detected fees + balances only; never persisted, never trades).
+let hunterGeminiCreds: GeminiCreds | null = null;
 let timer: NodeJS.Timeout | null = null;
 let tickRunning = false;
 
@@ -203,13 +207,22 @@ async function sampleTick(): Promise<void> {
       return usdOk && assetBal >= qty10 * 1.02;
     };
 
+    // Gemini (read-only): detected fee tier when keys were provided at start.
+    let gemAcct: GeminiAccount | null = null;
+    if (hunterGeminiCreds) {
+      try { gemAcct = await geminiVerify(hunterGeminiCreds); } catch { gemAcct = null; /* fall back to labeled assumptions */ }
+    }
+
     // 1. spot-cross across all venues
     const books = await fetchAllVenueBooks(ASSETS);
     for (const asset of ASSETS) {
       const legs: Leg[] = [];
       for (const v of VENUES) {
         const b = books.get(`${v.id}:${asset}`);
-        if (b) legs.push({ id: v.id, name: v.regionOk ? v.name : `${v.name} (region-unavailable)`, regionOk: v.regionOk, candidate: v.candidate, takerPct: v.assumedTakerPct, basisPct: v.basisHaircutPct, bids: b.bids, asks: b.asks });
+        if (b) {
+          const isGem = v.id === "gemini" && gemAcct != null;
+          legs.push({ id: v.id, name: v.regionOk ? v.name : `${v.name} (region-unavailable)`, regionOk: v.regionOk, candidate: v.candidate, takerPct: isGem ? gemAcct!.takerPct : v.assumedTakerPct, basisPct: v.basisHaircutPct, bids: b.bids, asks: b.asks });
+        }
       }
       const kB = getStreamBook(OB_USD_PAIRS[asset]);
       if (kB && kB.ageMs < 5000 && kB.bids.length) legs.push({ id: "kraken", name: "Kraken", takerPct: fees.kTakerPct, basisPct: 0, bids: kB.bids, asks: kB.asks });
@@ -324,6 +337,7 @@ function stopHunter(reason: string): void {
   hunter.running = false;
   hunter.stopReason = reason;
   hunterCreds = null;
+  hunterGeminiCreds = null;
   if (timer) { clearInterval(timer); timer = null; }
   saveState();
 }
@@ -335,6 +349,8 @@ router.post("/arb/hunter/start", async (req, res): Promise<void> => {
   if (hunter.running) { res.status(409).json({ error: "Profit Hunter is already running" }); return; }
   const hasCreds = !!(c.krakenKey && c.krakenSecret && c.coinbaseKey && c.coinbaseSecret);
   hunterCreds = hasCreds ? { krakenKey: c.krakenKey!, krakenSecret: c.krakenSecret!, coinbaseKey: c.coinbaseKey!, coinbaseSecret: c.coinbaseSecret! } : null;
+  const gc = z.object({ geminiKey: z.string().min(1), geminiSecret: z.string().min(1) }).safeParse(req.body ?? {});
+  hunterGeminiCreds = gc.success ? gc.data : null;
   const hours = 24;
   hunter.running = true;
   hunter.startedAt = new Date().toISOString();
@@ -343,7 +359,7 @@ router.post("/arb/hunter/start", async (req, res): Promise<void> => {
   hunter.feeSource = hasCreds ? "detected" : "assumed";
   timer = setInterval(() => { void sampleTick(); }, TICK_MS);
   void sampleTick();
-  res.json({ ok: true, startedAt: hunter.startedAt, endsAt: hunter.endsAt, withKeys: hasCreds, note: hasCreds ? "sampling with YOUR detected Kraken/Coinbase fees + balance-verified executability" : "sampling with labeled assumed fees — executability unverifiable without keys" });
+  res.json({ ok: true, startedAt: hunter.startedAt, endsAt: hunter.endsAt, withKeys: hasCreds, note: `${hasCreds ? "sampling with YOUR detected Kraken/Coinbase fees + balance-verified executability" : "sampling with labeled assumed fees — executability unverifiable without keys"}${hunterGeminiCreds ? "; Gemini keys connected (read-only) — detected Gemini fee tier in use, Gemini never trades" : ""}` });
 });
 
 router.post("/arb/hunter/stop", (_req, res) => {

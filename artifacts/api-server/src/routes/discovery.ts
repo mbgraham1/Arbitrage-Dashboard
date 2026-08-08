@@ -22,6 +22,8 @@
  */
 import { Router, type IRouter } from "express";
 import { MmScanBody } from "@workspace/api-zod";
+import { z } from "zod";
+import { geminiVerify, type GeminiAccount } from "../lib/gemini";
 import { VENUES, fetchAllVenueBooks, getVenueErrors, walkBuyUsd, walkSellQty, type VenueBook } from "../lib/venues";
 import { getStreamBook, getCoinbaseStreamBook } from "../lib/book-stream";
 import { OB_USD_PAIRS, type ObAsset } from "../lib/order-book";
@@ -74,6 +76,8 @@ type DiscRow = {
   regionUnavailable: boolean;
   /** For candidate venues (Gemini, Crypto.com): buffer-inclusive $10 net IF their legs paid entry-tier MAKER fees instead of taker. Assumption-based — shows whether the route would become attractive, never marks it executable. */
   entryTierMakerNet10: number | null;
+  /** Gemini routes with keys connected: Gemini-side balance covers the $10 leg (read-only — still NOT executable from this app). */
+  geminiFunded: boolean | null;
   seenPositiveScans: number;
 };
 
@@ -127,6 +131,15 @@ router.post("/arb/discovery", async (req, res): Promise<void> => {
   const hasCreds = !!(c.krakenKey && c.krakenSecret && c.coinbaseKey && c.coinbaseSecret);
   let fees: Fees | null = null, bal: Balances | null = null;
   let credNote: string | null = null;
+  // Optional Gemini keys — READ-ONLY: detected fee tier + balances for honest
+  // candidate labeling. Gemini live trading is never enabled from here.
+  const gc = z.object({ geminiKey: z.string().min(1), geminiSecret: z.string().min(1) }).safeParse(req.body ?? {});
+  let gemini: GeminiAccount | null = null;
+  let geminiNote: string | null = null;
+  if (gc.success) {
+    try { gemini = await geminiVerify(gc.data); }
+    catch (e) { geminiNote = `Gemini keys provided but verification failed (${(e as Error).message.slice(0, 80)}) — falling back to labeled assumptions`; }
+  }
   if (hasCreds) {
     try {
       fees = await detectFees(c as Parameters<typeof detectFees>[0]);
@@ -144,7 +157,17 @@ router.post("/arb/discovery", async (req, res): Promise<void> => {
     const legs: VenueLeg[] = [];
     for (const v of VENUES) {
       const b = books.get(`${v.id}:${asset}`);
-      if (b) legs.push({ id: v.id, name: v.name, quote: v.quote, takerPct: v.assumedTakerPct, feeSource: "assumed", basisHaircutPct: v.basisHaircutPct, regionOk: v.regionOk, candidate: v.candidate, assumedMakerPct: v.assumedMakerPct, book: b });
+      if (b) {
+        const isGem = v.id === "gemini" && gemini != null;
+        legs.push({
+          id: v.id, name: v.name, quote: v.quote,
+          takerPct: isGem ? gemini!.takerPct : v.assumedTakerPct,
+          feeSource: isGem ? "detected" : "assumed",
+          basisHaircutPct: v.basisHaircutPct, regionOk: v.regionOk, candidate: v.candidate,
+          assumedMakerPct: isGem ? gemini!.makerPct : v.assumedMakerPct,
+          book: b,
+        });
+      }
     }
     const kBook = getStreamBook(OB_USD_PAIRS[asset]);
     if (kBook && kBook.ageMs < MAX_STREAM_AGE_MS && kBook.bids.length && kBook.asks.length) {
@@ -204,7 +227,7 @@ router.post("/arb/discovery", async (req, res): Promise<void> => {
       } else {
         category = "requires_setup";
         const foreign = [buy, sell].filter(l => l.id !== "kraken" && l.id !== "coinbase");
-        requirement = `needs a funded account on ${foreign.map(l => `${l.name} (assumed ${l.takerPct}% taker${l.quote === "USDT" ? ", USDT-quoted" : ""}${l.candidate ? ", PR-accessible candidate" : ""})`).join(" + ")} — public data only until API access is connected + verified; verify real fees/withdrawal costs before funding`;
+        requirement = `needs a funded account on ${foreign.map(l => `${l.name} (${l.feeSource === "detected" ? `YOUR detected ${l.takerPct}% taker` : `assumed ${l.takerPct}% taker`}${l.quote === "USDT" ? ", USDT-quoted" : ""}${l.candidate ? ", PR-accessible candidate" : ""})`).join(" + ")} — ${foreign.every(l => l.id === "gemini") && gemini ? "Gemini keys connected (read-only) — still NOT executable from this app; execution stays Kraken/Coinbase only" : "public data only until API access is connected + verified; verify real fees/withdrawal costs before funding"}`;
       }
 
       // Is Coinbase's taker tier specifically what kills this route?
@@ -218,6 +241,15 @@ router.post("/arb/discovery", async (req, res): Promise<void> => {
       // legs (Gemini / Crypto.com) paid their published ENTRY-TIER MAKER fee
       // instead of taker? Pure assumption analysis — never marks executable.
       const regionUnavailable = !buy.regionOk || !sell.regionOk;
+      // Gemini-side funding check (read-only honesty label, never executability):
+      // buying on Gemini needs USD there; selling on Gemini needs the asset there.
+      let geminiFunded: boolean | null = null;
+      if (gemini && (buy.id === "gemini" || sell.id === "gemini")) {
+        const buyOk = buy.id !== "gemini" || gemini.usdBalance >= EXEC_SIZE * 1.02;
+        const qty10g = EXEC_SIZE / (sell.book.bids[0]?.[0] ?? 1);
+        const sellOk = sell.id !== "gemini" || (gemini.balances[asset] ?? 0) >= qty10g * 1.02;
+        geminiFunded = buyOk && sellOk;
+      }
       let entryTierMakerNet10: number | null = null;
       if (!regionUnavailable && (buy.candidate || sell.candidate)) {
         const mb = buy.candidate ? { ...buy, takerPct: buy.assumedMakerPct } : buy;
@@ -235,7 +267,7 @@ router.post("/arb/discovery", async (req, res): Promise<void> => {
         nets, net10,
         bestSizeUsd: sweep.size, bestNetUsd: sweep.net, costsAtBest: sweep.costs,
         category, blockedBy: regionUnavailable ? "REGION_UNAVAILABLE" : blockedByOf(net10, nets, category, liveOnly, !!fees), requirement, coinbaseFeeIsBlocker,
-        regionUnavailable, entryTierMakerNet10,
+        regionUnavailable, entryTierMakerNet10, geminiFunded,
         seenPositiveScans: streak,
       });
     }
@@ -304,7 +336,7 @@ router.post("/arb/discovery", async (req, res): Promise<void> => {
           bestSizeUsd: sweep.size, bestNetUsd: sweep.net, costsAtBest: sweep.costs,
           category, blockedBy: blockedByOf(net10, nets, category, true, !!fees), requirement,
           coinbaseFeeIsBlocker: false,
-          regionUnavailable: false, entryTierMakerNet10: null,
+          regionUnavailable: false, entryTierMakerNet10: null, geminiFunded: null,
           seenPositiveScans: streak,
         });
       }
@@ -350,6 +382,15 @@ router.post("/arb/discovery", async (req, res): Promise<void> => {
       ? "Kraken/Coinbase fees are YOUR detected tiers; all other venues use published entry-tier ASSUMPTIONS."
       : "No keys connected — ALL fees are published entry-tier assumptions. Connect keys for real Kraken/Coinbase tiers.",
     credNote,
+    gemini: gc.success ? {
+      connected: gemini != null,
+      makerPct: gemini?.makerPct ?? null,
+      takerPct: gemini?.takerPct ?? null,
+      usdBalance: gemini?.usdBalance ?? null,
+      note: gemini
+        ? "Gemini connected (read-only): detected fee tier + balance-verified candidate labels. Live Gemini trading is NOT enabled — execution stays Kraken/Coinbase, $10 cap."
+        : geminiNote,
+    } : null,
     venues: VENUES.map(v => ({
       id: v.id, name: v.name, quote: v.quote, assumedTakerPct: v.assumedTakerPct, assumedMakerPct: v.assumedMakerPct,
       regionOk: v.regionOk, candidate: v.candidate, accessNote: v.accessNote ?? null,

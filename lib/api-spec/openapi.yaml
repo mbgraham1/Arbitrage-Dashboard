@@ -154,6 +154,31 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
 
+  /test-gemini:
+    post:
+      operationId: testGemini
+      tags: [exchange]
+      summary: Test Gemini connection (read-only — balances + detected fee tier; live Gemini trading is never enabled)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/GeminiCredentials"
+      responses:
+        "200":
+          description: Connection test result with detected fee tier and balances
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GeminiTestResult"
+        "400":
+          description: Invalid credentials
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
   /execute-trade:
     post:
       operationId: executeTrade
@@ -1216,6 +1241,25 @@ components:
         error:
           type: string
 
+    GeminiCredentials:
+      type: object
+      required: [geminiKey, geminiSecret]
+      properties:
+        geminiKey: { type: string }
+        geminiSecret: { type: string }
+    GeminiTestResult:
+      type: object
+      required: [ok, message]
+      properties:
+        ok: { type: boolean }
+        message: { type: string }
+        makerPct: { type: number, nullable: true, description: "DETECTED maker fee tier, percent" }
+        takerPct: { type: number, nullable: true, description: "DETECTED taker fee tier, percent" }
+        usdBalance: { type: number, nullable: true }
+        balances:
+          type: object
+          additionalProperties: { type: number }
+        note: { type: string, nullable: true }
     KrakenCredentials:
       type: object
       required: [krakenKey, krakenSecret]
@@ -1245,6 +1289,10 @@ components:
         coinbaseKey:
           type: string
         coinbaseSecret:
+          type: string
+        geminiKey:
+          type: string
+        geminiSecret:
           type: string
         enabledPairs:
           type: array
@@ -2194,12 +2242,14 @@ components:
               detail: { type: string }
     DiscoveryRequest:
       type: object
-      description: Optional Kraken/Coinbase credentials for real fees + inventory
+      description: Optional Kraken/Coinbase credentials for real fees + inventory; optional Gemini credentials for detected Gemini fees + balance-verified (read-only) candidate status
       properties:
         krakenKey: { type: string }
         krakenSecret: { type: string }
         coinbaseKey: { type: string }
         coinbaseSecret: { type: string }
+        geminiKey: { type: string }
+        geminiSecret: { type: string }
     DiscoverySizeNet:
       type: object
       properties:
@@ -2237,6 +2287,7 @@ components:
         blockedBy: { type: string, description: "NONE | NO_EDGE | BLOCKED_BY_FEES | INSUFFICIENT_INVENTORY | NEEDS_KEYS | NEEDS_ACCOUNT | REGION_UNAVAILABLE" }
         regionUnavailable: { type: boolean, description: "a leg is on a venue unavailable in the user's region — market context only, never actionable" }
         entryTierMakerNet10: { type: number, nullable: true, description: "for candidate venues (Gemini/Crypto.com): $10 net IF candidate legs paid published entry-tier MAKER fees — assumption analysis, never executable" }
+        geminiFunded: { type: boolean, nullable: true, description: "for Gemini routes with keys connected: the Gemini-side balance covers the $10 leg (read-only — still NOT executable from this app)" }
         category: { type: string, description: "executable_now | requires_setup | not_profitable" }
         requirement: { type: string }
         coinbaseFeeIsBlocker: { type: boolean }
@@ -2274,6 +2325,16 @@ components:
               assetsCovered: { type: integer }
         coinbaseFeeDrag: { type: integer }
         summary: { type: string }
+        gemini:
+          type: object
+          nullable: true
+          description: "Gemini account status when keys are provided — read-only; live Gemini trading is never enabled"
+          properties:
+            connected: { type: boolean }
+            makerPct: { type: number, nullable: true }
+            takerPct: { type: number, nullable: true }
+            usdBalance: { type: number, nullable: true }
+            note: { type: string, nullable: true }
         candidateRoutes:
           type: array
           description: "routes touching PR-accessible candidate venues (Gemini, Crypto.com) — public-data discovery with entry-tier maker analysis; never executable until API access is connected + verified"

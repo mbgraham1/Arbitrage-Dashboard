@@ -31,6 +31,8 @@ export interface DiscoveryRow {
   regionUnavailable?: boolean;
   /** for candidate venues (Gemini/Crypto.com): $10 net IF candidate legs paid published entry-tier MAKER fees — assumption analysis, never executable */
   entryTierMakerNet10?: number | null;
+  /** for Gemini routes with keys connected: the Gemini-side balance covers the $10 leg (read-only — still NOT executable from this app) */
+  geminiFunded?: boolean | null;
   /** executable_now | requires_setup | not_profitable */
   category?: string;
   requirement?: string;

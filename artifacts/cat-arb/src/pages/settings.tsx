@@ -6,7 +6,7 @@ import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { useBotContext, ALL_PAIRS } from "@/store/bot-context";
 import { Settings2, KeySquare, SlidersHorizontal, ShieldAlert, CheckCircle2, XCircle, Lock, Layers, BookOpen, Repeat2 } from "lucide-react";
-import { useTestKraken, useTestCoinbase } from "@workspace/api-client-react";
+import { useTestKraken, useTestCoinbase, useTestGemini } from "@workspace/api-client-react";
 
 const INVENTORY_ASSETS = ["BTC", "ETH", "SOL", "AVAX", "DOT"] as const;
 
@@ -18,11 +18,15 @@ export default function Settings() {
 
   const testKrakenMutation = useTestKraken();
   const testCoinbaseMutation = useTestCoinbase();
+  const testGeminiMutation = useTestGemini();
 
   const [krakenStatus, setKrakenStatus] = useState<"idle" | "success" | "error">("idle");
   const [krakenMessage, setKrakenMessage] = useState("");
   const [coinbaseStatus, setCoinbaseStatus] = useState<"idle" | "success" | "error">("idle");
   const [coinbaseMessage, setCoinbaseMessage] = useState("");
+  const [geminiStatus, setGeminiStatus] = useState<"idle" | "success" | "error">("idle");
+  const [geminiMessage, setGeminiMessage] = useState("");
+  const [geminiInfo, setGeminiInfo] = useState<{ makerPct: number; takerPct: number; usdBalance: number; balances: Record<string, number> } | null>(null);
 
   const handleSaveCreds = () => {
     setCredentials(localCreds);
@@ -57,6 +61,24 @@ export default function Settings() {
     } catch (e: unknown) {
       setCoinbaseStatus("error");
       setCoinbaseMessage(e instanceof Error ? e.message : "Connection failed");
+    }
+  };
+
+  const testGemini = async () => {
+    setGeminiStatus("idle");
+    setGeminiInfo(null);
+    try {
+      const res = await testGeminiMutation.mutateAsync({
+        data: { geminiKey: localCreds.geminiKey ?? "", geminiSecret: localCreds.geminiSecret ?? "" },
+      });
+      setGeminiStatus(res.ok ? "success" : "error");
+      setGeminiMessage(res.message);
+      if (res.ok && res.makerPct != null && res.takerPct != null) {
+        setGeminiInfo({ makerPct: res.makerPct, takerPct: res.takerPct, usdBalance: res.usdBalance ?? 0, balances: (res.balances as Record<string, number>) ?? {} });
+      }
+    } catch (e: unknown) {
+      setGeminiStatus("error");
+      setGeminiMessage(e instanceof Error ? e.message : "Connection failed");
     }
   };
 
@@ -212,6 +234,70 @@ export default function Settings() {
                   )}
                 </div>
               </div>
+            </div>
+
+            {/* Gemini — READ-ONLY venue: balances + detected fee tier for Discovery/Hunter. Live Gemini trading is never enabled. */}
+            <div className="flex flex-col gap-3 pt-4 border-t">
+              <div className="flex flex-col gap-1">
+                <Label className="font-bold">Gemini (read-only)</Label>
+                <span className="text-xs text-muted-foreground font-mono">
+                  Used for balances + your detected fee tier in Discovery and the Profit Hunter. Live Gemini trading is NOT enabled — execution stays Kraken/Coinbase with the $10 cap.
+                </span>
+              </div>
+              <div className="flex flex-col gap-2">
+                <Label htmlFor="gemini-key">API Key</Label>
+                <Input
+                  id="gemini-key"
+                  type="password"
+                  data-testid="input-gemini-key"
+                  value={localCreds.geminiKey ?? ""}
+                  onChange={(e) => setLocalCreds({ ...localCreds, geminiKey: e.target.value })}
+                />
+              </div>
+              <div className="flex flex-col gap-2">
+                <Label htmlFor="gemini-secret">API Secret</Label>
+                <Input
+                  id="gemini-secret"
+                  type="password"
+                  data-testid="input-gemini-secret"
+                  value={localCreds.geminiSecret ?? ""}
+                  onChange={(e) => setLocalCreds({ ...localCreds, geminiSecret: e.target.value })}
+                />
+              </div>
+              <div className="flex justify-between items-center mt-1">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={testGemini}
+                  disabled={testGeminiMutation.isPending}
+                  data-testid="button-test-gemini"
+                >
+                  Test Connection
+                </Button>
+                <div className="flex items-center gap-2">
+                  {geminiStatus === "success" && (
+                    <>
+                      <CheckCircle2 className="h-5 w-5 text-green-500" />
+                      <span className="text-xs font-mono text-green-500 truncate max-w-[200px]" title={geminiMessage}>{geminiMessage}</span>
+                    </>
+                  )}
+                  {geminiStatus === "error" && (
+                    <>
+                      <XCircle className="h-5 w-5 text-destructive" />
+                      <span className="text-xs font-mono text-destructive truncate max-w-[140px]" title={geminiMessage}>{geminiMessage}</span>
+                    </>
+                  )}
+                </div>
+              </div>
+              {geminiInfo && (
+                <div className="text-xs font-mono text-muted-foreground border border-border p-2" data-testid="text-gemini-info">
+                  <div>Detected fee tier: <span className="text-green-500">{geminiInfo.makerPct.toFixed(3)}% maker / {geminiInfo.takerPct.toFixed(3)}% taker</span></div>
+                  <div>USD spendable: ${geminiInfo.usdBalance.toFixed(2)}</div>
+                  {Object.entries(geminiInfo.balances).filter(([c]) => c !== "USD").slice(0, 8).map(([c, v]) => (
+                    <div key={c}>{c}: {v}</div>
+                  ))}
+                </div>
+              )}
             </div>
 
             <Button className="w-full mt-4" onClick={handleSaveCreds} data-testid="button-save-creds">

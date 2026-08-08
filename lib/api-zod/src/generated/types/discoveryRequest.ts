@@ -7,11 +7,13 @@
  */
 
 /**
- * Optional Kraken/Coinbase credentials for real fees + inventory
+ * Optional Kraken/Coinbase credentials for real fees + inventory; optional Gemini credentials for detected Gemini fees + balance-verified (read-only) candidate status
  */
 export interface DiscoveryRequest {
   krakenKey?: string;
   krakenSecret?: string;
   coinbaseKey?: string;
   coinbaseSecret?: string;
+  geminiKey?: string;
+  geminiSecret?: string;
 }

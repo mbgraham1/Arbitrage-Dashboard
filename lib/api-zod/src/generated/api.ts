@@ -25,6 +25,8 @@ export const FetchPricesBody = zod.object({
   "krakenSecret": zod.string(),
   "coinbaseKey": zod.string(),
   "coinbaseSecret": zod.string(),
+  "geminiKey": zod.string().optional(),
+  "geminiSecret": zod.string().optional(),
   "enabledPairs": zod.array(zod.string()).optional().describe('Optional allow-list of pair symbols to scan (e.g. [\'SOL\/USD\', \'BTC\/USD\']). Scans all pairs when omitted.'),
   "pair": zod.string().optional().describe('Active trading pair (e.g. BTC\/USD). When provided, base-asset balances for that pair are included in the response.')
 })
@@ -64,6 +66,8 @@ export const FetchBalancesBody = zod.object({
   "krakenSecret": zod.string(),
   "coinbaseKey": zod.string(),
   "coinbaseSecret": zod.string(),
+  "geminiKey": zod.string().optional(),
+  "geminiSecret": zod.string().optional(),
   "enabledPairs": zod.array(zod.string()).optional().describe('Optional allow-list of pair symbols to scan (e.g. [\'SOL\/USD\', \'BTC\/USD\']). Scans all pairs when omitted.'),
   "pair": zod.string().optional().describe('Active trading pair (e.g. BTC\/USD). When provided, base-asset balances for that pair are included in the response.')
 })
@@ -132,6 +136,25 @@ export const TestCoinbaseResponse = zod.object({
   "currency": zod.string(),
   "amount": zod.number()
 })).optional()
+})
+
+
+/**
+ * @summary Test Gemini connection (read-only — balances + detected fee tier; live Gemini trading is never enabled)
+ */
+export const TestGeminiBody = zod.object({
+  "geminiKey": zod.string(),
+  "geminiSecret": zod.string()
+})
+
+export const TestGeminiResponse = zod.object({
+  "ok": zod.boolean(),
+  "message": zod.string(),
+  "makerPct": zod.number().nullish().describe('DETECTED maker fee tier, percent'),
+  "takerPct": zod.number().nullish().describe('DETECTED taker fee tier, percent'),
+  "usdBalance": zod.number().nullish(),
+  "balances": zod.record(zod.string(), zod.number()).optional(),
+  "note": zod.string().nullish()
 })
 
 
@@ -1114,8 +1137,10 @@ export const DiscoveryScanBody = zod.object({
   "krakenKey": zod.string().optional(),
   "krakenSecret": zod.string().optional(),
   "coinbaseKey": zod.string().optional(),
-  "coinbaseSecret": zod.string().optional()
-}).describe('Optional Kraken\/Coinbase credentials for real fees + inventory')
+  "coinbaseSecret": zod.string().optional(),
+  "geminiKey": zod.string().optional(),
+  "geminiSecret": zod.string().optional()
+}).describe('Optional Kraken\/Coinbase credentials for real fees + inventory; optional Gemini credentials for detected Gemini fees + balance-verified (read-only) candidate status')
 
 export const DiscoveryScanResponse = zod.object({
   "at": zod.string().optional(),
@@ -1148,6 +1173,7 @@ export const DiscoveryScanResponse = zod.object({
   "blockedBy": zod.string().optional().describe('NONE | NO_EDGE | BLOCKED_BY_FEES | INSUFFICIENT_INVENTORY | NEEDS_KEYS | NEEDS_ACCOUNT | REGION_UNAVAILABLE'),
   "regionUnavailable": zod.boolean().optional().describe('a leg is on a venue unavailable in the user\'s region — market context only, never actionable'),
   "entryTierMakerNet10": zod.number().nullish().describe('for candidate venues (Gemini\/Crypto.com): $10 net IF candidate legs paid published entry-tier MAKER fees — assumption analysis, never executable'),
+  "geminiFunded": zod.boolean().nullish().describe('for Gemini routes with keys connected: the Gemini-side balance covers the $10 leg (read-only — still NOT executable from this app)'),
   "category": zod.string().optional().describe('executable_now | requires_setup | not_profitable'),
   "requirement": zod.string().optional(),
   "coinbaseFeeIsBlocker": zod.boolean().optional(),
@@ -1182,6 +1208,7 @@ export const DiscoveryScanResponse = zod.object({
   "blockedBy": zod.string().optional().describe('NONE | NO_EDGE | BLOCKED_BY_FEES | INSUFFICIENT_INVENTORY | NEEDS_KEYS | NEEDS_ACCOUNT | REGION_UNAVAILABLE'),
   "regionUnavailable": zod.boolean().optional().describe('a leg is on a venue unavailable in the user\'s region — market context only, never actionable'),
   "entryTierMakerNet10": zod.number().nullish().describe('for candidate venues (Gemini\/Crypto.com): $10 net IF candidate legs paid published entry-tier MAKER fees — assumption analysis, never executable'),
+  "geminiFunded": zod.boolean().nullish().describe('for Gemini routes with keys connected: the Gemini-side balance covers the $10 leg (read-only — still NOT executable from this app)'),
   "category": zod.string().optional().describe('executable_now | requires_setup | not_profitable'),
   "requirement": zod.string().optional(),
   "coinbaseFeeIsBlocker": zod.boolean().optional(),
@@ -1205,6 +1232,13 @@ export const DiscoveryScanResponse = zod.object({
 })).optional(),
   "coinbaseFeeDrag": zod.number().optional(),
   "summary": zod.string().optional(),
+  "gemini": zod.object({
+  "connected": zod.boolean().optional(),
+  "makerPct": zod.number().nullish(),
+  "takerPct": zod.number().nullish(),
+  "usdBalance": zod.number().nullish(),
+  "note": zod.string().nullish()
+}).nullish().describe('Gemini account status when keys are provided — read-only; live Gemini trading is never enabled'),
   "candidateRoutes": zod.array(zod.object({
   "asset": zod.string().optional(),
   "buyVenue": zod.string().optional(),
@@ -1234,6 +1268,7 @@ export const DiscoveryScanResponse = zod.object({
   "blockedBy": zod.string().optional().describe('NONE | NO_EDGE | BLOCKED_BY_FEES | INSUFFICIENT_INVENTORY | NEEDS_KEYS | NEEDS_ACCOUNT | REGION_UNAVAILABLE'),
   "regionUnavailable": zod.boolean().optional().describe('a leg is on a venue unavailable in the user\'s region — market context only, never actionable'),
   "entryTierMakerNet10": zod.number().nullish().describe('for candidate venues (Gemini\/Crypto.com): $10 net IF candidate legs paid published entry-tier MAKER fees — assumption analysis, never executable'),
+  "geminiFunded": zod.boolean().nullish().describe('for Gemini routes with keys connected: the Gemini-side balance covers the $10 leg (read-only — still NOT executable from this app)'),
   "category": zod.string().optional().describe('executable_now | requires_setup | not_profitable'),
   "requirement": zod.string().optional(),
   "coinbaseFeeIsBlocker": zod.boolean().optional(),
@@ -1268,6 +1303,7 @@ export const DiscoveryScanResponse = zod.object({
   "blockedBy": zod.string().optional().describe('NONE | NO_EDGE | BLOCKED_BY_FEES | INSUFFICIENT_INVENTORY | NEEDS_KEYS | NEEDS_ACCOUNT | REGION_UNAVAILABLE'),
   "regionUnavailable": zod.boolean().optional().describe('a leg is on a venue unavailable in the user\'s region — market context only, never actionable'),
   "entryTierMakerNet10": zod.number().nullish().describe('for candidate venues (Gemini\/Crypto.com): $10 net IF candidate legs paid published entry-tier MAKER fees — assumption analysis, never executable'),
+  "geminiFunded": zod.boolean().nullish().describe('for Gemini routes with keys connected: the Gemini-side balance covers the $10 leg (read-only — still NOT executable from this app)'),
   "category": zod.string().optional().describe('executable_now | requires_setup | not_profitable'),
   "requirement": zod.string().optional(),
   "coinbaseFeeIsBlocker": zod.boolean().optional(),
@@ -1302,6 +1338,7 @@ export const DiscoveryScanResponse = zod.object({
   "blockedBy": zod.string().optional().describe('NONE | NO_EDGE | BLOCKED_BY_FEES | INSUFFICIENT_INVENTORY | NEEDS_KEYS | NEEDS_ACCOUNT | REGION_UNAVAILABLE'),
   "regionUnavailable": zod.boolean().optional().describe('a leg is on a venue unavailable in the user\'s region — market context only, never actionable'),
   "entryTierMakerNet10": zod.number().nullish().describe('for candidate venues (Gemini\/Crypto.com): $10 net IF candidate legs paid published entry-tier MAKER fees — assumption analysis, never executable'),
+  "geminiFunded": zod.boolean().nullish().describe('for Gemini routes with keys connected: the Gemini-side balance covers the $10 leg (read-only — still NOT executable from this app)'),
   "category": zod.string().optional().describe('executable_now | requires_setup | not_profitable'),
   "requirement": zod.string().optional(),
   "coinbaseFeeIsBlocker": zod.boolean().optional(),
@@ -1336,6 +1373,7 @@ export const DiscoveryScanResponse = zod.object({
   "blockedBy": zod.string().optional().describe('NONE | NO_EDGE | BLOCKED_BY_FEES | INSUFFICIENT_INVENTORY | NEEDS_KEYS | NEEDS_ACCOUNT | REGION_UNAVAILABLE'),
   "regionUnavailable": zod.boolean().optional().describe('a leg is on a venue unavailable in the user\'s region — market context only, never actionable'),
   "entryTierMakerNet10": zod.number().nullish().describe('for candidate venues (Gemini\/Crypto.com): $10 net IF candidate legs paid published entry-tier MAKER fees — assumption analysis, never executable'),
+  "geminiFunded": zod.boolean().nullish().describe('for Gemini routes with keys connected: the Gemini-side balance covers the $10 leg (read-only — still NOT executable from this app)'),
   "category": zod.string().optional().describe('executable_now | requires_setup | not_profitable'),
   "requirement": zod.string().optional(),
   "coinbaseFeeIsBlocker": zod.boolean().optional(),
@@ -1351,8 +1389,10 @@ export const HunterStartBody = zod.object({
   "krakenKey": zod.string().optional(),
   "krakenSecret": zod.string().optional(),
   "coinbaseKey": zod.string().optional(),
-  "coinbaseSecret": zod.string().optional()
-}).describe('Optional Kraken\/Coinbase credentials for real fees + inventory')
+  "coinbaseSecret": zod.string().optional(),
+  "geminiKey": zod.string().optional(),
+  "geminiSecret": zod.string().optional()
+}).describe('Optional Kraken\/Coinbase credentials for real fees + inventory; optional Gemini credentials for detected Gemini fees + balance-verified (read-only) candidate status')
 
 export const HunterStartResponse = zod.record(zod.string(), zod.unknown())
 
