@@ -1806,8 +1806,13 @@ function GraphEngineCard() {
     maxHops:         4,
     executionStyle:  scanStyle,
   };
+  // Cadence aligned with the OB Hunter (5s refetch / 4s stale) and the
+  // server's 5s REST order-book cache TTL: when the WS stream is down and
+  // scans fall back to REST, the graph scan reuses the books the OB scan
+  // just fetched (shared in-process cache) instead of doubling Kraken's
+  // Depth load. When streams are healthy, books are read from memory anyway.
   const { data, isLoading, dataUpdatedAt } = useGetGraphScan(params, {
-    query: { queryKey: getGetGraphScanQueryKey(params), refetchInterval: 2_000, staleTime: 1_500 },
+    query: { queryKey: getGetGraphScanQueryKey(params), refetchInterval: 5_000, staleTime: 4_000 },
   });
 
   const routes: GraphRoute[] = data?.routes ?? [];
