@@ -1,0 +1,36 @@
+1. The "Viable" Routes are a Mirage (Right Now)
+Look at IMG_1078. You have 8 routes marked ✅ VIABLE. But look at the execution log in IMG_1077:
+[GRAPH·EXEC] ✖ Leg 1 did not fill within 3×8s maker windows.
+
+The bot found a $0.04 profit on paper, placed a limit order to buy the first leg (ETH or FIL)... and nobody sold to it. The order expired unfilled. This is the #1 reason you aren't rich yet. The market moved away from your limit price before the trade could complete.
+
+2. The "Fill Rate" Column is Lying to the Ranking System
+You have a route at 6/10 (which is great!), but it is competing with routes at 1/10 and 0/10.
+
+Why is a 1/10 route ranked so high? Because the code is using a mathematical prior of 0.70 (70%) for unproven routes. So a route with 1 actual fill out of 10 tries is being scored as if it has a 70% fill rate (prior) + 10% observed. This is mathematically correct for Bayesian statistics, but visually, it makes a dog-shit route look like a golden ticket.
+
+🧠 THE STRATEGIC DIAGNOSIS (For the Replit Developer)
+
+Don't ask them for new code. Ask them to fix the metrics and the fill logic based on these two observations:
+
+A. The "Fill Rate" is measuring the wrong thing.
+Right now, it probably counts "Leg 1 filled" as a success. But you only make money when ALL THREE LEGS fill.
+The Strategy: Tell them to change the Fill Rate to Full-Cycle Completion Rate.
+A route that fills Leg 1 but dies on Leg 2 is a 100% failure, not a partial success. The bot should track Completed Cycles / Attempts.
+
+B. The "Score" needs to be completely honest.
+For routes with < 10 attempts, the score should be labeled as "Exploring (Prior)" and visually greyed out.
+For routes with ≥ 10 attempts, the score should switch to "Proven (Observed)" and use the actual full-cycle fill rate.
+Right now, a 1/10 route looks like a 70% success route. That is misleading and wastes execution time.
+
+🔥 THE REAL BOTTLENECK (Why the 0.856% profit evaporated)
+
+Look at the execution timer: 9.0s / 8s fill timer... 0% filled.
+
+The bot is trying to use Maker (Limit) Orders to save on fees (0.22% per leg). But the market is moving too fast. Your limit order is sitting slightly below the market price waiting for a dip that never comes before the arbitrage window closes
+.Stop sending me new features. Fix the execution logic based on these screenshots:
+
+Change the Fill Rate metric to track FULL 3-LEG CYCLE COMPLETIONS, not just Leg 1 fills.
+Add a 'Cycle Completion' column so we see how many full triangles actually closed.
+For the Score, keep the 0.70 prior for unproven routes, but visually mark them as 'Unproven (Gray)' until they hit 10 attempts. Only routes with 10+ attempts should be ranked with their observed fill rate.
+Most importantly: if a limit order doesn't fill in 4 seconds, cancel it and place a market order to close the leg. The theoretical edge (0.856%) is big enough to pay taker fees, but we keep missing the window."

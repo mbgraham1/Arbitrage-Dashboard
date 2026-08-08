@@ -1762,9 +1762,19 @@ function GraphEngineCard() {
                         <span className="text-muted-foreground">{r.histLiveAttempts ?? 0}/10</span>
                       )}
                     </td>
-                    <td className={cn("px-3 py-1.5", (r.effectiveScoreUsd ?? r.netProfitUsd) > 0 ? "text-success" : "text-destructive")}
-                        title="Ranking score = net profit × historical fill rate (expected realized profit). A smaller edge that reliably fills beats a bigger edge that doesn't.">
+                    <td className={cn("px-3 py-1.5 whitespace-nowrap",
+                        r.histFillRate == null
+                          ? "text-muted-foreground"
+                          : (r.effectiveScoreUsd ?? r.netProfitUsd) > 0 ? "text-success" : "text-destructive")}
+                        title={r.histFillRate != null
+                          ? `PROVEN (observed): score = net profit × the route's real full-cycle completion rate (${(r.histFillRate * 100).toFixed(0)}% over ${r.histLiveAttempts} live attempts).`
+                          : "UNPROVEN (exploring): score = net profit × 0.70 prior — NOT an observed fill rate. Greyed until the route reaches 10 live attempts, then switches entirely to its observed full-cycle completion rate."}>
                       ${(r.effectiveScoreUsd ?? r.netProfitUsd).toFixed(4)}
+                      {r.histFillRate == null ? (
+                        <span className="text-[8px] ml-1">UNPROVEN</span>
+                      ) : (
+                        <span className="text-[8px] text-muted-foreground ml-1">proven</span>
+                      )}
                     </td>
                     <td className="px-3 py-1.5">
                       <span className={cn("text-[9px] font-bold px-1 border whitespace-nowrap",
@@ -1934,7 +1944,7 @@ function ExecutionQualityCard() {
           <table className="w-full text-xs font-mono border-collapse">
             <thead>
               <tr className="border-b-2 border-border bg-muted/50">
-                {["Route", "Style", "Attempts", "Live", "Expected", "Realized", "Fill Rate", "Slippage", "Net P&L"].map(h => (
+                {["Route", "Style", "Attempts", "Live", "Expected", "Realized", "Full Cycle", "Leg 1", "Leg 2", "Leg 3", "Slippage", "Net P&L"].map(h => (
                   <th key={h} className="text-left px-3 py-2 text-[10px] uppercase font-bold text-muted-foreground whitespace-nowrap">{h}</th>
                 ))}
               </tr>
@@ -1951,9 +1961,18 @@ function ExecutionQualityCard() {
                     title={r.avgShortfallUsd == null ? undefined : `Shortfall vs expected: $${r.avgShortfallUsd.toFixed(4)}`}>
                     {r.avgRealizedProfitUsd == null ? "—" : `$${r.avgRealizedProfitUsd.toFixed(4)}`}
                   </td>
-                  <td className={cn("px-3 py-1.5 font-bold", r.liveFillRate == null ? "text-muted-foreground" : r.liveFillRate >= 0.8 ? "text-success" : r.liveFillRate >= 0.5 ? "text-yellow-500" : "text-destructive")}>
+                  <td className={cn("px-3 py-1.5 font-bold", r.liveFillRate == null ? "text-muted-foreground" : r.liveFillRate >= 0.8 ? "text-success" : r.liveFillRate >= 0.5 ? "text-yellow-500" : "text-destructive")}
+                    title="FULL 3-leg cycle completions / live attempts — the only fill rate that produces arbitrage profit.">
                     {r.liveFillRate == null ? "—" : `${(r.liveFillRate * 100).toFixed(0)}%`}
                   </td>
+                  {([r.leg1FillRate, r.leg2FillRate, r.leg3FillRate] as (number | null | undefined)[]).map((rate, li) => (
+                    <td key={li} className={cn("px-3 py-1.5", rate == null ? "text-muted-foreground" : rate >= 0.8 ? "text-success" : rate >= 0.5 ? "text-yellow-500" : "text-destructive")}
+                      title={rate == null
+                        ? "No per-leg data yet — recorded only for live attempts since leg tracking was added."
+                        : `Leg ${li + 1} confirmed filled in ${(rate * 100).toFixed(0)}% of ${r.legsTracked ?? 0} tracked live attempts. A big drop between legs shows where the cycle dies.`}>
+                      {rate == null ? "—" : `${(rate * 100).toFixed(0)}%`}
+                    </td>
+                  ))}
                   <td className="px-3 py-1.5 text-muted-foreground">
                     {r.avgSlippagePct == null ? "—" : `${r.avgSlippagePct.toFixed(3)}%`}
                   </td>
@@ -1966,7 +1985,7 @@ function ExecutionQualityCard() {
           </table>
         </div>
         <div className="px-3 py-1.5 text-[9px] font-mono text-muted-foreground border-t border-border/50">
-          Shortfall = scanner expectation − realized fills. Fill-rate tiers (per route, ≥10 live attempts required before judging): &gt;70% prioritized · 50–70% ranked down · &lt;50% blocked (block decays 1h after the last attempt, earning a fresh probe). Routes are ranked by net profit × fill rate — expected realized profit, not theoretical edge. Persistent shortfalls raise the edge a route must clear, and when the top route is gated, AUTO immediately falls through to the next-best viable route.
+          Execution is hybrid maker→taker: each leg gets a 4s post-only window at maker fees, then completes at MARKET (leg 1 only when a fresh taker-priced pre-flight still clears the floor; legs 2/3 always — completing beats unwinding at the same taker cost). Full Cycle = completed 3-leg cycles / live attempts; Leg 1–3 show where failed cycles die. Shortfall = scanner expectation − realized fills. Fill-rate tiers (per route, ≥10 live attempts required before judging): &gt;70% prioritized · 50–70% ranked down · &lt;50% blocked (block decays 1h after the last attempt, earning a fresh probe). Routes are ranked by net profit × fill rate — expected realized profit, not theoretical edge. Persistent shortfalls raise the edge a route must clear, and when the top route is gated, AUTO immediately falls through to the next-best viable route.
         </div>
       </CardContent>
     </Card>

@@ -1,4 +1,4 @@
-import { pgTable, serial, text, numeric, boolean, timestamp, index } from "drizzle-orm/pg-core";
+import { pgTable, serial, text, numeric, boolean, timestamp, index, integer } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod/v4";
 
@@ -23,6 +23,10 @@ export const executionQualityTable = pgTable("execution_quality", {
   realizedProfitUsd: numeric("realized_profit_usd", { precision: 18, scale: 6 }),
   /** Depth-walked slippage % of the route at attempt time (0 for maker joins) */
   slippagePct: numeric("slippage_pct", { precision: 10, scale: 4 }),
+  /** How many legs of the cycle CONFIRMED filled (0–3 for triangles); null when
+   * unknown (dry runs, cross-inventory routes, rows recorded before tracking).
+   * Diagnoses WHERE routes die: leg-1 never fills vs leg-2/3 killing the cycle. */
+  legsFilled: integer("legs_filled"),
   note: text("note"),
 }, (t) => [
   index("execution_quality_account_created_idx").on(t.accountId, t.createdAt),

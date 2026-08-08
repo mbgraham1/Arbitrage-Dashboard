@@ -27,3 +27,6 @@ Only one live multi-leg execution per process: a module-level lock prevents AUTO
 
 ## Fill-history queries must be account-scoped
 Any ranking/gating built on the execution-quality history must filter by the account scope (sha256-prefix of held keys, "legacy" rows included for continuity). A global aggregate lets one account's fill behavior rank or block another account's routes — review flagged this as a trading-safety issue. The client derives the same non-reversible hash via Web Crypto to pass on GET scans (never raw keys in query strings).
+
+## Bounded taker fallbacks
+When a maker leg times out and falls back to a taker fill: a plain market BUY has no maximum quote spend, so on cross pairs it can silently draw pre-existing account inventory when the price moves past the sizing estimate. Use an IOC limit with an explicit worst-case price cap (spend hard-bounded at volume × cap) sized from the inventory THIS RUN holds. Also pass Kraken oflags "fciq" (fee in quote) on all orders so cost±fee accounting is exact regardless of account fee preference. Preserve maker+fallback txids (comma-join) for reconciliation.

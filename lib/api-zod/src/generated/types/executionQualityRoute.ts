@@ -19,4 +19,12 @@ export interface ExecutionQualityRoute {
   avgSlippagePct: number | null;
   totalRealizedProfitUsd: number | null;
   lastAttemptAt: string;
+  /** Live attempts with per-leg diagnostics recorded (denominator for the leg fill rates). */
+  legsTracked?: number;
+  /** Share of tracked live attempts where leg 1 confirmed filled; null when no per-leg data yet. */
+  leg1FillRate?: number | null;
+  /** Share of tracked live attempts where legs 1–2 confirmed filled. */
+  leg2FillRate?: number | null;
+  /** Share of tracked live attempts where the FULL 3-leg cycle confirmed filled. */
+  leg3FillRate?: number | null;
 }

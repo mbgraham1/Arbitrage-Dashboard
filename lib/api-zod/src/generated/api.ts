@@ -388,7 +388,11 @@ export const GetExecutionQualityResponse = zod.object({
   "avgShortfallUsd": zod.number().nullable(),
   "avgSlippagePct": zod.number().nullable(),
   "totalRealizedProfitUsd": zod.number().nullable(),
-  "lastAttemptAt": zod.string()
+  "lastAttemptAt": zod.string(),
+  "legsTracked": zod.number().optional().describe('Live attempts with per-leg diagnostics recorded (denominator for the leg fill rates).'),
+  "leg1FillRate": zod.number().nullish().describe('Share of tracked live attempts where leg 1 confirmed filled; null when no per-leg data yet.'),
+  "leg2FillRate": zod.number().nullish().describe('Share of tracked live attempts where legs 1–2 confirmed filled.'),
+  "leg3FillRate": zod.number().nullish().describe('Share of tracked live attempts where the FULL 3-leg cycle confirmed filled.')
 })),
   "totalRecords": zod.number()
 })

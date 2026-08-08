@@ -396,7 +396,11 @@ export async function krakenRawLimitOrder(
     ordertype: "limit",
     price: price.toFixed(8),
     volume: volume.toFixed(8),
-    oflags: "post", // post-only: rejected if it would cross spread (maker only)
+    // post-only: rejected if it would cross spread (maker only).
+    // fciq: fee always charged in the QUOTE currency, so cost/fee accounting
+    // (aConsumed = cost + fee, received = cost − fee) is guaranteed correct
+    // regardless of the account's fee-currency preference.
+    oflags: "post,fciq",
   }, creds);
 }
 
@@ -416,6 +420,31 @@ export async function krakenRawMarketOrder(
     type: side,
     ordertype: "market",
     volume: volume.toFixed(8),
+    oflags: "fciq", // fee in QUOTE currency — keeps cost/fee accounting exact
+  }, creds);
+}
+
+/**
+ * Immediate-or-cancel LIMIT order with an explicit worst-case price — a
+ * bounded alternative to a market order. Crosses the spread like a taker but
+ * can NEVER spend more than volume × price (+ fee in quote via fciq); any
+ * unfilled remainder cancels immediately instead of resting.
+ */
+export async function krakenRawIocLimitOrder(
+  creds: KrakenCreds,
+  side: "buy" | "sell",
+  volume: number,
+  price: number,
+  rawPair: string,
+): Promise<{ txid: string[] }> {
+  return krakenPrivateRequest<{ txid: string[] }>("/0/private/AddOrder", {
+    pair: rawPair,
+    type: side,
+    ordertype: "limit",
+    price: price.toFixed(8),
+    volume: volume.toFixed(8),
+    timeinforce: "IOC",
+    oflags: "fciq",
   }, creds);
 }
 

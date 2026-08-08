@@ -1125,6 +1125,10 @@ components:
         avgSlippagePct: { type: number, nullable: true }
         totalRealizedProfitUsd: { type: number, nullable: true }
         lastAttemptAt: { type: string }
+        legsTracked: { type: integer, description: "Live attempts with per-leg diagnostics recorded (denominator for the leg fill rates)." }
+        leg1FillRate: { type: number, nullable: true, description: "Share of tracked live attempts where leg 1 confirmed filled; null when no per-leg data yet." }
+        leg2FillRate: { type: number, nullable: true, description: "Share of tracked live attempts where legs 1–2 confirmed filled." }
+        leg3FillRate: { type: number, nullable: true, description: "Share of tracked live attempts where the FULL 3-leg cycle confirmed filled." }
     ExecutionQualityResult:
       type: object
       required: [routes, totalRecords]
