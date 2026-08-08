@@ -1168,15 +1168,16 @@ function OrderBookHunterCard() {
     setTradeSizeInput(String(settings.obTradeSize));
     setDebouncedSize(String(settings.obTradeSize));
   }, [settings.obTradeSize, settings.obFeesPct]);
-  // Re-seed the min-profit input when the configured OB floor changes in
-  // Config, so the card's scan threshold follows the setting.
-  useEffect(() => {
-    setMinProfitInput(String(settings.obMinProfitUsd));
-  }, [settings.obMinProfitUsd]);
   const tradeSize = Math.max(1, parseFloat(debouncedSize) || settings.obTradeSize);
   // Min-profit floor: seeded from settings.obMinProfitUsd so it matches the
   // OB auto-execute threshold that the bot loop uses.
   const [minProfitInput, setMinProfitInput] = useState(String(settings.obMinProfitUsd));
+  // Re-seed the min-profit input when the configured OB floor changes in
+  // Config, so the execution gate immediately reflects the new threshold
+  // without the trader retyping the field.
+  useEffect(() => {
+    setMinProfitInput(String(settings.obMinProfitUsd));
+  }, [settings.obMinProfitUsd]);
   const minProfit = Math.max(0, parseFloat(minProfitInput) || 0);
   // Fee per leg: prefer the account's ACTUAL Kraken taker fee tier (fetched
   // once, shared across cards) over the configured assumption. A 0.40%
