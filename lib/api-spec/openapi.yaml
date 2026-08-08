@@ -543,6 +543,33 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
 
+  /arb/exec-lock/clear:
+    post:
+      operationId: clearExecLock
+      tags: [trades]
+      summary: HARD RESET — force-release the live execution lock
+      description: >
+        Manually clears the shared live-execution lock (e.g. when a dead route
+        appears to be holding it). Invalidates the current holder's generation
+        token so a zombie execution can never release a newer run's lock.
+        Use with care — if an execution is genuinely mid-order, clearing the
+        lock allows a second execution to run concurrently. Requires valid
+        Kraken credentials: the caller must prove account ownership before
+        a concurrency control can be disabled.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ExecLockClearRequest"
+      responses:
+        "200":
+          description: Lock cleared (or was already free)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ExecLockClearResult"
+
   /arb/execute-triangular:
     post:
       operationId: executeTriangular
@@ -1388,6 +1415,30 @@ components:
         minProfitUsd: { type: number, default: 0.02 }
         isDryRun: { type: boolean, default: true }
         executionStyle: { type: string, enum: [taker, maker], default: taker }
+        forceMode:
+          type: boolean
+          default: false
+          description: >
+            FORCE MODE — skip the fill-rate feedback gate, historical-shortfall
+            penalty, and consecutive-failure blacklist entirely. Fresh pre-flight
+            profit gates (net profit minus slippage buffer > minProfitUsd) still
+            apply; this never authorizes a trade the live re-quote says is unprofitable.
+
+    ExecLockClearRequest:
+      type: object
+      required: [krakenKey, krakenSecret]
+      properties:
+        krakenKey: { type: string }
+        krakenSecret: { type: string }
+
+    ExecLockClearResult:
+      type: object
+      required: [cleared, wasHeld]
+      properties:
+        cleared: { type: boolean }
+        wasHeld:
+          type: boolean
+          description: True when a live execution was actually holding the lock
 
     GraphExecuteResult:
       type: object

@@ -428,11 +428,21 @@ function releaseLiveLock(gen: number): void {
   }
 }
 
+/** HARD RESET: force-release the live lock regardless of holder. Bumps the
+ *  generation so the evicted holder's finally-release becomes a no-op. */
+function forceReleaseLiveLock(): boolean {
+  const wasHeld = liveExecLockHeld;
+  liveExecLockHeld = false;
+  liveExecLockGen++;
+  execStatus = idleExecStatus();
+  return wasHeld;
+}
+
 // ── Consecutive-failure route blacklist ──────────────────────────────────────
-// 3 failed LIVE full cycles IN A ROW → route blacklisted for 15 minutes so the
+// 5 failed LIVE full cycles IN A ROW → route blacklisted for 5 minutes so the
 // engine immediately moves to the next best route instead of grinding a dead
 // one. A single completed cycle resets the streak. Scoped per account+style.
-const ROUTE_BLACKLIST_AFTER = 3;
+const ROUTE_BLACKLIST_AFTER = 5;
 const ROUTE_BLACKLIST_MS = 5 * 60_000;
 const routeFailStreaks = new Map<string, { streak: number; blacklistedUntil: number }>();
 const streakKey = (accountId: string, style: string, route: string) => `${accountId}|${style}|${route}`;
@@ -442,8 +452,10 @@ function noteRouteLiveResult(accountId: string, style: string, route: string, fi
   const cur = routeFailStreaks.get(key) ?? { streak: 0, blacklistedUntil: 0 };
   cur.streak += 1;
   if (cur.streak >= ROUTE_BLACKLIST_AFTER) {
+    // Streak is NOT reset by the ban — only a SUCCESS clears it. Otherwise a
+    // chronically failing route would re-earn the profitable-route override
+    // (streak < 5) immediately after every ban expiry.
     cur.blacklistedUntil = Date.now() + ROUTE_BLACKLIST_MS;
-    cur.streak = 0; // streak restarts after the ban expires
   }
   routeFailStreaks.set(key, cur);
 }
@@ -452,6 +464,29 @@ function routeBlacklistRemainingMs(accountId: string, style: string, route: stri
   if (!cur) return 0;
   return Math.max(0, cur.blacklistedUntil - Date.now());
 }
+/** Current consecutive-failure count for a route (0 when unknown). */
+function routeFailStreakCount(accountId: string, style: string, route: string): number {
+  return routeFailStreaks.get(streakKey(accountId, style, route))?.streak ?? 0;
+}
+
+// HARD RESET — manual lock clear for a stuck/dead execution. Requires VALID
+// Kraken credentials: the server is otherwise unauthenticated, and clearing
+// a live-execution lock is a concurrency-safety control — an anonymous
+// caller must not be able to force two live executions to overlap.
+router.post("/arb/exec-lock/clear", async (req, res): Promise<void> => {
+  const key = typeof req.body?.krakenKey === "string" ? req.body.krakenKey : "";
+  const secret = typeof req.body?.krakenSecret === "string" ? req.body.krakenSecret : "";
+  if (!key || !secret) { res.status(400).json({ error: "Kraken credentials required to clear the execution lock." }); return; }
+  try {
+    await getKrakenBalances({ krakenKey: key, krakenSecret: secret }); // proves account ownership
+  } catch {
+    res.status(403).json({ error: "Kraken credential check failed — lock not cleared." });
+    return;
+  }
+  const wasHeld = forceReleaseLiveLock();
+  req.log.info({ wasHeld }, "HARD RESET: live execution lock force-cleared");
+  res.json({ cleared: true, wasHeld });
+});
 
 /** Cancel confirmed only by a TERMINAL Kraken order status — a cancel ack is
  *  not proof: the order may still fill in the race. Thrown when we cannot
@@ -1224,6 +1259,7 @@ router.post("/arb/graph-execute", async (req, res): Promise<void> => {
     return;
   }
   const { krakenKey, krakenSecret, coinbaseKey, coinbaseSecret, routeDescription, isDryRun } = parsed.data;
+  const forceMode = parsed.data.forceMode === true;
   // Server-side safety bounds — never trust client numbers for live orders:
   // finite positive size, non-negative fees, and (live only) a non-negative
   // profit floor so a negative minProfitUsd can't push a losing route through.
@@ -1295,7 +1331,14 @@ router.post("/arb/graph-execute", async (req, res): Promise<void> => {
       asset(realHops[0]!.to) === asset(realHops[1]!.from);
 
     let probeAttempt = false;
-    if (!isDryRun) {
+    if (!isDryRun && forceMode && isKrakenTriangle) {
+      // FORCE MODE: trader explicitly disabled all history-based gates.
+      // Restricted to Kraken triangles — that path re-quotes fresh order
+      // books in its own pre-flight immediately before placing orders.
+      // Cross/inventory shapes have no final re-quote, so history gates
+      // stay in force for them even under FORCE MODE.
+      req.log.info({ route: route.description }, "FORCE MODE — fill-rate gate, shortfall penalty, and blacklist bypassed (Kraken triangle)");
+    } else if (!isDryRun) {
       // 2a-bis. Consecutive-failure blacklist: 3 failed live cycles in a row
       // bans the route for 5 minutes — the dashboard's fall-through treats
       // any "Feedback-loop gate" error as "try the next best route".
@@ -1312,9 +1355,19 @@ router.post("/arb/graph-execute", async (req, res): Promise<void> => {
         res.json({ success: false, isDryRun, executed: false, route: route.description, preflightProfitUsd: route.netProfitUsd, error: `Feedback-loop gate: route blacklisted for ${Math.ceil(banMs / 60_000)} more min after ${ROUTE_BLACKLIST_AFTER} consecutive failed live cycles — moving to the next best route.` });
         return;
       }
-      if (hist.blockReason) {
+      // Profitable-route override: with fresh net profit > $0.01 and fewer
+      // than 5 CONSECUTIVE failures, execute regardless of lifetime fill rate
+      // — the streak (not the total) is what indicates a dead route now.
+      const failStreak = routeFailStreakCount(accountIdFromKey(krakenKey, coinbaseKey), executionStyle, route.description);
+      // Kraken triangles only — the override rides on that path's fresh
+      // order-book re-quote; cross shapes have no equivalent final check.
+      const profitableOverride = isKrakenTriangle && route.netProfitUsd > 0.01 && failStreak < ROUTE_BLACKLIST_AFTER;
+      if (hist.blockReason && !profitableOverride) {
         res.json({ success: false, isDryRun, executed: false, route: route.description, preflightProfitUsd: route.netProfitUsd, error: `Feedback-loop gate: ${hist.blockReason} (${hist.attempts} recorded live attempts).` });
         return;
+      }
+      if (hist.blockReason && profitableOverride) {
+        req.log.info({ route: route.description, netProfitUsd: route.netProfitUsd, failStreak }, "Fill-rate block overridden — profitable edge with a short failure streak");
       }
       if (hist.shortfallUsd > 0 && route.netProfitUsd - slippageBufferUsd - hist.shortfallUsd <= minProfitUsd) {
         res.json({ success: false, isDryRun, executed: false, route: route.description, preflightProfitUsd: route.netProfitUsd, error: `Feedback-loop gate: this route historically realizes $${hist.shortfallUsd.toFixed(4)} less than the scanner expects (${hist.attempts} live attempts); edge after that shortfall ≤ minimum $${minProfitUsd.toFixed(4)}.` });

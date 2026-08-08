@@ -70,6 +70,9 @@ export interface BotContextType {
   setIsRunning: (run: boolean) => void;
   liveMode: boolean;
   setLiveMode: (live: boolean) => void;
+  /** FORCE MODE — live executes bypass fill-rate gates & blacklist entirely */
+  forceMode: boolean;
+  setForceMode: (v: boolean) => void;
   latestPriceData: PriceData | null;
   cachedBalances: BalanceData | null;
   activityLog: LogEntry[];
@@ -198,6 +201,7 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
   }, []);
   const [isRunning, setIsRunning] = useState(false);
   const [liveMode, setLiveMode] = useLocalStorage("cat_arb_live_mode", false);
+  const [forceMode, setForceMode] = useLocalStorage("cat_arb_force_mode", false);
   const [latestPriceData, setLatestPriceData] = useState<PriceData | null>(null);
   const [cachedBalances, setCachedBalances] = useState<BalanceData | null>(null);
   const [activityLog, setActivityLog] = useState<LogEntry[]>([]);
@@ -883,6 +887,8 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
     setIsRunning,
     liveMode,
     setLiveMode,
+    forceMode,
+    setForceMode,
     latestPriceData,
     cachedBalances,
     activityLog,

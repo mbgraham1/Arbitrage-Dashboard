@@ -528,6 +528,92 @@ export interface GraphScanResult {
   scannedAt: string;
 }
 
+export interface InventoryOpportunity {
+  /** Asset symbol, e.g. BTC */
+  asset: string;
+  /** Canonical pair, e.g. BTC/USD */
+  pair: string;
+  krakenBid: number;
+  krakenAsk: number;
+  coinbaseBid: number;
+  coinbaseAsk: number;
+  /** Gross cross-exchange spread % */
+  grossSpreadPct: number;
+  /** Net spread after fees */
+  netSpreadPct: number;
+  buyExchange: string;
+  sellExchange: string;
+  buyPrice: number;
+  sellPrice: number;
+  tradeSizeUsd: number;
+  estimatedNetProfitUsd: number;
+  /** True when gross spread > 2x fees */
+  meetsThreshold: boolean;
+  scannedAt: string;
+}
+
+export type InventoryRebalanceAlertAlertLevel = typeof InventoryRebalanceAlertAlertLevel[keyof typeof InventoryRebalanceAlertAlertLevel];
+
+
+export const InventoryRebalanceAlertAlertLevel = {
+  info: 'info',
+  warning: 'warning',
+  critical: 'critical',
+} as const;
+
+export interface InventoryRebalanceAlert {
+  asset: string;
+  exchange: string;
+  /** Current % of total held on Kraken */
+  krakenPct: number;
+  /** Current % of total held on Coinbase */
+  coinbasePct: number;
+  /** Target % per exchange */
+  targetPct: number;
+  alertLevel: InventoryRebalanceAlertAlertLevel;
+  message: string;
+}
+
+export interface InventoryScanResult {
+  opportunities: InventoryOpportunity[];
+  rebalanceAlerts: InventoryRebalanceAlert[];
+  scannedAt: string;
+}
+
+export interface InventoryExecuteRequest {
+  krakenKey: string;
+  krakenSecret: string;
+  coinbaseKey: string;
+  coinbaseSecret: string;
+  /** Asset to trade, e.g. BTC */
+  asset?: string;
+  tradeSizeUsd?: number;
+  minProfitUsd?: number;
+  krakenFeesPct?: number;
+  coinbaseFeesPct?: number;
+  isDryRun?: boolean;
+}
+
+export interface InventoryExecuteResult {
+  success: boolean;
+  isDryRun: boolean;
+  executed: boolean;
+  asset: string;
+  pair: string;
+  buyExchange: string;
+  sellExchange: string;
+  volume?: number | null;
+  buyPrice?: number;
+  sellPrice?: number;
+  grossSpreadPct: number;
+  netSpreadPct: number;
+  estimatedNetProfitUsd: number;
+  realizedProfitUsd?: number | null;
+  buyOrderId?: string | null;
+  sellOrderId?: string | null;
+  error?: string | null;
+}
+
 export type GraphExecuteRequestExecutionStyle = typeof GraphExecuteRequestExecutionStyle[keyof typeof GraphExecuteRequestExecutionStyle];
 
 
@@ -549,6 +635,19 @@ export interface GraphExecuteRequest {
   minProfitUsd?: number;
   isDryRun?: boolean;
   executionStyle?: GraphExecuteRequestExecutionStyle;
+  /** FORCE MODE — skip the fill-rate feedback gate, historical-shortfall penalty, and consecutive-failure blacklist entirely. Fresh pre-flight profit gates (net profit minus slippage buffer > minProfitUsd) still apply; this never authorizes a trade the live re-quote says is unprofitable. */
+  forceMode?: boolean;
+}
+
+export interface ExecLockClearRequest {
+  krakenKey: string;
+  krakenSecret: string;
+}
+
+export interface ExecLockClearResult {
+  cleared: boolean;
+  /** True when a live execution was actually holding the lock */
+  wasHeld: boolean;
 }
 
 export interface GraphExecuteResult {
@@ -738,90 +837,17 @@ export const GetGraphScanExecutionStyle = {
   maker: 'maker',
 } as const;
 
-export interface InventoryOpportunity {
-  asset: string;
-  pair: string;
-  krakenBid: number;
-  krakenAsk: number;
-  coinbaseBid: number;
-  coinbaseAsk: number;
-  grossSpreadPct: number;
-  netSpreadPct: number;
-  buyExchange: string;
-  sellExchange: string;
-  buyPrice: number;
-  sellPrice: number;
-  tradeSizeUsd: number;
-  estimatedNetProfitUsd: number;
-  /** True when gross spread > 2× fees */
-  meetsThreshold: boolean;
-  scannedAt: string;
-}
-
-export interface InventoryExecuteRequest {
-  krakenKey: string;
-  krakenSecret: string;
-  coinbaseKey: string;
-  coinbaseSecret: string;
-  /** Asset symbol, e.g. BTC */
-  asset?: string;
-  tradeSizeUsd?: number;
-  minProfitUsd?: number;
-  krakenFeesPct?: number;
-  coinbaseFeesPct?: number;
-  isDryRun?: boolean;
-}
-
-export const InventoryRebalanceAlertLevel = { info: 'info', warning: 'warning', critical: 'critical' } as const;
-
-export interface InventoryScanResult {
-  opportunities: InventoryOpportunity[];
-  rebalanceAlerts: InventoryRebalanceAlert[];
-  scannedAt: string;
-}
-
-export type InventoryRebalanceAlertLevel = typeof InventoryRebalanceAlertLevel[keyof typeof InventoryRebalanceAlertLevel];
-
-export interface InventoryRebalanceAlert {
-  asset: string;
-  exchange: string;
-  krakenPct: number;
-  coinbasePct: number;
-  targetPct: number;
-  alertLevel: InventoryRebalanceAlertLevel;
-  message: string;
-}
-
-export interface InventoryExecuteResult {
-  success: boolean;
-  isDryRun: boolean;
-  executed: boolean;
-  asset: string;
-  pair: string;
-  buyExchange: string;
-  sellExchange: string;
-  volume?: number | null;
-  buyPrice: number;
-  sellPrice: number;
-  grossSpreadPct: number;
-  netSpreadPct: number;
-  estimatedNetProfitUsd: number;
-  realizedProfitUsd?: number | null;
-  buyOrderId?: string | null;
-  sellOrderId?: string | null;
-  error?: string | null;
-}
-
 export type GetInventoryScanParams = {
-  /** Comma-separated assets to scan (default "BTC,ETH,SOL") */
-  assets?: string;
-  krakenFeesPct?: number;
-  coinbaseFeesPct?: number;
-  tradeSizeUsd?: number;
-  /** Target % to hold on each exchange (default 50) */
-  targetPct?: number;
-  krakenKey?: string;
-  krakenSecret?: string;
-  coinbaseKey?: string;
-  coinbaseSecret?: string;
+/**
+ * Comma-separated asset symbols
+ */
+assets?: string;
+krakenFeesPct?: number;
+coinbaseFeesPct?: number;
+tradeSizeUsd?: number;
+/**
+ * Target % of asset to hold on each exchange (0–100)
+ */
+targetPct?: number;
 };
+

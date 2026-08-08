@@ -1593,7 +1593,7 @@ function HopBadge({ hop }: { hop: GraphRouteHop }) {
 }
 
 function GraphEngineCard() {
-  const { settings, credentials, liveMode, addLog } = useBotContext();
+  const { settings, credentials, liveMode, forceMode, addLog } = useBotContext();
   const executeMutation = useGraphExecute();
   // Live per-leg fill status — polled at 1s only while an execution is in
   // flight (or the server still reports an active leg), idle otherwise.
@@ -1653,7 +1653,9 @@ function GraphEngineCard() {
     // Fall-through: if a route is rejected by the feedback-loop gate (its own
     // fill history), immediately try the next-best viable route from the same
     // scan instead of stalling until the next scan. Max 3 candidates per fire.
-    const candidates = [topRoute, ...viable.filter(r => r.description !== topRoute.description && r.netProfitUsd > minProfit)].slice(0, 3);
+    // FORCE MODE lowers the effective floor to $0.01 — take any positive trade.
+    const effMinProfit = forceMode && liveMode ? Math.min(minProfit, 0.01) : minProfit;
+    const candidates = [topRoute, ...viable.filter(r => r.description !== topRoute.description && r.netProfitUsd > effMinProfit)].slice(0, 3);
     try {
       for (let ci = 0; ci < candidates.length; ci++) {
         const cand = candidates[ci];
@@ -1668,9 +1670,10 @@ function GraphEngineCard() {
             tradeSizeUsd: tradeSize,
             krakenFeesPct: settings.obFeesPct,
             coinbaseFeesPct: 0.40,
-            minProfitUsd: minProfit,
+            minProfitUsd: effMinProfit,
             isDryRun: !liveMode,
             executionStyle: style,
+            forceMode: forceMode && liveMode,
           },
         });
         if (r.success && r.executed) {

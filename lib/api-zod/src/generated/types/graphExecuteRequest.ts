@@ -20,4 +20,6 @@ export interface GraphExecuteRequest {
   minProfitUsd?: number;
   isDryRun?: boolean;
   executionStyle?: GraphExecuteRequestExecutionStyle;
+  /** FORCE MODE — skip the fill-rate feedback gate, historical-shortfall penalty, and consecutive-failure blacklist entirely. Fresh pre-flight profit gates (net profit minus slippage buffer > minProfitUsd) still apply; this never authorizes a trade the live re-quote says is unprofitable. */
+  forceMode?: boolean;
 }

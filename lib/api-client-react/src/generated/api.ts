@@ -29,6 +29,8 @@ import type {
   ConnectionTestResult,
   ErrorResponse,
   ExchangeCredentials,
+  ExecLockClearRequest,
+  ExecLockClearResult,
   ExecutionQualityResult,
   ExecutionStatusResult,
   FeeTierRequest,
@@ -1554,99 +1556,6 @@ export function useGetGraphScan<TData = Awaited<ReturnType<typeof getGraphScan>>
 
 
 
-export const getGetInventoryScanUrl = (params?: GetInventoryScanParams) => {
-  const normalizedParams = new URLSearchParams();
-  Object.entries(params || {}).forEach(([key, value]) => {
-    if (value !== undefined) {
-      normalizedParams.append(key, value === null ? 'null' : String(value));
-    }
-  });
-  const stringifiedParams = normalizedParams.toString();
-  return stringifiedParams.length > 0 ? `/api/arb/inventory-scan?${stringifiedParams}` : `/api/arb/inventory-scan`;
-};
-
-/**
- * Scans live BTC/ETH/SOL bid-ask on Kraken and Coinbase; surfaces opportunities
- * where spread > 2× fees and emits rebalance alerts when inventory is low.
- * @summary Cross-exchange inventory arb scan
- */
-export const getInventoryScan = async (params?: GetInventoryScanParams, options?: RequestInit): Promise<InventoryScanResult> => {
-  return customFetch<InventoryScanResult>(getGetInventoryScanUrl(params), { ...options, method: 'GET' });
-};
-
-export const getGetInventoryScanQueryKey = (params?: GetInventoryScanParams) => {
-  return [`/api/arb/inventory-scan`, ...(params ? [params] : [])] as const;
-};
-
-export const getGetInventoryScanQueryOptions = <TData = Awaited<ReturnType<typeof getInventoryScan>>, TError = ErrorType<ErrorResponse>>(
-  params?: GetInventoryScanParams,
-  options?: { query?: UseQueryOptions<Awaited<ReturnType<typeof getInventoryScan>>, TError, TData>; request?: SecondParameter<typeof customFetch> }
-) => {
-  const { query: queryOptions, request: requestOptions } = options ?? {};
-  const queryKey = queryOptions?.queryKey ?? getGetInventoryScanQueryKey(params);
-  const queryFn: QueryFunction<Awaited<ReturnType<typeof getInventoryScan>>> = ({ signal }) => getInventoryScan(params, { signal, ...requestOptions });
-  return { queryKey, queryFn, ...queryOptions } as UseQueryOptions<Awaited<ReturnType<typeof getInventoryScan>>, TError, TData> & { queryKey: QueryKey };
-};
-
-export type GetInventoryScanQueryResult = NonNullable<Awaited<ReturnType<typeof getInventoryScan>>>;
-export type GetInventoryScanQueryError = ErrorType<ErrorResponse>;
-
-/**
- * @summary Cross-exchange inventory arb scan
- */
-export function useGetInventoryScan<TData = Awaited<ReturnType<typeof getInventoryScan>>, TError = ErrorType<ErrorResponse>>(
-  params?: GetInventoryScanParams,
-  options?: { query?: UseQueryOptions<Awaited<ReturnType<typeof getInventoryScan>>, TError, TData>; request?: SecondParameter<typeof customFetch> }
-): UseQueryResult<TData, TError> & { queryKey: QueryKey } {
-  const queryOptions = getGetInventoryScanQueryOptions(params, options);
-  const query = useQuery(queryOptions) as UseQueryResult<TData, TError> & { queryKey: QueryKey };
-  return withQueryKey(query, queryOptions.queryKey);
-}
-
-export const getInventoryExecuteUrl = () => `/api/arb/inventory-execute`;
-
-/**
- * Execute a cross-exchange inventory arb: buy on the cheap venue, sell on the expensive venue.
- * @summary Execute a cross-exchange inventory arb
- */
-export const inventoryExecute = async (inventoryExecuteRequest: InventoryExecuteRequest, options?: RequestInit): Promise<InventoryExecuteResult> => {
-  return customFetch<InventoryExecuteResult>(getInventoryExecuteUrl(), {
-    ...options,
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...options?.headers },
-    body: JSON.stringify(inventoryExecuteRequest),
-  });
-};
-
-export const getInventoryExecuteMutationOptions = <TError = ErrorType<ErrorResponse>, TContext = unknown>(
-  options?: { mutation?: UseMutationOptions<Awaited<ReturnType<typeof inventoryExecute>>, TError, { data: BodyType<InventoryExecuteRequest> }, TContext>; request?: SecondParameter<typeof customFetch> }
-): UseMutationOptions<Awaited<ReturnType<typeof inventoryExecute>>, TError, { data: BodyType<InventoryExecuteRequest> }, TContext> => {
-  const mutationKey = ['inventoryExecute'];
-  const { mutation: mutationOptions, request: requestOptions } = options ?
-    options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
-      options : { ...options, mutation: { ...options.mutation, mutationKey } }
-    : { mutation: { mutationKey }, request: undefined };
-
-  const mutationFn: MutationFunction<Awaited<ReturnType<typeof inventoryExecute>>, { data: BodyType<InventoryExecuteRequest> }> = (props) => {
-    const { data } = props ?? {};
-    return inventoryExecute(data, requestOptions);
-  };
-  return { mutationFn, ...mutationOptions };
-};
-
-export type InventoryExecuteMutationResult = NonNullable<Awaited<ReturnType<typeof inventoryExecute>>>;
-export type InventoryExecuteMutationBody = BodyType<InventoryExecuteRequest>;
-export type InventoryExecuteMutationError = ErrorType<ErrorResponse>;
-
-/**
- * @summary Execute a cross-exchange inventory arb
- */
-export const useInventoryExecute = <TError = ErrorType<ErrorResponse>, TContext = unknown>(
-  options?: { mutation?: UseMutationOptions<Awaited<ReturnType<typeof inventoryExecute>>, TError, { data: BodyType<InventoryExecuteRequest> }, TContext>; request?: SecondParameter<typeof customFetch> }
-): UseMutationResult<Awaited<ReturnType<typeof inventoryExecute>>, TError, { data: BodyType<InventoryExecuteRequest> }, TContext> => {
-  return useMutation(getInventoryExecuteMutationOptions(options));
-};
-
 export const getGraphExecuteUrl = () => {
 
 
@@ -1719,6 +1628,78 @@ export const useGraphExecute = <TError = ErrorType<ErrorResponse>,
       return useMutation(getGraphExecuteMutationOptions(options));
     }
 
+export const getClearExecLockUrl = () => {
+
+
+
+
+  return `/api/arb/exec-lock/clear`
+}
+
+/**
+ * Manually clears the shared live-execution lock (e.g. when a dead route appears to be holding it). Invalidates the current holder's generation token so a zombie execution can never release a newer run's lock. Use with care — if an execution is genuinely mid-order, clearing the lock allows a second execution to run concurrently. Requires valid Kraken credentials: the caller must prove account ownership before a concurrency control can be disabled.
+ * @summary HARD RESET — force-release the live execution lock
+ */
+export const clearExecLock = async (execLockClearRequest: ExecLockClearRequest, options?: RequestInit): Promise<ExecLockClearResult> => {
+
+  return customFetch<ExecLockClearResult>(getClearExecLockUrl(),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(execLockClearRequest)
+  }
+);}
+
+
+
+
+
+export const getClearExecLockMutationOptions = <TError = ErrorType<unknown>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof clearExecLock>>, TError,{data: BodyType<ExecLockClearRequest>}, TContext>, request?: SecondParameter<typeof customFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof clearExecLock>>, TError,{data: BodyType<ExecLockClearRequest>}, TContext> => {
+
+const mutationKey = ['clearExecLock'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof clearExecLock>>, {data: BodyType<ExecLockClearRequest>}> = (props) => {
+          const {data} = props ?? {};
+
+          return  clearExecLock(data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type ClearExecLockMutationResult = NonNullable<Awaited<ReturnType<typeof clearExecLock>>>
+    export type ClearExecLockMutationBody = BodyType<ExecLockClearRequest>
+    export type ClearExecLockMutationError = ErrorType<unknown>
+
+    /**
+ * @summary HARD RESET — force-release the live execution lock
+ */
+export const useClearExecLock = <TError = ErrorType<unknown>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof clearExecLock>>, TError,{data: BodyType<ExecLockClearRequest>}, TContext>, request?: SecondParameter<typeof customFetch>}
+ ): UseMutationResult<
+        Awaited<ReturnType<typeof clearExecLock>>,
+        TError,
+        {data: BodyType<ExecLockClearRequest>},
+        TContext
+      > => {
+      return useMutation(getClearExecLockMutationOptions(options));
+    }
+
 export const getExecuteTriangularUrl = () => {
 
 
@@ -1789,6 +1770,163 @@ export const useExecuteTriangular = <TError = ErrorType<ErrorResponse>,
         TContext
       > => {
       return useMutation(getExecuteTriangularMutationOptions(options));
+    }
+
+export const getGetInventoryScanUrl = (params?: GetInventoryScanParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/arb/inventory-scan?${stringifiedParams}` : `/api/arb/inventory-scan`
+}
+
+/**
+ * Fetches live best-bid/best-ask for each requested asset from both venues, computes gross and net spread (after per-leg fees), and flags any asset whose net spread exceeds 2× total fees. When credentials are supplied the response also includes rebalance alerts when one-side inventory drops below 20% of the target allocation.
+ * @summary Scan live bid/ask across Kraken and Coinbase for inventory arb opportunities
+ */
+export const getInventoryScan = async (params?: GetInventoryScanParams, options?: RequestInit): Promise<InventoryScanResult> => {
+
+  return customFetch<InventoryScanResult>(getGetInventoryScanUrl(params),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getGetInventoryScanQueryKey = (params?: GetInventoryScanParams,) => {
+    return [
+    `/api/arb/inventory-scan`, ...(params ? [params] : [])
+    ] as const;
+    }
+
+
+export const getGetInventoryScanQueryOptions = <TData = Awaited<ReturnType<typeof getInventoryScan>>, TError = ErrorType<ErrorResponse>>(params?: GetInventoryScanParams, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getInventoryScan>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getGetInventoryScanQueryKey(params);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof getInventoryScan>>> = ({ signal }) => getInventoryScan(params, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof getInventoryScan>>, TError, TData> & { queryKey: QueryKey }
+}
+
+export type GetInventoryScanQueryResult = NonNullable<Awaited<ReturnType<typeof getInventoryScan>>>
+export type GetInventoryScanQueryError = ErrorType<ErrorResponse>
+
+
+/**
+ * @summary Scan live bid/ask across Kraken and Coinbase for inventory arb opportunities
+ */
+
+export function useGetInventoryScan<TData = Awaited<ReturnType<typeof getInventoryScan>>, TError = ErrorType<ErrorResponse>>(
+ params?: GetInventoryScanParams, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getInventoryScan>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+
+ ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+
+  const queryOptions = getGetInventoryScanQueryOptions(params,options)
+
+  const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+
+export const getInventoryExecuteUrl = () => {
+
+
+
+
+  return `/api/arb/inventory-execute`
+}
+
+/**
+ * Re-fetches live prices (pre-flight), confirms the spread still exceeds the minimum profit threshold, then places a buy on the cheaper exchange and a sell on the more expensive one using existing inventory. Acquires the process-wide live execution lock so it cannot run concurrently with graph or OB execute. Records the result to the trade ledger.
+ * @summary Execute an inventory arb — buy on cheap venue, sell on expensive venue
+ */
+export const inventoryExecute = async (inventoryExecuteRequest: InventoryExecuteRequest, options?: RequestInit): Promise<InventoryExecuteResult> => {
+
+  return customFetch<InventoryExecuteResult>(getInventoryExecuteUrl(),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(inventoryExecuteRequest)
+  }
+);}
+
+
+
+
+
+export const getInventoryExecuteMutationOptions = <TError = ErrorType<ErrorResponse>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof inventoryExecute>>, TError,{data: BodyType<InventoryExecuteRequest>}, TContext>, request?: SecondParameter<typeof customFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof inventoryExecute>>, TError,{data: BodyType<InventoryExecuteRequest>}, TContext> => {
+
+const mutationKey = ['inventoryExecute'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof inventoryExecute>>, {data: BodyType<InventoryExecuteRequest>}> = (props) => {
+          const {data} = props ?? {};
+
+          return  inventoryExecute(data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type InventoryExecuteMutationResult = NonNullable<Awaited<ReturnType<typeof inventoryExecute>>>
+    export type InventoryExecuteMutationBody = BodyType<InventoryExecuteRequest>
+    export type InventoryExecuteMutationError = ErrorType<ErrorResponse>
+
+    /**
+ * @summary Execute an inventory arb — buy on cheap venue, sell on expensive venue
+ */
+export const useInventoryExecute = <TError = ErrorType<ErrorResponse>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof inventoryExecute>>, TError,{data: BodyType<InventoryExecuteRequest>}, TContext>, request?: SecondParameter<typeof customFetch>}
+ ): UseMutationResult<
+        Awaited<ReturnType<typeof inventoryExecute>>,
+        TError,
+        {data: BodyType<InventoryExecuteRequest>},
+        TContext
+      > => {
+      return useMutation(getInventoryExecuteMutationOptions(options));
     }
 
 export const getGetTradeSummaryUrl = () => {

@@ -1,6 +1,7 @@
 import * as React from "react"
 import { Link, useLocation } from "wouter"
-import { Activity, Settings, LayoutDashboard, Terminal } from "lucide-react"
+import { Activity, Settings, LayoutDashboard, Terminal, Zap, RotateCcw } from "lucide-react"
+import { useClearExecLock } from "@workspace/api-client-react"
 import { cn } from "@/lib/utils"
 import { BotProvider, useBotContext, ALL_PAIRS } from "@/store/bot-context"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
@@ -22,6 +23,69 @@ function NavItem({ href, icon: Icon, label }: { href: string; icon: any; label: 
   )
 }
 
+function ForceModeControls() {
+  const { forceMode, setForceMode, addLog, credentials } = useBotContext();
+  const clearLock = useClearExecLock();
+  const hardReset = async () => {
+    if (!credentials.krakenKey || !credentials.krakenSecret) {
+      addLog("warning", "[HARD·RESET] Add Kraken credentials in Config first — clearing the lock requires proof of account ownership.");
+      return;
+    }
+    try {
+      const r = await clearLock.mutateAsync({ data: { krakenKey: credentials.krakenKey, krakenSecret: credentials.krakenSecret } });
+      addLog("warning", `[HARD·RESET] Execution lock force-cleared${r.wasHeld ? " (a live execution WAS holding it)" : " (lock was already free)"}.`);
+    } catch (e) {
+      addLog("error", `[HARD·RESET] Failed: ${e instanceof Error ? e.message : "unknown error"}`);
+    }
+  };
+  return (
+    <>
+      <TooltipProvider>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <button
+              onClick={() => {
+                const next = !forceMode;
+                setForceMode(next);
+                addLog(next ? "warning" : "info", next
+                  ? "[FORCE·MODE] ON — fill-rate gate & blacklist DISABLED; any fresh-profit route ≥ $0.01 executes."
+                  : "[FORCE·MODE] OFF — history-based gates re-enabled.");
+              }}
+              className={cn(
+                "flex items-center gap-2 px-2 py-1 border-2 text-xs font-bold uppercase tracking-wider transition-colors",
+                forceMode ? "border-destructive text-destructive bg-destructive/10 animate-pulse" : "border-border text-muted-foreground hover:text-foreground",
+              )}
+              data-testid="button-force-mode"
+            >
+              <Zap className="h-3 w-3" />
+              {forceMode ? "FORCE: ON" : "FORCE: OFF"}
+            </button>
+          </TooltipTrigger>
+          <TooltipContent side="bottom" className="max-w-[220px]">
+            <p className="text-[11px]">FORCE MODE bypasses the fill-rate gate and route blacklist entirely. Fresh pre-flight pricing still gates every trade at ≥ $0.01 net.</p>
+          </TooltipContent>
+        </Tooltip>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <button
+              onClick={hardReset}
+              disabled={clearLock.isPending}
+              className="flex items-center gap-2 px-2 py-1 border-2 border-border text-xs font-bold uppercase tracking-wider text-muted-foreground hover:text-destructive hover:border-destructive transition-colors disabled:opacity-50"
+              data-testid="button-hard-reset"
+            >
+              <RotateCcw className="h-3 w-3" />
+              {clearLock.isPending ? "…" : "HARD RESET"}
+            </button>
+          </TooltipTrigger>
+          <TooltipContent side="bottom" className="max-w-[220px]">
+            <p className="text-[11px]">Force-clears the live execution lock if a dead route is holding it. If a trade is genuinely mid-flight, clearing allows concurrent execution — use only when stuck.</p>
+          </TooltipContent>
+        </Tooltip>
+      </TooltipProvider>
+    </>
+  );
+}
+
 function StatusIndicator() {
   const { isRunning, liveMode, settings } = useBotContext();
   const filtered = settings.enabledPairs.length < ALL_PAIRS.length;
@@ -34,6 +98,8 @@ function StatusIndicator() {
           {isRunning ? "Engine: RUNNING" : "Engine: IDLE"}
         </span>
       </div>
+      <div className="h-4 w-px bg-border" />
+      <ForceModeControls />
       <div className="h-4 w-px bg-border" />
       <div className="flex items-center gap-2">
         <div className={cn("h-3 w-3 rounded-none", liveMode ? "bg-destructive animate-pulse" : "bg-primary")} />
@@ -100,6 +166,10 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
           <NavItem href="/" icon={LayoutDashboard} label="Dashboard" />
           <NavItem href="/trades" icon={Activity} label="Ledger" />
           <NavItem href="/settings" icon={Settings} label="Config" />
+        </div>
+        {/* Mobile force-mode controls (StatusIndicator is desktop-only) */}
+        <div className="md:hidden border-b-2 border-border bg-card flex items-center gap-3 px-4 py-2">
+          <ForceModeControls />
         </div>
 
         {/* Main Content */}

@@ -532,6 +532,7 @@ export const graphExecuteBodyCoinbaseFeesPctDefault = 0.4;
 export const graphExecuteBodyMinProfitUsdDefault = 0.02;
 export const graphExecuteBodyIsDryRunDefault = true;
 export const graphExecuteBodyExecutionStyleDefault = `taker`;
+export const graphExecuteBodyForceModeDefault = false;
 
 export const GraphExecuteBody = zod.object({
   "krakenKey": zod.string(),
@@ -544,7 +545,8 @@ export const GraphExecuteBody = zod.object({
   "coinbaseFeesPct": zod.number().default(graphExecuteBodyCoinbaseFeesPctDefault),
   "minProfitUsd": zod.number().default(graphExecuteBodyMinProfitUsdDefault),
   "isDryRun": zod.boolean().default(graphExecuteBodyIsDryRunDefault),
-  "executionStyle": zod.enum(['taker', 'maker']).default(graphExecuteBodyExecutionStyleDefault)
+  "executionStyle": zod.enum(['taker', 'maker']).default(graphExecuteBodyExecutionStyleDefault),
+  "forceMode": zod.boolean().default(graphExecuteBodyForceModeDefault).describe('FORCE MODE — skip the fill-rate feedback gate, historical-shortfall penalty, and consecutive-failure blacklist entirely. Fresh pre-flight profit gates (net profit minus slippage buffer > minProfitUsd) still apply; this never authorizes a trade the live re-quote says is unprofitable.\n')
 })
 
 export const GraphExecuteResponse = zod.object({
@@ -556,6 +558,21 @@ export const GraphExecuteResponse = zod.object({
   "realizedProfitUsd": zod.number().nullish().describe('Actual USD profit from confirmed fills (cost\/fee accounting); null when unknown'),
   "orderIds": zod.array(zod.string()).nullish(),
   "error": zod.string().nullish()
+})
+
+
+/**
+ * Manually clears the shared live-execution lock (e.g. when a dead route appears to be holding it). Invalidates the current holder's generation token so a zombie execution can never release a newer run's lock. Use with care — if an execution is genuinely mid-order, clearing the lock allows a second execution to run concurrently. Requires valid Kraken credentials: the caller must prove account ownership before a concurrency control can be disabled.
+ * @summary HARD RESET — force-release the live execution lock
+ */
+export const ClearExecLockBody = zod.object({
+  "krakenKey": zod.string(),
+  "krakenSecret": zod.string()
+})
+
+export const ClearExecLockResponse = zod.object({
+  "cleared": zod.boolean(),
+  "wasHeld": zod.boolean().describe('True when a live execution was actually holding the lock')
 })
 
 
@@ -585,6 +602,101 @@ export const ExecuteTriangularResponse = zod.object({
   "error": zod.string().nullish(),
   "priceSource": zod.enum(['direct', 'synthetic']).optional().describe('\"direct\" = live ETHSOL WS market was used for leg 2; \"synthetic\" = ETH\/USD ÷ SOL\/USD cross rate was used. Only present for ETH loops; absent for BTC loops.\n'),
   "synthetic": zod.boolean().optional().describe('True when the ETH\/SOL leg used a synthetic cross rate instead of the direct ETHSOL order-book market. Live execution is blocked when true.\n')
+})
+
+
+/**
+ * Fetches live best-bid/best-ask for each requested asset from both venues, computes gross and net spread (after per-leg fees), and flags any asset whose net spread exceeds 2× total fees. When credentials are supplied the response also includes rebalance alerts when one-side inventory drops below 20% of the target allocation.
+ * @summary Scan live bid/ask across Kraken and Coinbase for inventory arb opportunities
+ */
+export const getInventoryScanQueryAssetsDefault = `BTC,ETH,SOL`;
+export const getInventoryScanQueryKrakenFeesPctDefault = 0.16;
+export const getInventoryScanQueryCoinbaseFeesPctDefault = 0.4;
+export const getInventoryScanQueryTradeSizeUsdDefault = 10;
+export const getInventoryScanQueryTargetPctDefault = 50;
+
+export const GetInventoryScanQueryParams = zod.object({
+  "assets": zod.coerce.string().default(getInventoryScanQueryAssetsDefault).describe('Comma-separated asset symbols'),
+  "krakenFeesPct": zod.coerce.number().default(getInventoryScanQueryKrakenFeesPctDefault),
+  "coinbaseFeesPct": zod.coerce.number().default(getInventoryScanQueryCoinbaseFeesPctDefault),
+  "tradeSizeUsd": zod.coerce.number().default(getInventoryScanQueryTradeSizeUsdDefault),
+  "targetPct": zod.coerce.number().default(getInventoryScanQueryTargetPctDefault).describe('Target % of asset to hold on each exchange (0–100)')
+})
+
+export const GetInventoryScanResponse = zod.object({
+  "opportunities": zod.array(zod.object({
+  "asset": zod.string().describe('Asset symbol, e.g. BTC'),
+  "pair": zod.string().describe('Canonical pair, e.g. BTC\/USD'),
+  "krakenBid": zod.number(),
+  "krakenAsk": zod.number(),
+  "coinbaseBid": zod.number(),
+  "coinbaseAsk": zod.number(),
+  "grossSpreadPct": zod.number().describe('Gross cross-exchange spread %'),
+  "netSpreadPct": zod.number().describe('Net spread after fees'),
+  "buyExchange": zod.string(),
+  "sellExchange": zod.string(),
+  "buyPrice": zod.number(),
+  "sellPrice": zod.number(),
+  "tradeSizeUsd": zod.number(),
+  "estimatedNetProfitUsd": zod.number(),
+  "meetsThreshold": zod.boolean().describe('True when gross spread > 2x fees'),
+  "scannedAt": zod.string()
+})),
+  "rebalanceAlerts": zod.array(zod.object({
+  "asset": zod.string(),
+  "exchange": zod.string(),
+  "krakenPct": zod.number().describe('Current % of total held on Kraken'),
+  "coinbasePct": zod.number().describe('Current % of total held on Coinbase'),
+  "targetPct": zod.number().describe('Target % per exchange'),
+  "alertLevel": zod.enum(['info', 'warning', 'critical']),
+  "message": zod.string()
+})),
+  "scannedAt": zod.string()
+})
+
+
+/**
+ * Re-fetches live prices (pre-flight), confirms the spread still exceeds the minimum profit threshold, then places a buy on the cheaper exchange and a sell on the more expensive one using existing inventory. Acquires the process-wide live execution lock so it cannot run concurrently with graph or OB execute. Records the result to the trade ledger.
+ * @summary Execute an inventory arb — buy on cheap venue, sell on expensive venue
+ */
+export const inventoryExecuteBodyAssetDefault = `BTC`;
+export const inventoryExecuteBodyTradeSizeUsdDefault = 10;
+export const inventoryExecuteBodyMinProfitUsdDefault = 0.01;
+export const inventoryExecuteBodyKrakenFeesPctDefault = 0.16;
+export const inventoryExecuteBodyCoinbaseFeesPctDefault = 0.4;
+export const inventoryExecuteBodyIsDryRunDefault = true;
+
+export const InventoryExecuteBody = zod.object({
+  "krakenKey": zod.string(),
+  "krakenSecret": zod.string(),
+  "coinbaseKey": zod.string(),
+  "coinbaseSecret": zod.string(),
+  "asset": zod.string().default(inventoryExecuteBodyAssetDefault).describe('Asset to trade, e.g. BTC'),
+  "tradeSizeUsd": zod.number().default(inventoryExecuteBodyTradeSizeUsdDefault),
+  "minProfitUsd": zod.number().default(inventoryExecuteBodyMinProfitUsdDefault),
+  "krakenFeesPct": zod.number().default(inventoryExecuteBodyKrakenFeesPctDefault),
+  "coinbaseFeesPct": zod.number().default(inventoryExecuteBodyCoinbaseFeesPctDefault),
+  "isDryRun": zod.boolean().default(inventoryExecuteBodyIsDryRunDefault)
+})
+
+export const InventoryExecuteResponse = zod.object({
+  "success": zod.boolean(),
+  "isDryRun": zod.boolean(),
+  "executed": zod.boolean(),
+  "asset": zod.string(),
+  "pair": zod.string(),
+  "buyExchange": zod.string(),
+  "sellExchange": zod.string(),
+  "volume": zod.number().nullish(),
+  "buyPrice": zod.number().optional(),
+  "sellPrice": zod.number().optional(),
+  "grossSpreadPct": zod.number(),
+  "netSpreadPct": zod.number(),
+  "estimatedNetProfitUsd": zod.number(),
+  "realizedProfitUsd": zod.number().nullish(),
+  "buyOrderId": zod.string().nullish(),
+  "sellOrderId": zod.string().nullish(),
+  "error": zod.string().nullish()
 })
 
 
