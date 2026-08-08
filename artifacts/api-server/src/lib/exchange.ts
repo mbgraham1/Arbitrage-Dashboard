@@ -248,7 +248,16 @@ async function withPrivateLimiter<T>(key: string, fn: () => Promise<T>, retryOnR
       const gapWait = st.lastAt + PRIVATE_MIN_GAP_MS - Date.now();
       if (gapWait > 0) await new Promise(r => setTimeout(r, gapWait));
       st.lastAt = Date.now();
-      return fn();
+      // Beat when the call actually STARTS (it may have queued behind other
+      // paced calls on this key) and again when it RESOLVES, so a single
+      // awaited order/cancel/unwind never leaves the lock heartbeat silent
+      // longer than one HTTP timeout (~10s).
+      beat();
+      try {
+        return await fn();
+      } finally {
+        beat();
+      }
     });
     st.chain = p.catch(() => undefined); // keep the chain alive on failures
     try {
@@ -839,20 +848,28 @@ async function coinbaseRequest<T>(
   // Coinbase JWTs sign the path WITHOUT the query string — including it
   // makes every paginated/filtered request fail auth.
   const jwt = buildCoinbaseJwt(creds.coinbaseKey, creds.coinbaseSecret, method, path.split("?")[0]);
-  const resp = await fetch(`${COINBASE_BASE}${path}`, {
-    method,
-    headers: {
-      Authorization: `Bearer ${jwt}`,
-      "Content-Type": "application/json",
-    },
-    body: body ? JSON.stringify(body) : undefined,
-    signal: AbortSignal.timeout(10_000),
-  });
-  if (!resp.ok) {
-    const text = await resp.text().catch(() => "");
-    throw new Error(`Coinbase HTTP ${resp.status}: ${text}`);
+  // Beat the execution-lock heartbeat around every private Coinbase call:
+  // inventory/graph executors await these (place/cancel/status) while holding
+  // the shared live lock, and only their poll loops touch it otherwise.
+  beat();
+  try {
+    const resp = await fetch(`${COINBASE_BASE}${path}`, {
+      method,
+      headers: {
+        Authorization: `Bearer ${jwt}`,
+        "Content-Type": "application/json",
+      },
+      body: body ? JSON.stringify(body) : undefined,
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!resp.ok) {
+      const text = await resp.text().catch(() => "");
+      throw new Error(`Coinbase HTTP ${resp.status}: ${text}`);
+    }
+    return resp.json() as Promise<T>;
+  } finally {
+    beat();
   }
-  return resp.json() as Promise<T>;
 }
 
 /** Public endpoint — no API key required. */

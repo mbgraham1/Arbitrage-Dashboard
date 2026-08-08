@@ -15,3 +15,4 @@
 - [Regional venue constraints](regional-venue-constraints.md) — PR user; Binance.US region-blocked = context only, never actionable; Gemini/Crypto.com are the accessible candidates (public-data-only until keys verified).
 - [Merge clobber recovery](merge-clobber-recovery.md) — task merges can silently revert uncommitted work (exports, route mounts, openapi spec); check git stash@{0} first, tsc + endpoint smoke after every merge.
 - [Orphan server process](orphan-server-process.md) — EADDRINUSE after restart = stale pre-fix server may still serve the port; fuser -k then verify one process.
+- [Lock heartbeat coverage](lock-heartbeat-coverage.md) — every private exchange call must beat the live-lock heartbeat; stale window = 30s, sized to one HTTP timeout.

@@ -672,14 +672,14 @@ let liveExecLockGen = 0;     // generation token: only the CURRENT holder may re
 // await) — clear it instead of refusing new trades forever. Deliberately far
 // above the longest single bounded wait (~15s confirm polls, ~35s exchange
 // waits) so a slow-but-alive execution is never evicted.
-// 30s of heartbeat SILENCE (not runtime) evicts a dead lock holder. Every
-// executor heartbeats each status update and every 1s poll tick, so a live
-// trade never goes quiet this long; a crashed one is cleared in ≤30s. A hard
+// Heartbeat SILENCE (not runtime) evicts a dead lock holder. Every executor
+// heartbeats each status update and every 1s poll tick, and every private
+// exchange call (Kraken AND Coinbase) beats on start/finish plus every ≤5s
+// during rate-limit backoff sleeps — so the worst LEGITIMATE silence is one
+// HTTP timeout (~10s). A crashed execution is cleared in ≤30s. A hard
 // wall-clock cap (e.g. 5s) is unsafe: legs legitimately take longer, and
 // evicting a lock mid-order lets two executions spend the same balance.
-// 90s clears the worst legitimate silence: Kraken private-API rate-limit
-// backoff can stall a single awaited call up to ~60s with no poll tick.
-const LIVE_LOCK_STALE_MS = 90_000;
+const LIVE_LOCK_STALE_MS = 30_000;
 function liveLockBusy(): boolean {
   if (!liveExecLockHeld) return false;
   if (Date.now() - liveExecLockSinceMs > LIVE_LOCK_STALE_MS) {
@@ -728,12 +728,13 @@ function liveLockSilentMs(): number {
   return liveExecLockHeld ? Date.now() - liveExecLockSinceMs : 0;
 }
 /** FORCE MODE eviction threshold — executors heartbeat every ~1s, so 15s of
- *  silence means the holder is dead. Shorter than LIVE_LOCK_STALE_MS (90s)
+ *  silence means the holder is dead. Shorter than LIVE_LOCK_STALE_MS (30s)
  *  because the trader has explicitly opted into aggressive behavior. */
 const FORCE_LOCK_STALE_MS = 15_000;
-// Every Kraken private API attempt — including rate-limit backoff sleeps —
-// beats the execution-lock heartbeat, so a legitimately waiting executor is
-// never silent long enough (>15s) for FORCE MODE to evict it.
+// Every private exchange call (Kraken AND Coinbase) — including rate-limit
+// backoff sleeps and paced-queue waits — beats the execution-lock heartbeat,
+// so a legitimately waiting executor is never silent long enough (>15s) for
+// FORCE MODE to evict it.
 setPrivateCallHeartbeat(touchLiveLock);
 
 /** HARD RESET: force-release the live lock regardless of holder. Bumps the
@@ -2342,7 +2343,7 @@ router.post("/arb/graph-execute", async (req, res): Promise<void> => {
   if (!isDryRun) {
     // FORCE MODE lock override: a genuinely live execution heartbeats every
     // ~1s, so a lock silent for >15s under FORCE MODE is treated as dead and
-    // evicted immediately instead of waiting out the full 90s staleness
+    // evicted immediately instead of waiting out the full 30s staleness
     // window. A lock with a recent heartbeat is NEVER evicted — that would
     // let two live executions spend the same balance.
     if (forceMode && liveLockBusy() && liveLockSilentMs() > FORCE_LOCK_STALE_MS) {
