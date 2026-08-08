@@ -1,6 +1,6 @@
 import { Router, type IRouter } from "express";
 import { desc, sql, sum, count, max, avg } from "drizzle-orm";
-import { db, tradesTable, triScanTable, executionQualityTable, accountSnapshotsTable } from "@workspace/db";
+import { db, tradesTable, triScanTable, executionQualityTable, accountSnapshotsTable, routeGateStateTable } from "@workspace/db";
 import { desc as dbDesc, eq as dbEq, and as dbAnd, gte as dbGte, count as dbCount } from "drizzle-orm";
 import { createHash } from "node:crypto";
 import nodeFs from "node:fs";
@@ -753,37 +753,81 @@ function forceReleaseLiveLock(): boolean {
 // one. A single completed cycle resets the streak. Scoped per account+style.
 const ROUTE_BLACKLIST_AFTER = 5;
 const ROUTE_BLACKLIST_MS = 5 * 60_000;
+// PERSISTED in route_gate_state (DB is the source of truth) so a server
+// restart — or a second process behind the published app — never resets a
+// failure streak or blacklist ban. The Map is a resilience fallback only:
+// when the DB is briefly unreachable we degrade to the old per-process
+// behavior instead of dropping the gates entirely.
 const routeFailStreaks = new Map<string, { streak: number; blacklistedUntil: number }>();
 const streakKey = (accountId: string, style: string, route: string) => `${accountId}|${style}|${route}`;
-function noteRouteLiveResult(accountId: string, style: string, route: string, filled: boolean): void {
+const routeGateWhere = (accountId: string, style: string, route: string) =>
+  dbAnd(dbEq(routeGateStateTable.accountId, accountId), dbEq(routeGateStateTable.style, style), dbEq(routeGateStateTable.route, route));
+async function noteRouteLiveResult(accountId: string, style: string, route: string, filled: boolean): Promise<void> {
   const key = streakKey(accountId, style, route);
-  if (filled) { routeFailStreaks.delete(key); return; }
+  if (filled) {
+    routeFailStreaks.delete(key);
+    // Reset streak+ban but keep the row (and its probe timestamp).
+    try {
+      await db.update(routeGateStateTable).set({ failStreak: 0, blacklistedUntilMs: 0, updatedAt: new Date() })
+        .where(routeGateWhere(accountId, style, route));
+    } catch { /* fallback Map already cleared */ }
+    return;
+  }
+  const now = Date.now();
+  try {
+    // Atomic increment (multi-process safe): the DB computes the new streak
+    // and applies the ban in one statement. Streak is NOT reset by the ban —
+    // only a SUCCESS clears it. Otherwise a chronically failing route would
+    // re-earn the profitable-route override (streak < 5) immediately after
+    // every ban expiry.
+    const [row] = await db.insert(routeGateStateTable)
+      .values({ accountId, style, route, failStreak: 1, blacklistedUntilMs: 1 >= ROUTE_BLACKLIST_AFTER ? now + ROUTE_BLACKLIST_MS : 0 })
+      .onConflictDoUpdate({
+        target: [routeGateStateTable.accountId, routeGateStateTable.style, routeGateStateTable.route],
+        set: {
+          failStreak: sql`${routeGateStateTable.failStreak} + 1`,
+          blacklistedUntilMs: sql`CASE WHEN ${routeGateStateTable.failStreak} + 1 >= ${ROUTE_BLACKLIST_AFTER} THEN ${now + ROUTE_BLACKLIST_MS} ELSE ${routeGateStateTable.blacklistedUntilMs} END`,
+          updatedAt: new Date(),
+        },
+      })
+      .returning({ failStreak: routeGateStateTable.failStreak, blacklistedUntilMs: routeGateStateTable.blacklistedUntilMs });
+    if (row) routeFailStreaks.set(key, { streak: row.failStreak, blacklistedUntil: row.blacklistedUntilMs });
+    return;
+  } catch { /* DB unavailable — fall through to in-memory bookkeeping */ }
   const cur = routeFailStreaks.get(key) ?? { streak: 0, blacklistedUntil: 0 };
   cur.streak += 1;
-  if (cur.streak >= ROUTE_BLACKLIST_AFTER) {
-    // Streak is NOT reset by the ban — only a SUCCESS clears it. Otherwise a
-    // chronically failing route would re-earn the profitable-route override
-    // (streak < 5) immediately after every ban expiry.
-    cur.blacklistedUntil = Date.now() + ROUTE_BLACKLIST_MS;
-  }
+  if (cur.streak >= ROUTE_BLACKLIST_AFTER) cur.blacklistedUntil = now + ROUTE_BLACKLIST_MS;
   routeFailStreaks.set(key, cur);
 }
-function routeBlacklistRemainingMs(accountId: string, style: string, route: string): number {
-  const cur = routeFailStreaks.get(streakKey(accountId, style, route));
-  if (!cur) return 0;
-  return Math.max(0, cur.blacklistedUntil - Date.now());
+/** Current gate state for a route: DB first (survives restarts, shared across
+ *  processes), in-memory fallback when the DB read fails. */
+async function getRouteGate(accountId: string, style: string, route: string): Promise<{ streak: number; blacklistedUntil: number }> {
+  const key = streakKey(accountId, style, route);
+  try {
+    const [row] = await db.select().from(routeGateStateTable).where(routeGateWhere(accountId, style, route)).limit(1);
+    const val = row ? { streak: row.failStreak, blacklistedUntil: row.blacklistedUntilMs } : { streak: 0, blacklistedUntil: 0 };
+    if (row) routeFailStreaks.set(key, val); else routeFailStreaks.delete(key);
+    return val;
+  } catch {
+    return routeFailStreaks.get(key) ?? { streak: 0, blacklistedUntil: 0 };
+  }
 }
-/** Current consecutive-failure count for a route (0 when unknown). */
-function routeFailStreakCount(accountId: string, style: string, route: string): number {
-  return routeFailStreaks.get(streakKey(accountId, style, route))?.streak ?? 0;
+function routeBlacklistRemainingOf(gate: { blacklistedUntil: number }): number {
+  return Math.max(0, gate.blacklistedUntil - Date.now());
 }
 
 // CLEAR BLACKLIST — reset all in-memory route history gates: consecutive-
 // failure streaks, blacklist bans, and probe cool-downs.
-router.post("/arb/route-history/clear", (req, res): void => {
-  const clearedRoutes = routeFailStreaks.size;
+router.post("/arb/route-history/clear", async (req, res): Promise<void> => {
+  let clearedRoutes = routeFailStreaks.size;
   routeFailStreaks.clear();
   routeProbeAt.clear();
+  try {
+    const deleted = await db.delete(routeGateStateTable).returning({ id: routeGateStateTable.id });
+    clearedRoutes = Math.max(clearedRoutes, deleted.length);
+  } catch (err) {
+    req.log.error({ err }, "route-history clear: failed to delete persisted gate rows (in-memory state cleared)");
+  }
   req.log.info({ clearedRoutes }, "Route blacklist + failure streaks cleared manually");
   res.json({ clearedRoutes });
 });
@@ -1903,7 +1947,7 @@ async function recordQuality(row: {
     });
   } catch (err) { log.error({ err }, "failed to record execution quality"); }
   // Consecutive-failure blacklist bookkeeping (live executions only).
-  if (!row.isDryRun) noteRouteLiveResult(row.accountId ?? "legacy", row.style, row.route, row.filled);
+  if (!row.isDryRun) await noteRouteLiveResult(row.accountId ?? "legacy", row.style, row.route, row.filled);
 }
 
 // Feedback-loop gate tuning (advisor-reviewed):
@@ -1914,7 +1958,45 @@ const GATE_BIG_EDGE_MULT = 2;        // current edge > 2× the route's historica
 const PROBE_MAKER_TIMEOUT_MS = 2_000; // low-fill-rate probe attempts get a tighter 2s maker window
 // One probe per route per decay window: a 0/10 route still gets ONE fresh
 // attempt (with the tighter timer) instead of being blocked outright.
+// PERSISTED in route_gate_state (lastProbeAtMs) so restarts don't hand out
+// fresh probes; the Map is a per-process fallback for DB outages only.
 const routeProbeAt = new Map<string, number>();
+
+/**
+ * Atomically claim the one-per-decay-window probe for a route. The claim is a
+ * conditional DB upsert, so two processes racing for the same window can never
+ * both win. Returns whether the probe was granted and the previous probe time
+ * (for the block message when denied).
+ */
+async function claimRouteProbe(accountId: string, style: string, route: string): Promise<{ claimed: boolean; lastProbeAt: number }> {
+  const now = Date.now();
+  const key = streakKey(accountId, style, route);
+  try {
+    const rows = await db.insert(routeGateStateTable)
+      .values({ accountId, style, route, lastProbeAtMs: now })
+      .onConflictDoUpdate({
+        target: [routeGateStateTable.accountId, routeGateStateTable.style, routeGateStateTable.route],
+        set: { lastProbeAtMs: now, updatedAt: new Date() },
+        setWhere: sql`${routeGateStateTable.lastProbeAtMs} <= ${now - GATE_DECAY_MS}`,
+      })
+      .returning({ lastProbeAtMs: routeGateStateTable.lastProbeAtMs });
+    if (rows.length > 0) { // insert happened OR the conditional update fired
+      routeProbeAt.set(key, now);
+      return { claimed: true, lastProbeAt: now };
+    }
+    // Claim denied — read the standing probe time for the block message.
+    const [row] = await db.select({ lastProbeAtMs: routeGateStateTable.lastProbeAtMs })
+      .from(routeGateStateTable).where(routeGateWhere(accountId, style, route)).limit(1);
+    const last = row?.lastProbeAtMs ?? routeProbeAt.get(key) ?? 0;
+    routeProbeAt.set(key, last);
+    return { claimed: false, lastProbeAt: last };
+  } catch {
+    // DB unavailable — degrade to the old per-process cool-down.
+    const last = routeProbeAt.get(key) ?? 0;
+    if (now - last >= GATE_DECAY_MS) { routeProbeAt.set(key, now); return { claimed: true, lastProbeAt: now }; }
+    return { claimed: false, lastProbeAt: last };
+  }
+}
 
 /**
  * Batch live fill-rate stats per route for one execution style, over each
@@ -1978,12 +2060,12 @@ async function routeQualityPenalty(route: string, style: string, tradeSizeUsd: n
       // Even a 0/10 route earns ONE probe per decay window: a single attempt
       // under a tighter 2s maker timer. If it doesn't fill, the failure is
       // recorded and the block resumes until the next window.
-      const probeKey = `${accountId}|${style}|${route}`;
-      const lastProbe = routeProbeAt.get(probeKey) ?? 0;
-      if (allowProbe && Date.now() - lastProbe >= GATE_DECAY_MS) {
-        routeProbeAt.set(probeKey, Date.now());
-        return { shortfallUsd: 0, attempts: rows.length, blockReason: null, bigEdgeBypass: false, probe: true };
+      if (allowProbe) {
+        const probe = await claimRouteProbe(accountId, style, route);
+        if (probe.claimed) return { shortfallUsd: 0, attempts: rows.length, blockReason: null, bigEdgeBypass: false, probe: true };
+        return { shortfallUsd: 0, attempts: rows.length, blockReason: `historical fill rate ${fills.length}/${rows.length} (needs ≥${Math.round(GATE_MIN_FILL_RATE * 100)}% over ≥${GATE_MIN_ATTEMPTS} attempts) — this route rarely executes; not committing funds. Next 2s probe in ≤${Math.ceil((GATE_DECAY_MS - (Date.now() - probe.lastProbeAt)) / 60_000)} min; block decays ${GATE_DECAY_MS / 60_000} min after the last attempt.`, bigEdgeBypass: false, probe: false };
       }
+      const lastProbe = routeProbeAt.get(streakKey(accountId, style, route)) ?? 0;
       return { shortfallUsd: 0, attempts: rows.length, blockReason: `historical fill rate ${fills.length}/${rows.length} (needs ≥${Math.round(GATE_MIN_FILL_RATE * 100)}% over ≥${GATE_MIN_ATTEMPTS} attempts) — this route rarely executes; not committing funds. Next 2s probe in ≤${Math.ceil((GATE_DECAY_MS - (Date.now() - lastProbe)) / 60_000)} min; block decays ${GATE_DECAY_MS / 60_000} min after the last attempt.`, bigEdgeBypass: false, probe: false };
     }
     const realized = fills.filter(r => r.realizedProfitUsd != null && parseFloat(r.tradeSizeUsd) > 0);
@@ -2588,7 +2670,8 @@ router.post("/arb/graph-execute", async (req, res): Promise<void> => {
       const hist = await routeQualityPenalty(route.description, executionStyle, tradeSizeUsd, accountScope(krakenKey, coinbaseKey, coinbaseSecret), hasFreshPreFire ? effNetProfitUsd : 0, hasFreshPreFire);
       // Big-edge bypass overrides the blacklist too: an edge > 2× this
       // route's historical average is a NEW opportunity, not the old pattern.
-      const banMs = routeBlacklistRemainingMs(accountScope(krakenKey, coinbaseKey, coinbaseSecret), executionStyle, route.description);
+      const gate = await getRouteGate(accountScope(krakenKey, coinbaseKey, coinbaseSecret), executionStyle, route.description);
+      const banMs = routeBlacklistRemainingOf(gate);
       if (banMs > 0 && !hist.bigEdgeBypass) {
         res.json({ success: false, isDryRun, executed: false, route: route.description, preflightProfitUsd: route.netProfitUsd, error: `Feedback-loop gate: route blacklisted for ${Math.ceil(banMs / 60_000)} more min after ${ROUTE_BLACKLIST_AFTER} consecutive failed live cycles — moving to the next best route.` });
         return;
@@ -2596,7 +2679,7 @@ router.post("/arb/graph-execute", async (req, res): Promise<void> => {
       // Profitable-route override: with fresh net profit > $0.01 and fewer
       // than 5 CONSECUTIVE failures, execute regardless of lifetime fill rate
       // — the streak (not the total) is what indicates a dead route now.
-      const failStreak = routeFailStreakCount(accountScope(krakenKey, coinbaseKey, coinbaseSecret), executionStyle, route.description);
+      const failStreak = gate.streak;
       // Rides on each shape's fresh order-book re-quote (triangle executor
       // pre-flight or the executor-grade cross pre-fire below).
       const profitableOverride = hasFreshPreFire && effNetProfitUsd > 0.01 && failStreak < ROUTE_BLACKLIST_AFTER;

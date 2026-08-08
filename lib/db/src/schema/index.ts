@@ -21,3 +21,4 @@ export * from "./trades";
 export * from "./tri-scan";
 export * from "./execution-quality";
 export * from "./account-snapshots";
+export * from "./route-gate";
