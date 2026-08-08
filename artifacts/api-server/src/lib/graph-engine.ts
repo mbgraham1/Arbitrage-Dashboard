@@ -90,6 +90,12 @@ export interface GraphRoute {
    * or 2-leg cross-exchange inventory route). Unsupported shapes can still
    * be dry-run recorded but never traded live. */
   executable: boolean;
+  /** Recent live execution attempts recorded for this route+style (max 20 considered). */
+  histLiveAttempts?: number;
+  /** Historical live fill rate 0..1; null until ≥10 live attempts (insufficient history). */
+  histFillRate?: number | null;
+  /** Ranking score: netProfitUsd × fill-rate multiplier — approximates expected realized profit. */
+  effectiveScoreUsd?: number;
 }
 
 /** Mirror of the live executor's dispatch predicate — keep in lockstep with

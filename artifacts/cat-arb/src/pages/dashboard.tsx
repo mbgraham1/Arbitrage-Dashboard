@@ -1356,12 +1356,28 @@ function GraphEngineCard() {
   const [style, setStyle] = useState<"taker" | "maker">("taker");
   const fees = useActualKrakenFees();
   const actualFee = style === "maker" ? (fees.maker ?? fees.taker) : fees.taker;
+  // Non-reversible account scope (same sha256-prefix derivation the server
+  // uses) so fill-rate ranking only reflects THIS account's history. Until
+  // computed (or without keys), the server uses the neutral prior instead.
+  const [accountId, setAccountId] = useState<string | undefined>(undefined);
+  useEffect(() => {
+    if (!credentials.krakenKey) { setAccountId(undefined); return; }
+    let stale = false;
+    const input = `${credentials.krakenKey}|${credentials.coinbaseKey ?? ""}`;
+    crypto.subtle.digest("SHA-256", new TextEncoder().encode(input)).then(buf => {
+      if (stale) return;
+      const hex = Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, "0")).join("");
+      setAccountId(hex.slice(0, 16));
+    }).catch(() => setAccountId(undefined));
+    return () => { stale = true; };
+  }, [credentials.krakenKey, credentials.coinbaseKey]);
   const params = {
     tradeSizeUsd:    tradeSize,
     krakenFeesPct:   actualFee ?? settings.obFeesPct,
     coinbaseFeesPct: 0.40,
     maxHops:         4,
     executionStyle:  style,
+    ...(accountId ? { accountId } : {}),
   };
   const { data, isLoading, dataUpdatedAt } = useGetGraphScan(params, {
     query: { queryKey: getGetGraphScanQueryKey(params), refetchInterval: 8_000, staleTime: 7_000 },
@@ -1702,7 +1718,7 @@ function GraphEngineCard() {
             <table className="w-full text-xs font-mono border-collapse">
               <thead>
                 <tr className="border-b-2 border-border bg-muted/50">
-                  {["#", "Route", "Hops", "Raw Edge", "Fees", "Net Profit", "Profit %", "Status"].map(h => (
+                  {["#", "Route", "Hops", "Raw Edge", "Fees", "Net Profit", "Fill Rate", "Score", "Status"].map(h => (
                     <th key={h} className="text-left px-3 py-2 text-[10px] uppercase font-bold text-muted-foreground whitespace-nowrap">{h}</th>
                   ))}
                 </tr>
@@ -1733,8 +1749,22 @@ function GraphEngineCard() {
                     <td className={cn("px-3 py-1.5 font-bold", r.netProfitUsd > 0 ? "text-success" : "text-destructive")}>
                       ${r.netProfitUsd.toFixed(4)}
                     </td>
-                    <td className={cn("px-3 py-1.5", r.profitPct > 0 ? "text-success" : "text-destructive")}>
-                      {r.profitPct.toFixed(3)}%
+                    <td className="px-3 py-1.5 whitespace-nowrap"
+                        title={r.histFillRate != null
+                          ? `${((r.histFillRate) * 100).toFixed(0)}% of the last ${r.histLiveAttempts} live attempts filled. >70% = prioritized, 50–70% = ranked down, <50% = blocked (decays 1h).`
+                          : `${r.histLiveAttempts ?? 0}/10 live attempts — need ≥10 before judging this route; neutral 0.7 prior used for ranking.`}>
+                      {r.histFillRate != null ? (
+                        <span className={cn("font-bold",
+                          r.histFillRate > 0.7 ? "text-success" : r.histFillRate >= 0.5 ? "text-amber-500" : "text-destructive")}>
+                          {(r.histFillRate * 100).toFixed(0)}%{r.histFillRate > 0.7 ? " ★" : ""}
+                        </span>
+                      ) : (
+                        <span className="text-muted-foreground">{r.histLiveAttempts ?? 0}/10</span>
+                      )}
+                    </td>
+                    <td className={cn("px-3 py-1.5", (r.effectiveScoreUsd ?? r.netProfitUsd) > 0 ? "text-success" : "text-destructive")}
+                        title="Ranking score = net profit × historical fill rate (expected realized profit). A smaller edge that reliably fills beats a bigger edge that doesn't.">
+                      ${(r.effectiveScoreUsd ?? r.netProfitUsd).toFixed(4)}
                     </td>
                     <td className="px-3 py-1.5">
                       <span className={cn("text-[9px] font-bold px-1 border whitespace-nowrap",
@@ -1936,7 +1966,7 @@ function ExecutionQualityCard() {
           </table>
         </div>
         <div className="px-3 py-1.5 text-[9px] font-mono text-muted-foreground border-t border-border/50">
-          Shortfall = scanner expectation − realized fills. Routes with ≥10 live attempts and &lt;50% fill rate are blocked from live execution (block decays 1h after the last attempt, earning a fresh probe); persistent shortfalls raise the edge a route must clear. When the top route is gated, AUTO immediately falls through to the next-best viable route.
+          Shortfall = scanner expectation − realized fills. Fill-rate tiers (per route, ≥10 live attempts required before judging): &gt;70% prioritized · 50–70% ranked down · &lt;50% blocked (block decays 1h after the last attempt, earning a fresh probe). Routes are ranked by net profit × fill rate — expected realized profit, not theoretical edge. Persistent shortfalls raise the edge a route must clear, and when the top route is gated, AUTO immediately falls through to the next-best viable route.
         </div>
       </CardContent>
     </Card>

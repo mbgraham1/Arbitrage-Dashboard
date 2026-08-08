@@ -1,7 +1,7 @@
 import { Router, type IRouter } from "express";
 import { desc, sql, sum, count, max, avg } from "drizzle-orm";
 import { db, tradesTable, triScanTable, executionQualityTable, accountSnapshotsTable } from "@workspace/db";
-import { desc as dbDesc, eq as dbEq, and as dbAnd, gte as dbGte, count as dbCount } from "drizzle-orm";
+import { desc as dbDesc, eq as dbEq, and as dbAnd, gte as dbGte, count as dbCount, inArray as dbInArray } from "drizzle-orm";
 import { createHash } from "node:crypto";
 import {
   FetchPricesBody,
@@ -269,8 +269,32 @@ router.get("/arb/graph-scan", async (req, res): Promise<void> => {
   const coinbaseFeesPct = Math.max(0,  parseFloat(String(req.query["coinbaseFeesPct"] ?? "0.40")) || 0.40);
   const maxHops         = Math.min(5, Math.max(2, parseInt(String(req.query["maxHops"] ?? "4"), 10) || 4));
   const executionStyle  = String(req.query["executionStyle"] ?? "taker") === "maker" ? "maker" as const : "taker" as const;
+  // Optional non-reversible account scope (sha256 prefix computed client-side
+  // from the held keys — same derivation as accountIdFromKey). Without it,
+  // history-based ranking is skipped: every route gets the neutral prior.
+  const accountId = String(req.query["accountId"] ?? "").trim() || null;
   try {
     const result = await scanGraphOpportunities(tradeSizeUsd, krakenFeesPct, coinbaseFeesPct, maxHops, executionStyle);
+    // Fill-rate-weighted ranking (advisor-reviewed): rank executable routes by
+    // expected REALIZED profit — net profit × historical live fill rate — not
+    // theoretical edge alone. A +$0.10 route that fills 20% of the time (≈$0.02)
+    // should rank below a +$0.07 route that fills 80% (≈$0.056).
+    // Tiers: <10 live attempts → insufficient history, neutral 0.7 prior;
+    // ≥10 & <50% → gate blocks it anyway; 50–70% → ranked down by its rate;
+    // >70% → prioritized (multiplier near 1).
+    const stats = accountId ? await routeFillStats(executionStyle, accountId) : new Map<string, { liveAttempts: number; fillRate: number }>();
+    for (const r of result.routes) {
+      const s = stats.get(r.description);
+      const enough = (s?.liveAttempts ?? 0) >= GATE_MIN_ATTEMPTS;
+      r.histLiveAttempts = s?.liveAttempts ?? 0;
+      r.histFillRate = enough ? s!.fillRate : null;
+      // Multiplier only discounts POSITIVE edges — scaling a negative net
+      // toward zero would perversely rank chronic non-fillers higher.
+      r.effectiveScoreUsd = r.netProfitUsd > 0 ? r.netProfitUsd * (enough ? s!.fillRate : 0.7) : r.netProfitUsd;
+    }
+    result.routes.sort((a, b) =>
+      (Number(b.executable) - Number(a.executable)) ||
+      ((b.effectiveScoreUsd ?? b.netProfitUsd) - (a.effectiveScoreUsd ?? a.netProfitUsd)));
     res.json(result);
   } catch (err) {
     req.log.error({ err }, "graph-scan error");
@@ -767,6 +791,34 @@ const GATE_MIN_FILL_RATE = 0.5;      // block when fewer than half of attempts e
 const GATE_DECAY_MS = 60 * 60_000;   // 1h since last attempt → penalty decays, route earns a fresh probe
 
 /**
+ * Batch live fill-rate stats per route for one execution style, over each
+ * route's newest ≤20 live attempts (same window the gate uses). One query
+ * for the whole scan — never per-route.
+ */
+async function routeFillStats(style: string, accountId: string): Promise<Map<string, { liveAttempts: number; fillRate: number }>> {
+  const out = new Map<string, { liveAttempts: number; fillRate: number }>();
+  try {
+    // Account-scoped: one account's fill history must never rank another
+    // account's routes. "legacy" rows (recorded before accountId existed)
+    // stay visible to preserve continuity of pre-scoping history.
+    const rows = await db.select({ route: executionQualityTable.route, filled: executionQualityTable.filled })
+      .from(executionQualityTable)
+      .where(dbAnd(dbEq(executionQualityTable.style, style), dbEq(executionQualityTable.isDryRun, false),
+        dbInArray(executionQualityTable.accountId, [accountId, "legacy"])))
+      .orderBy(dbDesc(executionQualityTable.id)).limit(2000);
+    const grouped = new Map<string, boolean[]>();
+    for (const r of rows) {
+      const g = grouped.get(r.route) ?? [];
+      if (g.length < 20) { g.push(r.filled); grouped.set(r.route, g); }
+    }
+    for (const [route, fills] of grouped) {
+      out.set(route, { liveAttempts: fills.length, fillRate: fills.filter(Boolean).length / fills.length });
+    }
+  } catch { /* stats are advisory — a DB hiccup must not fail the scan */ }
+  return out;
+}
+
+/**
  * Historical penalty for a route+style, from LIVE attempts only:
  *  - shortfallUsd: average (expected − realized) across filled live attempts
  *    (≥2 samples) — added to the edge the route must clear.
@@ -775,10 +827,11 @@ const GATE_DECAY_MS = 60 * 60_000;   // 1h since last attempt → penalty decays
  *    this opportunity doesn't actually execute. Blocks decay: once the last
  *    attempt is over an hour old, the route gets one fresh probe.
  */
-async function routeQualityPenalty(route: string, style: string, tradeSizeUsd: number): Promise<{ shortfallUsd: number; attempts: number; blockReason: string | null }> {
+async function routeQualityPenalty(route: string, style: string, tradeSizeUsd: number, accountId: string): Promise<{ shortfallUsd: number; attempts: number; blockReason: string | null }> {
   try {
     const rows = await db.select().from(executionQualityTable)
-      .where(dbAnd(dbEq(executionQualityTable.route, route), dbEq(executionQualityTable.style, style), dbEq(executionQualityTable.isDryRun, false)))
+      .where(dbAnd(dbEq(executionQualityTable.route, route), dbEq(executionQualityTable.style, style), dbEq(executionQualityTable.isDryRun, false),
+        dbInArray(executionQualityTable.accountId, [accountId, "legacy"])))
       .orderBy(dbDesc(executionQualityTable.id)).limit(20);
     if (rows.length === 0) return { shortfallUsd: 0, attempts: 0, blockReason: null };
     const fills = rows.filter(r => r.filled);
@@ -1014,7 +1067,7 @@ router.post("/arb/graph-execute", async (req, res): Promise<void> => {
     //     Routes that historically filled short of expectation must clear the
     //     average shortfall too; routes that rarely fill are blocked outright.
     if (!isDryRun) {
-      const hist = await routeQualityPenalty(route.description, executionStyle, tradeSizeUsd);
+      const hist = await routeQualityPenalty(route.description, executionStyle, tradeSizeUsd, accountIdFromKey(krakenKey, coinbaseKey));
       if (hist.blockReason) {
         res.json({ success: false, isDryRun, executed: false, route: route.description, preflightProfitUsd: route.netProfitUsd, error: `Feedback-loop gate: ${hist.blockReason} (${hist.attempts} recorded live attempts).` });
         return;

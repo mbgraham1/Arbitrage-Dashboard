@@ -478,7 +478,8 @@ export const GetGraphScanQueryParams = zod.object({
   "krakenFeesPct": zod.coerce.number().default(getGraphScanQueryKrakenFeesPctDefault),
   "coinbaseFeesPct": zod.coerce.number().default(getGraphScanQueryCoinbaseFeesPctDefault),
   "maxHops": zod.coerce.number().default(getGraphScanQueryMaxHopsDefault),
-  "executionStyle": zod.enum(['taker', 'maker']).default(getGraphScanQueryExecutionStyleDefault)
+  "executionStyle": zod.enum(['taker', 'maker']).default(getGraphScanQueryExecutionStyleDefault),
+  "accountId": zod.coerce.string().optional().describe('Optional non-reversible account scope (sha256-prefix of held keys) so fill-rate ranking only uses THIS account\'s execution history. Omitted → neutral prior for all routes.')
 })
 
 export const GetGraphScanResponse = zod.object({
@@ -503,7 +504,10 @@ export const GetGraphScanResponse = zod.object({
   "profitPct": zod.number(),
   "slippagePct": zod.number(),
   "status": zod.enum(['VIABLE', 'REJECTED']),
-  "executable": zod.boolean().describe('True when the live executor supports this route shape (Kraken triangle or 2-leg cross-exchange). Unsupported shapes are dry-run only.')
+  "executable": zod.boolean().describe('True when the live executor supports this route shape (Kraken triangle or 2-leg cross-exchange). Unsupported shapes are dry-run only.'),
+  "histLiveAttempts": zod.number().optional().describe('Recent live execution attempts recorded for this route+style (max 20 considered).'),
+  "histFillRate": zod.number().nullish().describe('Historical live fill rate 0..1; null until the route has ≥10 live attempts (insufficient history to judge).'),
+  "effectiveScoreUsd": zod.number().optional().describe('Ranking score: net profit × historical fill rate (0.7 neutral prior when history is insufficient). Approximates expected realized profit.')
 })),
   "tradeSizeUsd": zod.number(),
   "krakenFeesPct": zod.number(),

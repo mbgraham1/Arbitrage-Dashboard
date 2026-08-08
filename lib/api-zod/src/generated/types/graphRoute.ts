@@ -20,4 +20,10 @@ export interface GraphRoute {
   status: GraphRouteStatus;
   /** True when the live executor supports this route shape (Kraken triangle or 2-leg cross-exchange). Unsupported shapes are dry-run only. */
   executable: boolean;
+  /** Recent live execution attempts recorded for this route+style (max 20 considered). */
+  histLiveAttempts?: number;
+  /** Historical live fill rate 0..1; null until the route has ≥10 live attempts (insufficient history to judge). */
+  histFillRate?: number | null;
+  /** Ranking score: net profit × historical fill rate (0.7 neutral prior when history is insufficient). Approximates expected realized profit. */
+  effectiveScoreUsd?: number;
 }

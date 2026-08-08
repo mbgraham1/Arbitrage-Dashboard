@@ -13,4 +13,8 @@ krakenFeesPct?: number;
 coinbaseFeesPct?: number;
 maxHops?: number;
 executionStyle?: GetGraphScanExecutionStyle;
+/**
+ * Optional non-reversible account scope (sha256-prefix of held keys) so fill-rate ranking only uses THIS account's execution history. Omitted → neutral prior for all routes.
+ */
+accountId?: string;
 };

@@ -496,6 +496,7 @@ paths:
         - { name: coinbaseFeesPct, in: query, schema: { type: number, default: 0.4 } }
         - { name: maxHops,         in: query, schema: { type: integer, default: 4 } }
         - { name: executionStyle,  in: query, schema: { type: string, enum: [taker, maker], default: taker } }
+        - { name: accountId,       in: query, schema: { type: string }, description: "Optional non-reversible account scope (sha256-prefix of held keys) so fill-rate ranking only uses THIS account's execution history. Omitted → neutral prior for all routes." }
       responses:
         "200":
           description: Ranked routes
@@ -1190,6 +1191,16 @@ components:
         executable:
           type: boolean
           description: "True when the live executor supports this route shape (Kraken triangle or 2-leg cross-exchange). Unsupported shapes are dry-run only."
+        histLiveAttempts:
+          type: integer
+          description: "Recent live execution attempts recorded for this route+style (max 20 considered)."
+        histFillRate:
+          type: number
+          nullable: true
+          description: "Historical live fill rate 0..1; null until the route has ≥10 live attempts (insufficient history to judge)."
+        effectiveScoreUsd:
+          type: number
+          description: "Ranking score: net profit × historical fill rate (0.7 neutral prior when history is insufficient). Approximates expected realized profit."
 
     GraphScanResult:
       type: object

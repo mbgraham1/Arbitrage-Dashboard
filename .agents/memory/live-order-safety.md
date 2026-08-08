@@ -24,3 +24,6 @@ A Kraken CancelOrder ACK is not proof the order stopped — it can still fill in
 
 ## Single-flight live execution
 Only one live multi-leg execution per process: a module-level lock prevents AUTO + manual (or two tabs) from interleaving orders or double-spending the same balance. Any shared execution-status snapshot must be reset only by the lock owner.
+
+## Fill-history queries must be account-scoped
+Any ranking/gating built on the execution-quality history must filter by the account scope (sha256-prefix of held keys, "legacy" rows included for continuity). A global aggregate lets one account's fill behavior rank or block another account's routes — review flagged this as a trading-safety issue. The client derives the same non-reversible hash via Web Crypto to pass on GET scans (never raw keys in query strings).
