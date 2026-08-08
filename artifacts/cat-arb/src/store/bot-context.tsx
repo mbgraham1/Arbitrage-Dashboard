@@ -237,6 +237,10 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
 
   const lastTradeTimeRef = useRef<number>(0);
   const lastBalanceUpdateRef = useRef<number>(0);
+  // Pair the current cached balances were fetched for — when the active pair
+  // changes mid-session, the cache is invalidated so the Exchange Balances card
+  // doesn't show the previous pair's base-asset balance for up to 30 s.
+  const lastBalancePairRef = useRef<string | null>(null);
   const dailyLossRef = useRef<number>(0);
   const emergencyStopRef = useRef<boolean>(false);
   const isExecutingRef = useRef<boolean>(false);
@@ -779,12 +783,15 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
       const s = settingsRef.current;
       const live = liveModeRef.current;
 
-      // Refresh balances if cache is stale — fire-and-forget, never blocks price/trade logic
-      if (Date.now() - lastBalanceUpdateRef.current > BALANCE_CACHE_TTL_MS) {
+      // Refresh balances if cache is stale OR the active pair changed since the
+      // last fetch — fire-and-forget, never blocks price/trade logic.
+      // latestPriceDataRef holds the most recently fetched pair; null before the first tick.
+      const activePair = latestPriceDataRef.current?.pair ?? null;
+      const pairChanged = activePair != null && activePair !== lastBalancePairRef.current;
+      if (pairChanged || Date.now() - lastBalanceUpdateRef.current > BALANCE_CACHE_TTL_MS) {
         lastBalanceUpdateRef.current = Date.now(); // optimistic — prevents concurrent fetches
+        lastBalancePairRef.current = activePair;
         // Pass the active pair so the backend returns the correct base-asset balance.
-        // latestPriceDataRef holds the most recently fetched pair; null before the first tick.
-        const activePair = latestPriceDataRef.current?.pair;
         fetchBalancesMutation.mutateAsync({ data: { ...c, ...(activePair ? { pair: activePair } : {}) } })
           .then((bal) => { if (!cancelled) setCachedBalances(bal); })
           .catch(() => { /* keep stale cache */ });
