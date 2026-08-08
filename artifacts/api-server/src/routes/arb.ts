@@ -731,6 +731,12 @@ interface TriangleExecInput {
    *  decayed edge will execute at whatever the fresh taker price gives —
    *  possibly a loss. Never applies when the fresh pre-flight is unavailable. */
   alwaysTakerFallback?: boolean;
+  /** Trader-tuned partial-fill acceptance, in percent (clamped 50–100 server
+   *  side; default 99.9). A leg whose confirmed fill reaches this fraction of
+   *  its ordered volume counts as complete: the cycle proceeds sized to the
+   *  ACTUAL fill and any residual inventory is swept back to USD at market
+   *  (proceeds counted in realized P&L) instead of the whole cycle unwinding. */
+  partialFillTolerancePct?: number;
   /** Caller ALREADY holds the live execution lock with this generation token.
    *  Skip the internal acquire (which would see the caller's own lock and
    *  self-block) — the caller releases it. */
@@ -862,7 +868,12 @@ async function runKrakenTriangle(input: TriangleExecInput, reqLog: ReqLog): Prom
     const cross = activeLookup.get(`${assetA}-${assetB}`)!; // validated by pre-flight
     const pairA = OB_USD_PAIRS[assetA as ObAsset];
     const pairB = OB_USD_PAIRS[assetB as ObAsset];
-    const FILL_TOLERANCE = 0.999; // volExec must reach 99.9% of ordered volume
+    // Trader-tuned: a leg counts as complete once its confirmed fill reaches
+    // this fraction of ordered volume. Clamped to 50–100%: below 50% a
+    // "successful" cycle would be mostly unwind and its P&L meaningless.
+    const FILL_TOLERANCE = input.partialFillTolerancePct != null
+      ? Math.min(1, Math.max(0.5, input.partialFillTolerancePct / 100))
+      : 0.999;
 
     // Never-throwing order info — used in recovery paths to learn actual fills.
     const safeInfo = async (txid: string) => {
@@ -1076,6 +1087,15 @@ async function runKrakenTriangle(input: TriangleExecInput, reqLog: ReqLog): Prom
 
     let leg1Id = "", leg2Id = "", leg3Id = "";
     let usdSpent = 0, usdReceived = 0, totalFees = 0;
+    // USD recovered by sweeping tolerance-accepted residual inventory back to
+    // USD at market (confirmed fills only) — counted into realized P&L.
+    let residualSweepUsd = 0;
+    // Set when a tolerance-accepted partial leaves NON-DUST residual inventory
+    // that the sweep could not confirm flat — such a run must never be
+    // recorded as "verified" (its USD delta doesn't reflect the full round
+    // trip). Dust = residual ≤0.5% of the ordered leg volume.
+    let unresolvedResidual = false;
+    const DUST_FRAC = 0.005;
 
     // ── Leg 1: buy A with USD. Post-only limit at best bid → maker fee ────────
     // Retry gate: nothing is held yet, so a retry must survive a FULL fresh
@@ -1265,6 +1285,30 @@ async function runKrakenTriangle(input: TriangleExecInput, reqLog: ReqLog): Prom
       if (bHeld <= 0) {
         throw new Error("Leg 2 reported zero acquired volume despite full fill.");
       }
+      // Tolerance-accepted partial: the cycle proceeds sized to bHeld, but any
+      // leftover A must not sit as inventory — sweep it back to USD at market
+      // with a confirmed fill so the proceeds count in realized P&L. Dust below
+      // Kraken's min order size just stays (cheaper than the error).
+      {
+        const aResidual = Math.max(0, aHeld - aConsumed);
+        if (aResidual > 0 && f2.volExec < l2Volume) {
+          let sweptA = 0;
+          try {
+            const sw = await marketFill(2, "leg2 residual sweep", "sell", aResidual, pairA);
+            residualSweepUsd += Math.max(0, sw.cost - sw.fee);
+            totalFees += sw.fee;
+            sweptA = sw.volExec;
+          } catch (e) {
+            if (e instanceof IndeterminateOrderError) throw e;
+            log.info(`leg2 residual sweep failed (${aResidual.toFixed(8)} ${assetA}): ${(e as Error).message}`);
+          }
+          // Anything above dust left unswept → the trade cannot be verified.
+          if (aResidual - sweptA > aHeld * DUST_FRAC) {
+            unresolvedResidual = true;
+            log.error(`leg2 residual UNRESOLVED: ${(aResidual - sweptA).toFixed(8)} ${assetA} remains on account — trade will be recorded as estimated, not verified`);
+          }
+        }
+      }
       legsCompleted = 2;
     }
 
@@ -1306,13 +1350,31 @@ async function runKrakenTriangle(input: TriangleExecInput, reqLog: ReqLog): Prom
           log.error(`leg3 taker fallback failed: ${(e as Error).message}`);
         }
       }
-      usdReceived = Math.max(0, f3.cost - f3.fee);
+      usdReceived = Math.max(0, f3.cost - f3.fee) + residualSweepUsd;
       totalFees += f3.fee;
       const bResidual = Math.max(0, bHeld - f3.volExec);
       if (f3.volExec < bHeld * FILL_TOLERANCE) {
         // Sell the residual B; report as a partial (failed) execution, not success.
         if (bResidual > 0) await tryUnwindMarket(creds, "sell", bResidual, pairB, `sell residual ${assetB} (partial leg3)`, log);
         throw new Error(`Leg 3 partially filled (${f3.volExec.toFixed(8)}/${bHeld.toFixed(8)} ${assetB}); residual sold via unwind. USD received so far: $${usdReceived.toFixed(4)}.`);
+      }
+      // Tolerance-accepted partial: sweep leftover B to USD at market with a
+      // confirmed fill so proceeds count in realized P&L (dust just stays).
+      if (bResidual > 0) {
+        let sweptB = 0;
+        try {
+          const sw = await marketFill(3, "leg3 residual sweep", "sell", bResidual, pairB);
+          usdReceived += Math.max(0, sw.cost - sw.fee);
+          totalFees += sw.fee;
+          sweptB = sw.volExec;
+        } catch (e) {
+          if (e instanceof IndeterminateOrderError) throw e;
+          log.info(`leg3 residual sweep failed (${bResidual.toFixed(8)} ${assetB}): ${(e as Error).message}`);
+        }
+        if (bResidual - sweptB > bHeld * DUST_FRAC) {
+          unresolvedResidual = true;
+          log.error(`leg3 residual UNRESOLVED: ${(bResidual - sweptB).toFixed(8)} ${assetB} remains on account — trade will be recorded as estimated, not verified`);
+        }
       }
       legsCompleted = 3;
     }
@@ -1327,7 +1389,10 @@ async function runKrakenTriangle(input: TriangleExecInput, reqLog: ReqLog): Prom
     // not just bookkeeping flags and order IDs.
     const legEvidence = (leg: number) => legFillRecords.some(f => f.leg === leg && !f.unwind && f.volume > 0 && !!f.txid);
     const fullyVerified = legsCompleted === 3 && !!leg1Id && !!leg2Id && !!leg3Id && usdSpent > 0 && usdReceived > 0
-      && legEvidence(1) && legEvidence(2) && legEvidence(3);
+      && legEvidence(1) && legEvidence(2) && legEvidence(3)
+      // A tolerance-accepted partial with non-dust inventory left on account
+      // has an incomplete USD round trip — never "verified" realized P&L.
+      && !unresolvedResidual;
     const realizedProfit = usdSpent > 0 && usdReceived > 0 ? usdReceived - usdSpent : pf.profitUsd;
     await db.insert(tradesTable).values({
       pair: route,
@@ -1965,6 +2030,7 @@ router.post("/arb/graph-execute", async (req, res): Promise<void> => {
         // Clamp: 1..10 reprices — never trust client numbers for live orders.
         maxReprices: Math.min(10, Math.max(1, Math.round(parsed.data.maxReprices ?? 4))),
         alwaysTakerFallback: parsed.data.alwaysTakerFallback === true,
+        partialFillTolerancePct: parsed.data.partialFillTolerancePct,
         heldLockGen: lockGen ?? undefined, // graph-execute already holds the live lock
       }, req.log);
       if (out.badRequest) { res.status(400).json({ error: out.badRequest }); return; }

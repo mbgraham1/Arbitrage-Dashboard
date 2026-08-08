@@ -59,6 +59,10 @@ export interface BotSettings {
   inventoryAssets: string[];       // assets to watch (default ["BTC","ETH","SOL"])
   inventoryTargetPct: number;      // target % to hold on each exchange (default 50)
   inventoryTradeSizeUsd: number;   // trade size in USD for inventory arb (default 10)
+  // Partial-fill acceptance for graph executions, in % (server clamps 50–100).
+  // A leg filled to at least this fraction counts as complete; residual
+  // inventory is swept back to USD at market instead of unwinding the cycle.
+  partialFillTolerancePct: number;
 }
 
 export interface BotContextType {
@@ -142,6 +146,7 @@ const DEFAULT_SETTINGS: BotSettings = {
   inventoryAssets: ["BTC", "ETH", "SOL"],
   inventoryTargetPct: 50,
   inventoryTradeSizeUsd: 10,
+  partialFillTolerancePct: 99.9, // accept a leg as complete at ≥99.9% filled (near-exact by default)
 };
 
 // Bump this when defaults change meaningfully — forces a one-time reset for existing users

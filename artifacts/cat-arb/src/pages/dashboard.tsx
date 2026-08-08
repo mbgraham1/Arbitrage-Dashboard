@@ -1696,6 +1696,7 @@ function GraphEngineCard() {
             executionStyle: style,
             forceMode: forceMode && liveMode,
             ...(fastTakerFallback ? { maxReprices: 1, makerTimeoutMs: 3_000, alwaysTakerFallback: true } : {}),
+            partialFillTolerancePct: settings.partialFillTolerancePct,
           },
         });
         if (r.success && r.executed) {

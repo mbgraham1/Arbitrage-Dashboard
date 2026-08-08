@@ -1548,6 +1548,14 @@ components:
           description: >
             Per-leg maker fill window in ms (clamped 1000–30000 server-side).
             Lower = faster taker fallback; default derives from maxReprices.
+        partialFillTolerancePct:
+          type: number
+          description: >
+            Partial-fill acceptance in percent (server clamps to 50–100;
+            default 99.9). A leg filled to at least this fraction counts as
+            complete — the cycle proceeds sized to the actual fill and any
+            residual inventory is swept back to USD at market instead of the
+            whole cycle unwinding.
         alwaysTakerFallback:
           type: boolean
           default: false

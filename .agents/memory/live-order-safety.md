@@ -60,3 +60,7 @@ Ledger rows carry status: verified | failed | simulated | estimated. Rules that 
 - Any run where an order was ACCEPTED (txid returned) must leave a ledger row even if fills were zero/indeterminate/revoked — track accepted txids in a fn-scoped fail context declared OUTSIDE the try so the catch can write the FAILED row (catch can't see try-scoped vars).
 - LockRevoked/Indeterminate errors can carry confirmed partial fills — capture evidence in the leg wrapper's catch before rethrowing.
 - Legacy live rows without fill proof are "estimated", excluded from realized P&L; they cannot be retroactively verified without exchange order-history lookup.
+
+## Partial-fill tolerance (trader-tuned)
+- Leg completion threshold is trader-tuned (percent, server-clamped 50–100; default 99.9). A tolerance-accepted partial must: proceed sized to the ACTUAL fill, sweep residual inventory back to USD with CONFIRMED fills (proceeds counted in realized P&L), and — if any non-dust residual (>0.5% of held volume) can't be confirmed flat — record the trade as estimated (realized null), never verified.
+- **Why:** ignoring a residual leaves inventory on account and the USD delta stops representing the round trip; counting it as verified P&L misstates profit.

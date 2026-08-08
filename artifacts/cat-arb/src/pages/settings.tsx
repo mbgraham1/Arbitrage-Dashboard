@@ -261,6 +261,25 @@ export default function Settings() {
 
             <div className="space-y-3">
               <div className="flex flex-col gap-1">
+                <Label>Partial Fill Tolerance ({(localSettings.partialFillTolerancePct ?? 99.9).toFixed(0)}%)</Label>
+                <span className="text-xs text-muted-foreground font-mono">
+                  A leg filled to at least this % counts as complete — the cycle continues sized to the actual fill and any leftover is swept back to USD at market. Server enforces a 50% floor; below 100% partial cycles can realize less than the scanned edge.
+                </span>
+              </div>
+              <input
+                type="range"
+                min={50}
+                max={100}
+                step={1}
+                data-testid="slider-partial-fill-tolerance"
+                value={Math.round(localSettings.partialFillTolerancePct ?? 99.9)}
+                onChange={(e) => setLocalSettings({ ...localSettings, partialFillTolerancePct: parseInt(e.target.value, 10) })}
+                className="w-full accent-primary"
+              />
+            </div>
+
+            <div className="space-y-3">
+              <div className="flex flex-col gap-1">
                 <Label>Combined Fees (%)</Label>
                 <span className="text-xs text-muted-foreground font-mono">Total taker fees across both exchanges (default 0.80%)</span>
               </div>

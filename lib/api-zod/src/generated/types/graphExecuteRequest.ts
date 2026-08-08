@@ -26,6 +26,8 @@ export interface GraphExecuteRequest {
   maxReprices?: number;
   /** Per-leg maker fill window in ms (clamped 1000–30000 server-side). Lower = faster taker fallback; default derives from maxReprices. */
   makerTimeoutMs?: number;
+  /** Partial-fill acceptance in percent (server clamps to 50–100; default 99.9). A leg filled to at least this fraction counts as complete — the cycle proceeds sized to the actual fill and any residual inventory is swept back to USD at market instead of the whole cycle unwinding. */
+  partialFillTolerancePct?: number;
   /** Trader-directed — when the leg-1 maker order doesn't fill in its window, fire the taker fallback immediately WITHOUT the taker-priced profit-floor gate. A decayed edge will execute at the fresh taker price, possibly at a loss. Still requires a readable fresh order book. */
   alwaysTakerFallback?: boolean;
 }
