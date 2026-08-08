@@ -885,6 +885,16 @@ async function runKrakenTriangle(input: TriangleExecInput, reqLog: ReqLog): Prom
     // additionally subtracts the safety buffer — the depth-walked taker net
     // minus buffer must still clear the floor.
     const threshold = minProfitUsd;
+    // PROFITABILITY SAFEGUARD (2026-08-08 audit): all 9 verified live maker
+    // fills lost money — expected avg +$0.04, realized avg −$0.19; completion/
+    // unwind cost ≈ $0.23 on a $10 cycle. Maker attempts are therefore gated
+    // by a HIGHER floor than the generic one: expected net must clearly exceed
+    // the historical completion cost, or the maker leg is not worth resting.
+    const makerFloor = makerFloorUsd(tradeSizeUsd, threshold);
+    if (!takerOnly && pf.profitUsd <= makerFloor) {
+      reqLog.info({ route, freshProfitUsd: pf.profitUsd, makerFloorUsd: makerFloor, threshold }, "Pre-flight REJECTED — maker floor (thin maker edges are proven losers; audit-based safeguard)");
+      return { body: { success: false, isDryRun, executed: false, route, preflightProfitUsd: pf.profitUsd, error: `Pre-flight failed — maker safeguard: expected net $${pf.profitUsd.toFixed(4)} ≤ maker floor $${makerFloor.toFixed(4)} (historical completion/unwind cost ≈ $0.23 on $10; verified live maker fills at thin edges averaged −$0.19 realized). Use adaptive/taker, or a route with a clearly larger edge.` } };
+    }
     if (pf.profitUsd - safetyBufferUsd <= threshold) {
       reqLog.info({ route, freshProfitUsd: pf.profitUsd, threshold, safetyBufferUsd, effectiveFeesPct, takerOnly }, "Pre-flight REJECTED — fresh books below profit floor");
       return { body: { success: false, isDryRun, executed: false, route, preflightProfitUsd: pf.profitUsd, error: takerOnly
@@ -1777,6 +1787,15 @@ const RISK_MIN_SAMPLES = 5;            // don't risk-gate on fewer live leg-trac
 const LEG2_COND_BLOCK_RATE = 0.5;      // block when leg2|leg1 completion < 50% (≥5 conditional samples)
 const DEFAULT_UNWIND_LOSS_FRAC = 0.015; // no measured unwind losses yet → assume 1.5% of size (matches observed)
 
+
+/** PROFITABILITY SAFEGUARD (2026-08-08 audit): maker attempts must clearly exceed
+ *  the historical completion/unwind cost (~$0.23 realized on $10; 9/9 verified
+ *  live maker fills at thin edges lost money). Single source of truth so live
+ *  execution, adaptive choice, legacy triangular, and previews all agree. */
+function makerFloorUsd(tradeSizeUsd: number, minProfitUsd: number): number {
+  return Math.max(minProfitUsd, 0.25, tradeSizeUsd * 0.025);
+}
+
 interface RouteLegRisk {
   samples: number;            // live attempts with leg tracking
   pLeg1: number;              // smoothed P(leg1 fills)
@@ -2287,8 +2306,11 @@ router.post("/arb/graph-execute", async (req, res): Promise<void> => {
         req.log.info({ route: route.description, takerNetUsd: takerNet, makerEvUsd, bufferUsd, takerFeePct }, "ADAPTIVE → TAKER (fresh buffered taker net clears floor — no maker attempt)");
         // Single-line trader-readable decision record: freshness + both nets + gate + verdict.
         req.log.info({ route: route.description }, `[DECISION] ${formatLegAges(cachedRes?.ok ? cachedRes.legAges : undefined)} | scanner_net=$${route.netProfitUsd.toFixed(4)} | prefire_net=$${(bd?.netProfitUsd ?? takerNet).toFixed(4)} | TAKER NET=$${takerNet.toFixed(4)} > FLOOR=$${minProfitUsd.toFixed(4)} (buffer $${bufferUsd.toFixed(4)}) | FIRE`);
-      } else if (makerEvUsd >= minProfitUsd) {
-        req.log.info({ route: route.description, takerNetUsd: takerNet, makerEvUsd, fillProb: evM?.pAll ?? 0.55, historyBacked: !!evM }, "ADAPTIVE → MAKER (taker net below floor, maker expected realized clears it)");
+      } else if (makerEvUsd >= makerFloorUsd(tradeSizeUsd, minProfitUsd)) {
+        // Audit safeguard: maker EV must clear the RAISED maker floor (historical
+        // completion/unwind cost), not just the generic floor — thin maker
+        // edges are proven realized losers (9/9 fills negative).
+        req.log.info({ route: route.description, takerNetUsd: takerNet, makerEvUsd, fillProb: evM?.pAll ?? 0.55, historyBacked: !!evM }, "ADAPTIVE → MAKER (taker net below floor, maker expected realized clears the raised maker floor)");
       } else {
         req.log.info({ route: route.description, takerNetUsd: takerNet, makerEvUsd }, "ADAPTIVE → SKIP (neither taker net nor maker expected realized clears floor)");
         res.json({ success: false, isDryRun, executed: false, route: route.description, preflightProfitUsd: takerNet ?? route.netProfitUsd, error: `Pre-flight failed — adaptive SKIP: fresh taker net ${takerNet != null ? `$${takerNet.toFixed(4)}` : "unavailable (books)"} and maker expected realized $${makerEvUsd.toFixed(4)} (net × fill probability − unwind cost) are both below your $${minProfitUsd.toFixed(4)} floor. Stale scanner edge $${route.netProfitUsd.toFixed(4)} does not override the fresh pre-flight.` });
@@ -3240,6 +3262,19 @@ router.post("/arb/execute-triangular", async (req, res): Promise<void> => {
     return;
   }
 
+  // PROFITABILITY SAFEGUARD: legacy post-only (maker) triangular path must clear
+  // the same raised maker floor as the safeguarded executor — thin maker edges
+  // are proven realized losers. Market (force) path keeps its own gates.
+  if (useLimit) {
+    const floor = makerFloorUsd(tradeUsd, 0);
+    if (estimatedProfitUsd <= floor) {
+      req.log.info({ loop, tradeUsd, estimatedProfitUsd, makerFloorUsd: floor }, "Triangular REJECTED — maker floor (audit-based safeguard)");
+      res.json({ success: false, isDryRun: false, estimatedProfitUsd, leg1OrderId: null, leg2OrderId: null, leg3OrderId: null,
+        error: `Maker safeguard: expected net $${estimatedProfitUsd.toFixed(4)} ≤ maker floor $${floor.toFixed(4)} (historical completion/unwind cost — thin maker trades averaged −$0.19 realized). Route skipped.` });
+      return;
+    }
+  }
+
   // 4. Execute 3 sequential orders.
   //    On failure: cancel unfilled limit orders or place reverse market orders to unwind.
   let leg1Id = "";
@@ -3809,7 +3844,7 @@ router.post("/arb/exec-preview", async (req, res): Promise<void> => {
     // taker net ≥ floor → taker; else maker expected realized ≥ floor → maker; else skip.
     const minFloor = Math.max(0, parsed.data.minProfitUsd ?? 0);
     const adaptiveChoice = netEdgeUsd >= minFloor ? "taker"
-      : makerEvUsd != null && makerEvUsd >= minFloor ? "maker" : "skip";
+      : makerEvUsd != null && makerEvUsd >= makerFloorUsd(tradeSizeUsd, minFloor) ? "maker" : "skip";
     res.json({
       route: routeDescription, ok: true,
       rawEdgeUsd: bd.rawEdgeUsd, takerFeesUsd: bd.feesUsd, takerFeePct,

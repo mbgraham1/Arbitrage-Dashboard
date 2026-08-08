@@ -1751,7 +1751,7 @@ function GraphEngineCard() {
   // ADAPTIVE (default): per fire, the server picks whichever path has the
   // higher expected realized P&L — maker EV from this route's measured
   // per-leg fill history vs. buffered fresh taker net (must also clear floor).
-  const [style, setStyle] = useLocalStorage<"taker" | "maker" | "adaptive">("graph-exec-style", "adaptive");
+  const [style, setStyle] = useLocalStorage<"taker" | "maker" | "adaptive">("graph-exec-style-v2", "adaptive") // v2: audit safeguard — reset everyone to Adaptive default (thin maker trades proven losers);
   // Fast-fill mode (trader-directed): 3s maker window, a single reprice, then
   // an UNGATED taker fallback — fills small edges instead of cancelling them,
   // at the cost of occasionally eating a decayed edge at taker prices.
