@@ -128,7 +128,7 @@ export interface GraphScanResult {
 
 // ── Depth-aware pricing ───────────────────────────────────────────────────────
 
-type BookLevels = [number, number][];
+export type BookLevels = [number, number][];
 
 /**
  * Walk ask levels spending `quoteAmount`; returns the volume-weighted average
@@ -136,7 +136,7 @@ type BookLevels = [number, number][];
  * size — a partial-depth VWAP applied to the whole trade would overstate the
  * fillable edge, so insufficient depth invalidates the edge entirely.
  */
-function vwapBuy(asks: BookLevels, quoteAmount: number): number | null {
+export function vwapBuy(asks: BookLevels, quoteAmount: number): number | null {
   let spent = 0, acquired = 0;
   for (const [price, qty] of asks) {
     const levelQuote = price * qty;
@@ -150,7 +150,7 @@ function vwapBuy(asks: BookLevels, quoteAmount: number): number | null {
 }
 
 /** Walk bid levels selling `baseAmount`; VWAP received, or null if too thin. */
-function vwapSell(bids: BookLevels, baseAmount: number): number | null {
+export function vwapSell(bids: BookLevels, baseAmount: number): number | null {
   let sold = 0, received = 0;
   for (const [price, qty] of bids) {
     const take = Math.min(qty, baseAmount - sold);
@@ -160,6 +160,56 @@ function vwapSell(bids: BookLevels, baseAmount: number): number | null {
   }
   if (sold < baseAmount - 1e-9) return null; // book too thin for this size
   return sold > 0 ? received / sold : null;
+}
+
+// ── Edge pricing helpers (pure — unit-tested) ────────────────────────────────
+
+export interface EdgeQuote {
+  /** units of to-asset per unit of from-asset, before fees */
+  grossRate: number;
+  /** grossRate × (1 − feePct/100) */
+  netRate: number;
+  /** VWAP drift vs top-of-book, in percent; clamped to ≥ 0. Always 0 for maker. */
+  slippagePct: number;
+  /** The effective price used (VWAP for taker, join price for maker). */
+  effPrice: number;
+}
+
+/** Taker BUY: depth-walked VWAP over asks for `quoteAmount` of quote currency.
+ * Returns null when the visible book cannot absorb the size — the edge must
+ * be DROPPED, never approximated. */
+export function takerBuyQuote(asks: BookLevels, quoteAmount: number, feePct: number): EdgeQuote | null {
+  const bestAsk = asks[0]?.[0] ?? 0;
+  if (!bestAsk) return null;
+  const vwap = vwapBuy(asks, quoteAmount);
+  if (vwap == null) return null;
+  const slip = ((vwap - bestAsk) / bestAsk) * 100;
+  const grossRate = 1 / vwap;
+  return { grossRate, netRate: grossRate * (1 - feePct / 100), slippagePct: Math.max(0, slip), effPrice: vwap };
+}
+
+/** Taker SELL: depth-walked VWAP over bids for `baseAmount` of base currency.
+ * Returns null when the visible book cannot absorb the size. */
+export function takerSellQuote(bids: BookLevels, baseAmount: number, feePct: number): EdgeQuote | null {
+  const bestBid = bids[0]?.[0] ?? 0;
+  if (!bestBid) return null;
+  const vwap = vwapSell(bids, baseAmount);
+  if (vwap == null) return null;
+  const slip = ((bestBid - vwap) / bestBid) * 100;
+  return { grossRate: vwap, netRate: vwap * (1 - feePct / 100), slippagePct: Math.max(0, slip), effPrice: vwap };
+}
+
+/** Maker BUY: post-only join at best BID (better price, fill not guaranteed). */
+export function makerBuyQuote(bestBid: number, feePct: number): EdgeQuote | null {
+  if (!bestBid) return null;
+  const grossRate = 1 / bestBid;
+  return { grossRate, netRate: grossRate * (1 - feePct / 100), slippagePct: 0, effPrice: bestBid };
+}
+
+/** Maker SELL: post-only join at best ASK. */
+export function makerSellQuote(bestAsk: number, feePct: number): EdgeQuote | null {
+  if (!bestAsk) return null;
+  return { grossRate: bestAsk, netRate: bestAsk * (1 - feePct / 100), slippagePct: 0, effPrice: bestAsk };
 }
 
 // ── Node label helper ─────────────────────────────────────────────────────────
@@ -228,49 +278,33 @@ async function buildGraph(
     const bestBid = book.bids[0]?.[0] ?? 0;
     if (!bestAsk || !bestBid) continue;
 
-    if (maker) {
-      // Maker: post-only join — buy at best BID, sell at best ASK. Better
-      // prices + maker fee, but fills are not guaranteed. No depth slippage.
-      const buyGross = 1 / bestBid;
+    // Maker: post-only join — buy at best BID, sell at best ASK. Better
+    // prices + maker fee, but fills are not guaranteed. No depth slippage.
+    // Taker: DEPTH-WALKED effective prices for the actual trade size, with
+    // per-edge slippage = drift of the VWAP vs top-of-book. If the visible
+    // book can't absorb the size, the edge is DROPPED (not approximated).
+    const buyQ = maker
+      ? makerBuyQuote(bestBid, krakenFeesPct)
+      : takerBuyQuote(book.asks, tradeSizeUsd, krakenFeesPct);
+    const sellQ = maker
+      ? makerSellQuote(bestAsk, krakenFeesPct)
+      : takerSellQuote(book.bids, tradeSizeUsd / bestBid, krakenFeesPct);
+
+    if (buyQ != null) {
       add("kraken:USD", {
         to: `kraken:${asset}`, exchange: "kraken",
         pair: OB_USD_PAIRS[asset], side: "buy",
-        grossRate: buyGross, netRate: buyGross * (1 - krakenFeesPct / 100),
-        feePct: krakenFeesPct, slippagePct: 0, limitPrice: bestBid,
+        grossRate: buyQ.grossRate, netRate: buyQ.netRate,
+        feePct: krakenFeesPct, slippagePct: buyQ.slippagePct, limitPrice: bestBid,
       });
-      const sellGross = bestAsk;
+    }
+    if (sellQ != null) {
       add(`kraken:${asset}`, {
         to: "kraken:USD", exchange: "kraken",
         pair: OB_USD_PAIRS[asset], side: "sell",
-        grossRate: sellGross, netRate: sellGross * (1 - krakenFeesPct / 100),
-        feePct: krakenFeesPct, slippagePct: 0, limitPrice: bestAsk,
+        grossRate: sellQ.grossRate, netRate: sellQ.netRate,
+        feePct: krakenFeesPct, slippagePct: sellQ.slippagePct, limitPrice: bestAsk,
       });
-    } else {
-      // Taker: DEPTH-WALKED effective prices for the actual trade size, with
-      // per-edge slippage = drift of the VWAP vs top-of-book. If the visible
-      // book can't absorb the size, the edge is DROPPED (not approximated).
-      const buyVwap  = vwapBuy(book.asks, tradeSizeUsd);
-      const sellVwap = vwapSell(book.bids, tradeSizeUsd / bestBid);
-
-      if (buyVwap != null) {
-        const buySlip  = ((buyVwap - bestAsk) / bestAsk) * 100;
-        const buyGross = 1 / buyVwap;
-        add("kraken:USD", {
-          to: `kraken:${asset}`, exchange: "kraken",
-          pair: OB_USD_PAIRS[asset], side: "buy",
-          grossRate: buyGross, netRate: buyGross * (1 - krakenFeesPct / 100),
-          feePct: krakenFeesPct, slippagePct: Math.max(0, buySlip), limitPrice: bestBid,
-        });
-      }
-      if (sellVwap != null) {
-        const sellSlip = ((bestBid - sellVwap) / bestBid) * 100;
-        add(`kraken:${asset}`, {
-          to: "kraken:USD", exchange: "kraken",
-          pair: OB_USD_PAIRS[asset], side: "sell",
-          grossRate: sellVwap, netRate: sellVwap * (1 - krakenFeesPct / 100),
-          feePct: krakenFeesPct, slippagePct: Math.max(0, sellSlip), limitPrice: bestAsk,
-        });
-      }
     }
   }
 
@@ -293,29 +327,25 @@ async function buildGraph(
 
     if (cross.aIsQuote) {
       // fromAsset is quote, toAsset is base. Going from→to BUYs the base.
-      const effAsk = maker ? bestBid
-        : (fromAmount > 0 ? vwapBuy(book.asks, fromAmount) : null);
-      if (effAsk == null) continue; // book too thin for this size — drop edge
-      const slip = maker ? 0 : ((effAsk - bestAsk) / bestAsk) * 100;
-      const grossRate = 1 / effAsk;
+      const q = maker ? makerBuyQuote(bestBid, krakenFeesPct)
+        : (fromAmount > 0 ? takerBuyQuote(book.asks, fromAmount, krakenFeesPct) : null);
+      if (q == null) continue; // book too thin for this size — drop edge
       add(`kraken:${fromAsset}`, {
         to: `kraken:${toAsset}`, exchange: "kraken",
         pair: cross.pair, side: "buy",
-        grossRate, netRate: grossRate * (1 - krakenFeesPct / 100),
-        feePct: krakenFeesPct, slippagePct: Math.max(0, slip), limitPrice: bestBid,
+        grossRate: q.grossRate, netRate: q.netRate,
+        feePct: krakenFeesPct, slippagePct: q.slippagePct, limitPrice: bestBid,
       });
     } else {
       // fromAsset is base, toAsset is quote. Going from→to SELLs the base.
-      const effBid = maker ? bestAsk
-        : (fromAmount > 0 ? vwapSell(book.bids, fromAmount) : null);
-      if (effBid == null) continue; // book too thin for this size — drop edge
-      const slip = maker ? 0 : ((bestBid - effBid) / bestBid) * 100;
-      const grossRate = effBid;
+      const q = maker ? makerSellQuote(bestAsk, krakenFeesPct)
+        : (fromAmount > 0 ? takerSellQuote(book.bids, fromAmount, krakenFeesPct) : null);
+      if (q == null) continue; // book too thin for this size — drop edge
       add(`kraken:${fromAsset}`, {
         to: `kraken:${toAsset}`, exchange: "kraken",
         pair: cross.pair, side: "sell",
-        grossRate, netRate: grossRate * (1 - krakenFeesPct / 100),
-        feePct: krakenFeesPct, slippagePct: Math.max(0, slip), limitPrice: bestAsk,
+        grossRate: q.grossRate, netRate: q.netRate,
+        feePct: krakenFeesPct, slippagePct: q.slippagePct, limitPrice: bestAsk,
       });
     }
   }
@@ -327,48 +357,33 @@ async function buildGraph(
     const bestBid = book.bids[0]?.[0] ?? 0;
     if (!bestAsk || !bestBid) continue;
 
-    if (maker) {
-      // Maker: post-only join — buy at best BID, sell at best ASK (mirrors
-      // the Kraken maker path). No depth slippage; fills not guaranteed.
-      const buyGross = 1 / bestBid;
+    // Maker: post-only join — buy at best BID, sell at best ASK (mirrors the
+    // Kraken maker path). Taker: depth-walked VWAP for the actual trade size —
+    // same rules as Kraken legs; if the book can't absorb the size, DROP the edge.
+    const buyQ = maker
+      ? makerBuyQuote(bestBid, coinbaseFeesPct)
+      : takerBuyQuote(book.asks, tradeSizeUsd, coinbaseFeesPct);
+    const sellQ = maker
+      ? makerSellQuote(bestAsk, coinbaseFeesPct)
+      : takerSellQuote(book.bids, tradeSizeUsd / bestBid, coinbaseFeesPct);
+
+    if (buyQ != null) {
       add("coinbase:USD", {
         to: `coinbase:${asset}`, exchange: "coinbase",
         pair: `${asset}-USD`, side: "buy",
-        grossRate: buyGross, netRate: buyGross * (1 - coinbaseFeesPct / 100),
-        feePct: coinbaseFeesPct, slippagePct: 0, limitPrice: bestBid,
+        grossRate: buyQ.grossRate, netRate: buyQ.netRate,
+        feePct: coinbaseFeesPct, slippagePct: buyQ.slippagePct,
+        limitPrice: maker ? bestBid : bestAsk,
       });
-      const sellGross = bestAsk;
+    }
+    if (sellQ != null) {
       add(`coinbase:${asset}`, {
         to: "coinbase:USD", exchange: "coinbase",
         pair: `${asset}-USD`, side: "sell",
-        grossRate: sellGross, netRate: sellGross * (1 - coinbaseFeesPct / 100),
-        feePct: coinbaseFeesPct, slippagePct: 0, limitPrice: bestAsk,
+        grossRate: sellQ.grossRate, netRate: sellQ.netRate,
+        feePct: coinbaseFeesPct, slippagePct: sellQ.slippagePct,
+        limitPrice: maker ? bestAsk : bestBid,
       });
-    } else {
-      // Taker: depth-walked VWAP for the actual trade size — same rules as
-      // Kraken legs. If the visible book can't absorb the size, DROP the edge.
-      const buyVwap  = vwapBuy(book.asks, tradeSizeUsd);
-      const sellVwap = vwapSell(book.bids, tradeSizeUsd / bestBid);
-
-      if (buyVwap != null) {
-        const buySlip  = ((buyVwap - bestAsk) / bestAsk) * 100;
-        const buyGross = 1 / buyVwap;
-        add("coinbase:USD", {
-          to: `coinbase:${asset}`, exchange: "coinbase",
-          pair: `${asset}-USD`, side: "buy",
-          grossRate: buyGross, netRate: buyGross * (1 - coinbaseFeesPct / 100),
-          feePct: coinbaseFeesPct, slippagePct: Math.max(0, buySlip), limitPrice: bestAsk,
-        });
-      }
-      if (sellVwap != null) {
-        const sellSlip = ((bestBid - sellVwap) / bestBid) * 100;
-        add(`coinbase:${asset}`, {
-          to: "coinbase:USD", exchange: "coinbase",
-          pair: `${asset}-USD`, side: "sell",
-          grossRate: sellVwap, netRate: sellVwap * (1 - coinbaseFeesPct / 100),
-          feePct: coinbaseFeesPct, slippagePct: Math.max(0, sellSlip), limitPrice: bestBid,
-        });
-      }
     }
   }
 
