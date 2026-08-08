@@ -102,6 +102,8 @@ export interface BotContextType {
   obCycles: ObCycleEntry[];
   /** True while the auto-execute OB trade is in-flight */
   isAutoExecutingOb: boolean;
+  /** Route and timestamp of the last successfully auto-executed OB cycle */
+  lastObAutoTrade: { route: string; timestamp: string; profitUsd: number | null } | null;
 }
 
 const BotContext = createContext<BotContextType | undefined>(undefined);
@@ -205,6 +207,7 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
   const [cointSignals, setCointSignals] = useState<CointegrationSignal[]>([]);
   const [isAutoExecutingOb, setIsAutoExecutingOb] = useState(false);
   const [obCycles, setObCycles] = useState<ObCycleEntry[]>([]);
+  const [lastObAutoTrade, setLastObAutoTrade] = useState<{ route: string; timestamp: string; profitUsd: number | null } | null>(null);
 
   // ── Refs that give poll() always-current values without re-triggering effects ──
   const credentialsRef = useRef(credentials);
@@ -428,6 +431,7 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
               "success",
               `[${tag}] ✅ ${r.route} | $${profit.toFixed(4)}${r.isDryRun ? " (dry run)" : ` | orders ${[r.leg1OrderId, r.leg2OrderId, r.leg3OrderId].filter(Boolean).join(", ")}`}`,
             );
+            setLastObAutoTrade({ route: r.route ?? top.route, timestamp: new Date().toISOString(), profitUsd: profit });
             queryClient.invalidateQueries({ queryKey: getGetTradeSummaryQueryKey() });
             queryClient.invalidateQueries({ queryKey: getListTradesQueryKey() });
           } else {
@@ -887,6 +891,7 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
     cointSignals,
     obCycles,
     isAutoExecutingOb,
+    lastObAutoTrade,
   };
 
   return <BotContext.Provider value={value}>{children}</BotContext.Provider>;

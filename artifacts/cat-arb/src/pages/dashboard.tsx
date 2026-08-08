@@ -810,7 +810,7 @@ function useActualKrakenFees(): { taker: number | null; maker: number | null } {
 }
 
 function OrderBookHunterCard() {
-  const { credentials, liveMode, addLog, settings } = useBotContext();
+  const { credentials, liveMode, addLog, settings, isRunning, isAutoExecutingOb, lastObAutoTrade } = useBotContext();
   const executeMutation = useObExecute();
   const [execResult, setExecResult] = useState<string | null>(null);
   const [thinEdgePending, setThinEdgePending] = useState(false);
@@ -897,11 +897,27 @@ function OrderBookHunterCard() {
   return (
     <Card>
       <CardHeader className="py-3 flex flex-row items-center justify-between space-y-0">
-        <CardTitle className="text-sm flex items-center gap-2">
-          <BookOpen className="h-4 w-4" /> Order Book Hunter
+        <CardTitle className="text-sm flex items-center gap-2 flex-wrap">
+          <BookOpen className={cn("h-4 w-4", isAutoExecutingOb && "animate-pulse text-yellow-500")} /> Order Book Hunter
           <span className="text-[10px] font-mono text-muted-foreground font-normal">
             v19 · {data ? (data.crossPairsDiscovered > 0 ? `${data.crossPairsDiscovered} live crosses` : "hardcoded crosses") : "Scaling Analyzer"} · 34 assets
           </span>
+          {isRunning && (
+            <span className="text-[9px] font-mono font-bold px-1 border border-primary text-primary">AUTO</span>
+          )}
+          {isAutoExecutingOb && (
+            <span className="text-[9px] font-mono font-bold px-1.5 py-0.5 rounded bg-yellow-500/20 text-yellow-500 border border-yellow-500/50 animate-pulse flex items-center gap-1">
+              <RefreshCw className="h-2.5 w-2.5 animate-spin" /> EXECUTING
+            </span>
+          )}
+          {!isAutoExecutingOb && lastObAutoTrade && (
+            <span
+              className="text-[9px] font-mono text-muted-foreground border border-border px-1 py-0.5"
+              title={`Last auto-fire: ${lastObAutoTrade.route} at ${new Date(lastObAutoTrade.timestamp).toLocaleTimeString()}`}
+            >
+              last: {lastObAutoTrade.route}{lastObAutoTrade.profitUsd != null ? ` $${lastObAutoTrade.profitUsd.toFixed(4)}` : ""} · {new Date(lastObAutoTrade.timestamp).toLocaleTimeString()}
+            </span>
+          )}
           <span className="flex items-center gap-1 text-[10px] font-mono font-normal text-muted-foreground">
             $<input
               type="number"
@@ -944,6 +960,9 @@ function OrderBookHunterCard() {
         </CardTitle>
         <div className="flex items-center gap-2 text-[10px] font-mono text-muted-foreground">
           {isLoading && <RefreshCw className="h-3 w-3 animate-spin" />}
+          {isRunning && !isAutoExecutingOb && !isLoading && (
+            <span className="text-muted-foreground">scanning…</span>
+          )}
           {data && `${data.activeAssets.length} active assets · ${data.pairsScanned}/${data.pairsRequested} pairs · ${data.cycles.length} routes ranked`}
           <Button
             size="sm"
