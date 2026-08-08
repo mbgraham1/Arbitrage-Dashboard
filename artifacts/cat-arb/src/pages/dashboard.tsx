@@ -6,10 +6,11 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/comp
 import {
   Activity, Play, Square, DollarSign, TrendingUp, Zap, ShieldAlert,
   FileText, ArrowRight, Radio, Wifi, WifiOff, Siren, RefreshCw, BookOpen,
+  Repeat2, AlertTriangle, CheckCircle2,
 } from "lucide-react";
 import { format } from "date-fns";
 import { cn } from "@/lib/utils";
-import { useGetTradeSummary, useListTrades, useScanAllPairs, useGetObScan, getGetObScanQueryKey, useObExecute, useGetAllPairSnapshots, getGetAllPairSnapshotsQueryKey, useGetGraphScan, getGetGraphScanQueryKey, useGraphExecute, useGetFeeTier, getGetFeeTierQueryKey, useGetExecutionQuality, getGetExecutionQualityQueryKey, useGetExecutionStatus, getGetExecutionStatusQueryKey, useGetAccountPnl, getGetAccountPnlQueryKey, TradeRecord, PairScanEntry, ObCycleEntry, AllPairSnapshot, GraphRoute, GraphRouteHop } from "@workspace/api-client-react";
+import { useGetTradeSummary, useListTrades, useScanAllPairs, useGetObScan, getGetObScanQueryKey, useObExecute, useGetAllPairSnapshots, getGetAllPairSnapshotsQueryKey, useGetGraphScan, getGetGraphScanQueryKey, useGraphExecute, useGetFeeTier, getGetFeeTierQueryKey, useGetExecutionQuality, getGetExecutionQualityQueryKey, useGetExecutionStatus, getGetExecutionStatusQueryKey, useGetAccountPnl, getGetAccountPnlQueryKey, useGetInventoryScan, getGetInventoryScanQueryKey, useInventoryExecute, TradeRecord, PairScanEntry, ObCycleEntry, AllPairSnapshot, GraphRoute, GraphRouteHop, InventoryOpportunity, InventoryRebalanceAlert } from "@workspace/api-client-react";
 
 // ── Small helpers ──────────────────────────────────────────────────────────────
 
@@ -568,6 +569,9 @@ export default function Dashboard() {
       <MultiCoinRankerCard settings={settings} />
 
       {/* Triangular Arb Opportunities */}
+      {/* Inventory Mode Opportunities — shown only when the feature is toggled on in Config */}
+      {settings.inventoryModeEnabled && <InventoryCard />}
+
       <TriangularCard opportunities={triOpportunities} isRunning={isRunning} isExecutingTri={isExecutingTriangular} priceSource={triPriceSource} />
       <OrderBookHunterCard />
       <GraphEngineCard />
@@ -786,6 +790,217 @@ function MultiCoinRankerCard({ settings }: { settings: { totalFees: number; slip
             </table>
           </div>
         )}
+      </CardContent>
+    </Card>
+  );
+}
+
+// ── Inventory Mode Card ───────────────────────────────────────────────────────
+// Cross-exchange inventory arb: buy on the cheap venue, sell from existing
+// inventory on the expensive venue — no inter-exchange transfer needed.
+
+function InventoryCard() {
+  const { credentials, liveMode, settings, addLog } = useBotContext();
+  const executeMutation = useInventoryExecute();
+  const [execResult, setExecResult] = useState<string | null>(null);
+  const [executingAsset, setExecutingAsset] = useState<string | null>(null);
+
+  const krakenFeesPct   = 0.16;
+  const coinbaseFeesPct = 0.40;
+
+  // Public bid/ask scan — no credentials in query params (avoids URL logging).
+  // Rebalance alerts (balance-dependent) are returned only when optional creds
+  // are passed; omitting them here is intentional: the execute endpoint handles
+  // everything that requires live credentials.
+  const scanParams = {
+    assets: (settings.inventoryAssets ?? ["BTC", "ETH", "SOL"]).join(","),
+    krakenFeesPct,
+    coinbaseFeesPct,
+    tradeSizeUsd: settings.inventoryTradeSizeUsd ?? 10,
+    targetPct: settings.inventoryTargetPct ?? 50,
+  };
+
+  const { data, isFetching, refetch } = useGetInventoryScan(scanParams, {
+    query: {
+      queryKey: getGetInventoryScanQueryKey(scanParams),
+      refetchInterval: 10_000,
+      staleTime: 9_000,
+    },
+  });
+
+  const opportunities: InventoryOpportunity[] = data?.opportunities ?? [];
+  const rebalanceAlerts: InventoryRebalanceAlert[] = data?.rebalanceAlerts ?? [];
+  const topOpportunity = opportunities.find(o => o.meetsThreshold) ?? opportunities[0] ?? null;
+
+  const doExecute = async (opp: InventoryOpportunity) => {
+    setExecResult(null);
+    setExecutingAsset(opp.asset);
+    const isDryRun = !liveMode;
+    const tag = isDryRun ? "[INV·DRY]" : "[INV·LIVE]";
+    addLog("trade", `${tag} ${opp.asset}: ${opp.buyExchange}→${opp.sellExchange} | net ${opp.netSpreadPct.toFixed(3)}% | $${settings.inventoryTradeSizeUsd} — executing…`);
+    try {
+      const r = await executeMutation.mutateAsync({
+        data: {
+          krakenKey: credentials.krakenKey ?? "",
+          krakenSecret: credentials.krakenSecret ?? "",
+          coinbaseKey: credentials.coinbaseKey ?? undefined,
+          coinbaseSecret: credentials.coinbaseSecret ?? undefined,
+          asset: opp.asset,
+          tradeSizeUsd: settings.inventoryTradeSizeUsd ?? 10,
+          minProfitUsd: 0.01,
+          krakenFeesPct,
+          coinbaseFeesPct,
+          isDryRun,
+        },
+      });
+      if (r.success && r.executed) {
+        const profit = r.realizedProfitUsd ?? r.estimatedNetProfitUsd;
+        addLog("success", `${tag} ✅ ${r.asset} | $${profit.toFixed(4)}${r.isDryRun ? " (dry run)" : ` | buy:${r.buyOrderId} sell:${r.sellOrderId}`}`);
+        setExecResult(`✅ ${r.asset}: buy on ${r.buyExchange}, sell on ${r.sellExchange} — net $${profit.toFixed(4)}${r.isDryRun ? " (dry run)" : ""}`);
+        refetch();
+      } else {
+        addLog("warning", `${tag} ❌ ${r.error ?? "Pre-flight failed."}`);
+        setExecResult(`❌ ${r.error ?? "Pre-flight failed — edge disappeared."}`);
+      }
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "Unknown error";
+      addLog("error", `${tag} Exception: ${msg}`);
+      setExecResult(`❌ ${msg}`);
+    } finally {
+      setExecutingAsset(null);
+    }
+  };
+
+  return (
+    <Card className="border-2 border-primary/40">
+      <CardHeader className="py-3 flex flex-row items-center justify-between space-y-0">
+        <CardTitle className="text-sm flex items-center gap-2">
+          <Repeat2 className="h-4 w-4 text-primary" />
+          Inventory Arb
+          <span className="text-[9px] font-mono font-bold px-1 border border-primary text-primary">CROSS-EXCHANGE</span>
+          <span className="text-[10px] font-mono text-muted-foreground">buy cheap · sell expensive · no transfer</span>
+        </CardTitle>
+        <div className="flex items-center gap-2">
+          {isFetching && <RefreshCw className="h-3 w-3 animate-spin text-muted-foreground" />}
+          <span className={cn(
+            "text-[9px] font-mono font-bold px-1 border",
+            liveMode ? "text-destructive border-destructive" : "text-muted-foreground border-border"
+          )}>{liveMode ? "LIVE" : "DRY RUN"}</span>
+        </div>
+      </CardHeader>
+      <CardContent className="p-0">
+        {/* Rebalance alerts (only shown when creds provided to scan) */}
+        {rebalanceAlerts.length > 0 && (
+          <div className="flex flex-col gap-1 px-4 py-3 border-b border-border">
+            {rebalanceAlerts.map((alert) => (
+              <div
+                key={`${alert.asset}-${alert.exchange}`}
+                className={cn(
+                  "flex items-start gap-2 text-xs font-mono px-2 py-1 border",
+                  alert.alertLevel === "critical"
+                    ? "border-destructive bg-destructive/10 text-destructive"
+                    : "border-yellow-500 bg-yellow-500/10 text-yellow-600"
+                )}
+              >
+                <AlertTriangle className="h-3 w-3 shrink-0 mt-0.5" />
+                <span>{alert.message}</span>
+                <span className="ml-auto text-[10px] text-muted-foreground whitespace-nowrap">
+                  K:{alert.krakenPct.toFixed(0)}% CB:{alert.coinbasePct.toFixed(0)}%
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* Opportunity table */}
+        {opportunities.length === 0 ? (
+          <div className="p-6 text-center text-sm font-mono text-muted-foreground">
+            {isFetching ? "Scanning inventory opportunities…" : "No opportunities found. Enable more assets in Config → Inventory Mode."}
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs font-mono border-collapse">
+              <thead>
+                <tr className="border-b-2 border-border bg-muted/50">
+                  {["Asset", "K Bid", "K Ask", "CB Bid", "CB Ask", "Gross %", "Net %", "Est. Profit", "Route", ""].map(h => (
+                    <th key={h} className="text-left px-3 py-2 text-[10px] uppercase font-bold text-muted-foreground whitespace-nowrap">{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {opportunities.map((opp) => {
+                  const isTop = opp === topOpportunity;
+                  const isExec = executingAsset === opp.asset;
+                  return (
+                    <tr
+                      key={opp.asset}
+                      className={cn(
+                        "border-b border-border/50",
+                        opp.meetsThreshold && isTop && "bg-success/5 ring-1 ring-inset ring-success/30",
+                        !opp.meetsThreshold && "opacity-60",
+                      )}
+                    >
+                      <td className="px-3 py-2 font-bold">
+                        {opp.asset}
+                        {opp.meetsThreshold && <span className="ml-1 text-[8px] font-bold px-0.5 border border-success text-success animate-pulse">✓</span>}
+                      </td>
+                      <td className="px-3 py-1.5 text-muted-foreground">${opp.krakenBid.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 4 })}</td>
+                      <td className="px-3 py-1.5 text-muted-foreground">${opp.krakenAsk.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 4 })}</td>
+                      <td className="px-3 py-1.5 text-muted-foreground">${opp.coinbaseBid.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 4 })}</td>
+                      <td className="px-3 py-1.5 text-muted-foreground">${opp.coinbaseAsk.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 4 })}</td>
+                      <td className={cn("px-3 py-1.5 font-bold", opp.grossSpreadPct > 0 ? "text-success" : "text-destructive")}>
+                        {opp.grossSpreadPct >= 0 ? "+" : ""}{opp.grossSpreadPct.toFixed(3)}%
+                      </td>
+                      <td className={cn("px-3 py-1.5 font-bold", opp.netSpreadPct > 0 ? "text-success" : "text-destructive")}>
+                        {opp.netSpreadPct >= 0 ? "+" : ""}{opp.netSpreadPct.toFixed(3)}%
+                      </td>
+                      <td className={cn("px-3 py-1.5 font-bold", opp.estimatedNetProfitUsd > 0 ? "text-success" : "text-destructive")}>
+                        ${opp.estimatedNetProfitUsd.toFixed(4)}
+                      </td>
+                      <td className="px-3 py-1.5 text-muted-foreground whitespace-nowrap">
+                        {opp.buyExchange} → {opp.sellExchange}
+                      </td>
+                      <td className="px-3 py-1.5">
+                        <Button
+                          size="sm"
+                          variant={opp.meetsThreshold ? "default" : "outline"}
+                          className="h-6 px-2 text-[10px] font-bold"
+                          disabled={isExec || executeMutation.isPending}
+                          onClick={() => doExecute(opp)}
+                        >
+                          {isExec ? <RefreshCw className="h-3 w-3 animate-spin" /> : <><Play className="h-3 w-3 mr-1" />EXEC</>}
+                        </Button>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+
+        {/* Execute result banner */}
+        {execResult && (
+          <div className={cn(
+            "mx-4 mt-3 mb-3 px-3 py-2 border-2 text-xs font-mono flex items-start gap-2",
+            execResult.startsWith("✅") ? "border-success bg-success/5 text-success" : "border-destructive bg-destructive/5 text-destructive"
+          )}>
+            {execResult.startsWith("✅")
+              ? <CheckCircle2 className="h-4 w-4 shrink-0 mt-0.5" />
+              : <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5" />
+            }
+            {execResult}
+          </div>
+        )}
+
+        <div className="px-4 py-2 border-t border-border flex items-center gap-2 text-[10px] font-mono text-muted-foreground flex-wrap">
+          <span>Threshold: spread &gt; 2× fees (K {krakenFeesPct}% + CB {coinbaseFeesPct}%)</span>
+          <span>·</span>
+          <span>Size: ${settings.inventoryTradeSizeUsd ?? 10}</span>
+          {data?.scannedAt && (
+            <><span>·</span><span className="ml-auto">scanned {new Date(data.scannedAt).toLocaleTimeString()}</span></>
+          )}
+        </div>
       </CardContent>
     </Card>
   );
@@ -1356,28 +1571,12 @@ function GraphEngineCard() {
   const [style, setStyle] = useState<"taker" | "maker">("taker");
   const fees = useActualKrakenFees();
   const actualFee = style === "maker" ? (fees.maker ?? fees.taker) : fees.taker;
-  // Non-reversible account scope (same sha256-prefix derivation the server
-  // uses) so fill-rate ranking only reflects THIS account's history. Until
-  // computed (or without keys), the server uses the neutral prior instead.
-  const [accountId, setAccountId] = useState<string | undefined>(undefined);
-  useEffect(() => {
-    if (!credentials.krakenKey) { setAccountId(undefined); return; }
-    let stale = false;
-    const input = `${credentials.krakenKey}|${credentials.coinbaseKey ?? ""}`;
-    crypto.subtle.digest("SHA-256", new TextEncoder().encode(input)).then(buf => {
-      if (stale) return;
-      const hex = Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, "0")).join("");
-      setAccountId(hex.slice(0, 16));
-    }).catch(() => setAccountId(undefined));
-    return () => { stale = true; };
-  }, [credentials.krakenKey, credentials.coinbaseKey]);
   const params = {
     tradeSizeUsd:    tradeSize,
     krakenFeesPct:   actualFee ?? settings.obFeesPct,
     coinbaseFeesPct: 0.40,
     maxHops:         4,
     executionStyle:  style,
-    ...(accountId ? { accountId } : {}),
   };
   const { data, isLoading, dataUpdatedAt } = useGetGraphScan(params, {
     query: { queryKey: getGetGraphScanQueryKey(params), refetchInterval: 8_000, staleTime: 7_000 },
@@ -1718,7 +1917,7 @@ function GraphEngineCard() {
             <table className="w-full text-xs font-mono border-collapse">
               <thead>
                 <tr className="border-b-2 border-border bg-muted/50">
-                  {["#", "Route", "Hops", "Raw Edge", "Fees", "Net Profit", "Fill Rate", "Score", "Status"].map(h => (
+                  {["#", "Route", "Hops", "Raw Edge", "Fees", "Net Profit", "Profit %", "Status"].map(h => (
                     <th key={h} className="text-left px-3 py-2 text-[10px] uppercase font-bold text-muted-foreground whitespace-nowrap">{h}</th>
                   ))}
                 </tr>
@@ -1749,32 +1948,8 @@ function GraphEngineCard() {
                     <td className={cn("px-3 py-1.5 font-bold", r.netProfitUsd > 0 ? "text-success" : "text-destructive")}>
                       ${r.netProfitUsd.toFixed(4)}
                     </td>
-                    <td className="px-3 py-1.5 whitespace-nowrap"
-                        title={r.histFillRate != null
-                          ? `${((r.histFillRate) * 100).toFixed(0)}% of the last ${r.histLiveAttempts} live attempts filled. >70% = prioritized, 50–70% = ranked down, <50% = blocked (decays 1h).`
-                          : `${r.histLiveAttempts ?? 0}/10 live attempts — need ≥10 before judging this route; neutral 0.7 prior used for ranking.`}>
-                      {r.histFillRate != null ? (
-                        <span className={cn("font-bold",
-                          r.histFillRate > 0.7 ? "text-success" : r.histFillRate >= 0.5 ? "text-amber-500" : "text-destructive")}>
-                          {(r.histFillRate * 100).toFixed(0)}%{r.histFillRate > 0.7 ? " ★" : ""}
-                        </span>
-                      ) : (
-                        <span className="text-muted-foreground">{r.histLiveAttempts ?? 0}/10</span>
-                      )}
-                    </td>
-                    <td className={cn("px-3 py-1.5 whitespace-nowrap",
-                        r.histFillRate == null
-                          ? "text-muted-foreground"
-                          : (r.effectiveScoreUsd ?? r.netProfitUsd) > 0 ? "text-success" : "text-destructive")}
-                        title={r.histFillRate != null
-                          ? `PROVEN (observed): score = net profit × the route's real full-cycle completion rate (${(r.histFillRate * 100).toFixed(0)}% over ${r.histLiveAttempts} live attempts).`
-                          : "UNPROVEN (exploring): score = net profit × 0.70 prior — NOT an observed fill rate. Greyed until the route reaches 10 live attempts, then switches entirely to its observed full-cycle completion rate."}>
-                      ${(r.effectiveScoreUsd ?? r.netProfitUsd).toFixed(4)}
-                      {r.histFillRate == null ? (
-                        <span className="text-[8px] ml-1">UNPROVEN</span>
-                      ) : (
-                        <span className="text-[8px] text-muted-foreground ml-1">proven</span>
-                      )}
+                    <td className={cn("px-3 py-1.5", r.profitPct > 0 ? "text-success" : "text-destructive")}>
+                      {r.profitPct.toFixed(3)}%
                     </td>
                     <td className="px-3 py-1.5">
                       <span className={cn("text-[9px] font-bold px-1 border whitespace-nowrap",
@@ -1944,7 +2119,7 @@ function ExecutionQualityCard() {
           <table className="w-full text-xs font-mono border-collapse">
             <thead>
               <tr className="border-b-2 border-border bg-muted/50">
-                {["Route", "Style", "Attempts", "Live", "Expected", "Realized", "Full Cycle", "Leg 1", "Leg 2", "Leg 3", "Slippage", "Net P&L"].map(h => (
+                {["Route", "Style", "Attempts", "Live", "Expected", "Realized", "Fill Rate", "Slippage", "Net P&L"].map(h => (
                   <th key={h} className="text-left px-3 py-2 text-[10px] uppercase font-bold text-muted-foreground whitespace-nowrap">{h}</th>
                 ))}
               </tr>
@@ -1961,18 +2136,9 @@ function ExecutionQualityCard() {
                     title={r.avgShortfallUsd == null ? undefined : `Shortfall vs expected: $${r.avgShortfallUsd.toFixed(4)}`}>
                     {r.avgRealizedProfitUsd == null ? "—" : `$${r.avgRealizedProfitUsd.toFixed(4)}`}
                   </td>
-                  <td className={cn("px-3 py-1.5 font-bold", r.liveFillRate == null ? "text-muted-foreground" : r.liveFillRate >= 0.8 ? "text-success" : r.liveFillRate >= 0.5 ? "text-yellow-500" : "text-destructive")}
-                    title="FULL 3-leg cycle completions / live attempts — the only fill rate that produces arbitrage profit.">
+                  <td className={cn("px-3 py-1.5 font-bold", r.liveFillRate == null ? "text-muted-foreground" : r.liveFillRate >= 0.8 ? "text-success" : r.liveFillRate >= 0.5 ? "text-yellow-500" : "text-destructive")}>
                     {r.liveFillRate == null ? "—" : `${(r.liveFillRate * 100).toFixed(0)}%`}
                   </td>
-                  {([r.leg1FillRate, r.leg2FillRate, r.leg3FillRate] as (number | null | undefined)[]).map((rate, li) => (
-                    <td key={li} className={cn("px-3 py-1.5", rate == null ? "text-muted-foreground" : rate >= 0.8 ? "text-success" : rate >= 0.5 ? "text-yellow-500" : "text-destructive")}
-                      title={rate == null
-                        ? "No per-leg data yet — recorded only for live attempts since leg tracking was added."
-                        : `Leg ${li + 1} confirmed filled in ${(rate * 100).toFixed(0)}% of ${r.legsTracked ?? 0} tracked live attempts. A big drop between legs shows where the cycle dies.`}>
-                      {rate == null ? "—" : `${(rate * 100).toFixed(0)}%`}
-                    </td>
-                  ))}
                   <td className="px-3 py-1.5 text-muted-foreground">
                     {r.avgSlippagePct == null ? "—" : `${r.avgSlippagePct.toFixed(3)}%`}
                   </td>
@@ -1985,7 +2151,7 @@ function ExecutionQualityCard() {
           </table>
         </div>
         <div className="px-3 py-1.5 text-[9px] font-mono text-muted-foreground border-t border-border/50">
-          Execution is hybrid maker→taker: each leg gets a 4s post-only window at maker fees, then completes at MARKET (leg 1 only when a fresh taker-priced pre-flight still clears the floor; legs 2/3 always — completing beats unwinding at the same taker cost). Full Cycle = completed 3-leg cycles / live attempts; Leg 1–3 show where failed cycles die. Shortfall = scanner expectation − realized fills. Fill-rate tiers (per route, ≥10 live attempts required before judging): &gt;70% prioritized · 50–70% ranked down · &lt;50% blocked (block decays 1h after the last attempt, earning a fresh probe). Routes are ranked by net profit × fill rate — expected realized profit, not theoretical edge. Persistent shortfalls raise the edge a route must clear, and when the top route is gated, AUTO immediately falls through to the next-best viable route.
+          Shortfall = scanner expectation − realized fills. Routes with ≥10 live attempts and &lt;50% fill rate are blocked from live execution (block decays 1h after the last attempt, earning a fresh probe); persistent shortfalls raise the edge a route must clear. When the top route is gated, AUTO immediately falls through to the next-best viable route.
         </div>
       </CardContent>
     </Card>

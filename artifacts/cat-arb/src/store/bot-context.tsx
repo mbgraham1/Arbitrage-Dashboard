@@ -54,6 +54,11 @@ export interface BotSettings {
   // Order Book Hunter parameters
   obTradeSize: number;  // v8: trade size in USD for OB scans (default $10)
   obFeesPct: number;    // v8: estimated fee per leg in % for OB scans (default 0.40%)
+  // Inventory Mode — cross-exchange inventory arb (v10)
+  inventoryModeEnabled: boolean;
+  inventoryAssets: string[];       // assets to watch (default ["BTC","ETH","SOL"])
+  inventoryTargetPct: number;      // target % to hold on each exchange (default 50)
+  inventoryTradeSizeUsd: number;   // trade size in USD for inventory arb (default 10)
 }
 
 export interface BotContextType {
@@ -129,10 +134,15 @@ const DEFAULT_SETTINGS: BotSettings = {
   enabledPairs: [...ALL_PAIRS], // all 10 pairs enabled by default
   obTradeSize: 10,      // v8: OB Hunter default $10 trade size
   obFeesPct: 0.16,      // v8: OB Hunter default 0.16% fee per leg (Kraken post-only maker rate)
+  // Inventory Mode (v10)
+  inventoryModeEnabled: false,
+  inventoryAssets: ["BTC", "ETH", "SOL"],
+  inventoryTargetPct: 50,
+  inventoryTradeSizeUsd: 10,
 };
 
 // Bump this when defaults change meaningfully — forces a one-time reset for existing users
-const SETTINGS_VERSION = 9;
+const SETTINGS_VERSION = 10;
 
 // ── Kelly Criterion position sizer ────────────────────────────────────────────
 // Direct port of Python KellySizer.calculate()

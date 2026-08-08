@@ -976,8 +976,8 @@ async function routeQualityPenalty(route: string, style: string, tradeSizeUsd: n
   } catch { return { shortfallUsd: 0, attempts: 0, blockReason: null }; }
 }
 
-/** Global lease: at most ONE live graph execution at a time (any client/tab). */
-let liveGraphExecInFlight = false;
+// liveGraphExecInFlight is now an alias for the shared liveExecLockHeld.
+// All live executors (triangle, OB, graph, inventory) use the same lock.
 
 /**
  * Snapshot the Kraken account's actual USD value into account_snapshots.
@@ -1138,15 +1138,16 @@ router.post("/arb/graph-execute", async (req, res): Promise<void> => {
   const executionStyle  = parsed.data.executionStyle ?? "taker";
   const asset = (node: string) => node.split(":")[1] ?? node;
 
-  // Global execution lease — a second live request (another tab, an auto-fire
-  // racing a manual click) must never run concurrently and double-spend.
+  // Global execution lease — shared with all live executors (triangle, OB,
+  // inventory). A second live request (another tab, an auto-fire racing a manual
+  // click) must never run concurrently and double-spend the same balance.
   let holdsLease = false;
   if (!isDryRun) {
-    if (liveGraphExecInFlight) {
+    if (liveExecLockHeld) {
       res.json({ success: false, isDryRun, executed: false, route: routeDescription ?? "(top route)", preflightProfitUsd: null, error: "Another LIVE execution is already in progress — refused to run concurrently." });
       return;
     }
-    liveGraphExecInFlight = true;
+    liveExecLockHeld = true;
     holdsLease = true;
   }
   try {
@@ -1467,7 +1468,7 @@ router.post("/arb/graph-execute", async (req, res): Promise<void> => {
     req.log.error({ err }, "graph-execute error");
     res.json({ success: false, isDryRun, executed: false, route: routeDescription ?? "(top route)", preflightProfitUsd: null, error: (err as Error).message });
   } finally {
-    if (holdsLease) liveGraphExecInFlight = false;
+    if (holdsLease) liveExecLockHeld = false;
   }
 });
 
@@ -2677,6 +2678,457 @@ router.get("/trades/summary", async (req, res): Promise<void> => {
       createdAt: t.createdAt.toISOString(),
     })),
   });
+});
+
+// ── GET /arb/inventory-scan ───────────────────────────────────────────────────
+// Cross-exchange inventory arb scanner: checks live bid/ask for BTC, ETH, SOL
+// (and any other requested asset) on both Kraken and Coinbase, surfaces
+// opportunities where gross spread > 2× fees, and emits rebalance alerts when
+// one side of the inventory drops below 20% of the target split.
+//
+// Query params:
+//   assets          comma-separated (default "BTC,ETH,SOL")
+//   krakenFeesPct   default 0.16
+//   coinbaseFeesPct default 0.40
+//   tradeSizeUsd    default 10
+//   targetPct       target % to hold on each exchange (default 50)
+//   krakenKey / krakenSecret / coinbaseKey / coinbaseSecret (optional — for balance check)
+router.get("/arb/inventory-scan", async (req, res): Promise<void> => {
+  const rawAssets = String(req.query["assets"] ?? "BTC,ETH,SOL");
+  const requestedAssets = rawAssets.split(",").map(a => a.trim().toUpperCase()).filter(Boolean);
+  const krakenFeesPct   = Math.max(0, parseFloat(String(req.query["krakenFeesPct"]   ?? "0.16")) || 0.16);
+  const coinbaseFeesPct = Math.max(0, parseFloat(String(req.query["coinbaseFeesPct"] ?? "0.40")) || 0.40);
+  const tradeSizeUsd    = Math.max(1, parseFloat(String(req.query["tradeSizeUsd"]    ?? "10"))   || 10);
+  const targetPct       = Math.max(1, Math.min(99, parseFloat(String(req.query["targetPct"] ?? "50")) || 50));
+  const krakenKey     = String(req.query["krakenKey"]     ?? "");
+  const krakenSecret  = String(req.query["krakenSecret"]  ?? "");
+  const coinbaseKey   = String(req.query["coinbaseKey"]   ?? "");
+  const coinbaseSecret = String(req.query["coinbaseSecret"] ?? "");
+
+  // Asset → canonical pair (must exist in PAIRS list)
+  const ASSET_PAIRS: Record<string, Pair> = {
+    BTC: "BTC/USD", ETH: "ETH/USD", SOL: "SOL/USD",
+    AVAX: "AVAX/USD", DOT: "DOT/USD", LINK: "LINK/USD",
+    ADA: "ADA/USD", ATOM: "ATOM/USD", UNI: "UNI/USD", POL: "POL/USD",
+  };
+
+  const validAssets = requestedAssets.filter(a => ASSET_PAIRS[a]);
+  if (validAssets.length === 0) {
+    res.status(400).json({ error: `No valid assets in: ${rawAssets}. Use BTC, ETH, SOL (etc.)` });
+    return;
+  }
+
+  try {
+    const scannedAt = new Date().toISOString();
+    const totalFees = krakenFeesPct + coinbaseFeesPct;
+    const threshold = 2 * totalFees; // gross spread must be > 2× fees to surface
+
+    // Fetch bid/ask in parallel — public endpoints, no creds needed
+    const bidAskResults = await Promise.allSettled(
+      validAssets.map(asset => Promise.all([
+        getKrakenBidAsk(ASSET_PAIRS[asset]!),
+        getCoinbaseBidAsk(ASSET_PAIRS[asset]!),
+      ]))
+    );
+
+    // Optionally fetch balances for rebalance alerts (fire-and-forget; skip on missing creds)
+    let krakenBalances: Array<{ currency: string; amount: number }> = [];
+    let coinbaseBalances: Array<{ currency: string; amount: number }> = [];
+    const hasCreds = krakenKey && krakenSecret && coinbaseKey && coinbaseSecret;
+    if (hasCreds) {
+      try {
+        [krakenBalances, coinbaseBalances] = await Promise.all([
+          getKrakenBalances({ krakenKey, krakenSecret }),
+          getCoinbaseBalances({ coinbaseKey, coinbaseSecret }),
+        ]);
+      } catch { /* balance fetch is optional — skip rebalance alerts on error */ }
+    }
+
+    // Helper: normalize Kraken asset codes (XXBT → BTC, XETH → ETH, etc.)
+    const normalizeKrakenAsset = (c: string) => {
+      const stripped = c.length >= 4 && (c.startsWith("X") || c.startsWith("Z")) ? c.slice(1) : c;
+      return stripped.replace(/\.[SF]$/, "").replace(/^XBT$/, "BTC");
+    };
+
+    // Build asset → amount maps for rebalance check
+    const krakenAmts = new Map<string, number>();
+    for (const b of krakenBalances) {
+      const sym = normalizeKrakenAsset(b.currency).toUpperCase();
+      krakenAmts.set(sym, (krakenAmts.get(sym) ?? 0) + b.amount);
+    }
+    const coinbaseAmts = new Map<string, number>();
+    for (const b of coinbaseBalances) {
+      coinbaseAmts.set(b.currency.toUpperCase(), (coinbaseAmts.get(b.currency.toUpperCase()) ?? 0) + b.amount);
+    }
+
+    const opportunities: Array<{
+      asset: string; pair: string;
+      krakenBid: number; krakenAsk: number;
+      coinbaseBid: number; coinbaseAsk: number;
+      grossSpreadPct: number; netSpreadPct: number;
+      buyExchange: string; sellExchange: string;
+      buyPrice: number; sellPrice: number;
+      tradeSizeUsd: number; estimatedNetProfitUsd: number;
+      meetsThreshold: boolean; scannedAt: string;
+    }> = [];
+
+    const rebalanceAlerts: Array<{
+      asset: string; exchange: string;
+      krakenPct: number; coinbasePct: number;
+      targetPct: number; alertLevel: "info" | "warning" | "critical";
+      message: string;
+    }> = [];
+
+    for (let i = 0; i < validAssets.length; i++) {
+      const asset = validAssets[i]!;
+      const pair = ASSET_PAIRS[asset]!;
+      const result = bidAskResults[i];
+      if (result?.status !== "fulfilled") continue;
+
+      const [kba, cba] = result.value;
+
+      // Best direction: buy cheaper, sell more expensive
+      const kToC = ((cba.bid - kba.ask) / kba.ask) * 100; // buy kraken, sell coinbase
+      const cToK = ((kba.bid - cba.ask) / cba.ask) * 100; // buy coinbase, sell kraken
+      const useKraken = kToC >= cToK;
+      const grossSpreadPct = useKraken ? kToC : cToK;
+      const netSpreadPct = grossSpreadPct - totalFees;
+      const buyPrice  = useKraken ? kba.ask : cba.ask;
+      const sellPrice = useKraken ? cba.bid : kba.bid;
+      const volume = tradeSizeUsd / buyPrice;
+      const estimatedNetProfitUsd = (netSpreadPct / 100) * tradeSizeUsd;
+
+      opportunities.push({
+        asset, pair,
+        krakenBid: kba.bid, krakenAsk: kba.ask,
+        coinbaseBid: cba.bid, coinbaseAsk: cba.ask,
+        grossSpreadPct, netSpreadPct,
+        buyExchange: useKraken ? "Kraken" : "Coinbase",
+        sellExchange: useKraken ? "Coinbase" : "Kraken",
+        buyPrice, sellPrice,
+        tradeSizeUsd,
+        estimatedNetProfitUsd,
+        meetsThreshold: grossSpreadPct > threshold,
+        scannedAt,
+      });
+      void volume; // used for display only; actual fill volume is determined at execution
+
+      // Rebalance check
+      if (hasCreds) {
+        const kAmt = krakenAmts.get(asset) ?? 0;
+        const cAmt = coinbaseAmts.get(asset) ?? 0;
+        const total = kAmt + cAmt;
+        if (total > 0) {
+          const kPct = (kAmt / total) * 100;
+          const cPct = (cAmt / total) * 100;
+          const minAllowed = targetPct * 0.20; // alert below 20% of target
+          for (const [exchange, pct, otherPct] of [["Kraken", kPct, cPct], ["Coinbase", cPct, kPct]] as [string, number, number][]) {
+            void otherPct;
+            if (pct < minAllowed) {
+              const alertLevel: "critical" | "warning" = pct < minAllowed / 2 ? "critical" : "warning";
+              rebalanceAlerts.push({
+                asset, exchange, krakenPct: kPct, coinbasePct: cPct, targetPct,
+                alertLevel,
+                message: `${asset} on ${exchange} is ${pct.toFixed(1)}% of total holdings (target ${targetPct}%) — rebalance needed`,
+              });
+            }
+          }
+        }
+      }
+    }
+
+    // Sort: threshold-met first, then by gross spread descending
+    opportunities.sort((a, b) => {
+      if (a.meetsThreshold !== b.meetsThreshold) return a.meetsThreshold ? -1 : 1;
+      return b.grossSpreadPct - a.grossSpreadPct;
+    });
+
+    res.json({ opportunities, rebalanceAlerts, scannedAt });
+  } catch (err) {
+    req.log.error({ err }, "inventory-scan error");
+    res.status(500).json({ error: (err as Error).message });
+  }
+});
+
+// ── POST /arb/inventory-execute ───────────────────────────────────────────────
+// Execute a cross-exchange inventory arb: buy on the cheap venue, sell on the
+// expensive venue. Fetches a fresh live quote immediately before placing orders
+// and gates on net profit > minProfitUsd. Sequential execution: buy → confirm
+// fill → sell ACTUAL filled volume. Unwinds on sell failure.
+router.post("/arb/inventory-execute", async (req, res): Promise<void> => {
+  const {
+    krakenKey, krakenSecret, coinbaseKey, coinbaseSecret,
+    asset, tradeSizeUsd: rawSize, minProfitUsd: rawMin, isDryRun,
+    krakenFeesPct: rawKFee, coinbaseFeesPct: rawCFee,
+  } = req.body as {
+    krakenKey?: string; krakenSecret?: string;
+    coinbaseKey?: string; coinbaseSecret?: string;
+    asset?: string; tradeSizeUsd?: number; minProfitUsd?: number;
+    isDryRun?: boolean; krakenFeesPct?: number; coinbaseFeesPct?: number;
+  };
+
+  if (!krakenKey || !krakenSecret || !coinbaseKey || !coinbaseSecret) {
+    res.status(400).json({ error: "krakenKey, krakenSecret, coinbaseKey, and coinbaseSecret are required." });
+    return;
+  }
+  const ASSET_PAIRS: Record<string, Pair> = {
+    BTC: "BTC/USD", ETH: "ETH/USD", SOL: "SOL/USD",
+    AVAX: "AVAX/USD", DOT: "DOT/USD",
+  };
+  const sym = String(asset ?? "BTC").toUpperCase();
+  const pair = ASSET_PAIRS[sym];
+  if (!pair) {
+    res.status(400).json({ error: `Unknown asset: ${sym}. Valid: ${Object.keys(ASSET_PAIRS).join(", ")}` });
+    return;
+  }
+  const tradeSizeUsd    = Math.min(100_000, Math.max(1, Number.isFinite(rawSize) ? rawSize! : 10));
+  const minProfitUsd    = isDryRun ? (rawMin ?? 0) : Math.max(0, rawMin ?? 0.01);
+  const krakenFeesPct   = Math.max(0, rawKFee ?? 0.16);
+  const coinbaseFeesPct = Math.max(0, rawCFee ?? 0.40);
+  const totalFees       = krakenFeesPct + coinbaseFeesPct;
+
+  const kCreds  = { krakenKey, krakenSecret };
+  const cbCreds = { coinbaseKey, coinbaseSecret };
+  let ownsLiveLock = false;
+
+  try {
+    // 1. Fresh quote (bypasses WS cache)
+    const [kba, cba] = await Promise.all([getKrakenBidAsk(pair), getCoinbaseBidAsk(pair)]);
+    const kToC = ((cba.bid - kba.ask) / kba.ask) * 100;
+    const cToK = ((kba.bid - cba.ask) / cba.ask) * 100;
+    const useKraken = kToC >= cToK;
+    const grossSpreadPct = useKraken ? kToC : cToK;
+    const netSpreadPct   = grossSpreadPct - totalFees;
+    const buyExchange    = useKraken ? "Kraken" : "Coinbase";
+    const sellExchange   = useKraken ? "Coinbase" : "Kraken";
+    const buyPrice       = useKraken ? kba.ask : cba.ask;
+    const sellPrice      = useKraken ? cba.bid : kba.bid;
+    const plannedVolume  = tradeSizeUsd / buyPrice;
+    const estimatedNetProfitUsd = (netSpreadPct / 100) * tradeSizeUsd;
+
+    // Gate
+    if (netSpreadPct <= 0 || estimatedNetProfitUsd <= minProfitUsd) {
+      res.json({
+        success: false, isDryRun: !!isDryRun, executed: false,
+        asset: sym, pair, buyExchange, sellExchange,
+        volume: null, buyPrice, sellPrice,
+        grossSpreadPct, netSpreadPct, estimatedNetProfitUsd,
+        buyOrderId: null, sellOrderId: null,
+        error: `Pre-flight failed — net profit $${estimatedNetProfitUsd.toFixed(4)} ≤ minimum $${minProfitUsd.toFixed(4)} (spread ${grossSpreadPct.toFixed(3)}% − fees ${totalFees.toFixed(2)}% = ${netSpreadPct.toFixed(3)}%)`,
+      });
+      return;
+    }
+
+    // 2. Dry run — log, no orders
+    if (isDryRun) {
+      await db.insert(tradesTable).values({
+        pair: `INV:${sym} ${buyExchange}→${sellExchange}`,
+        buyExchange: buyExchange.toLowerCase(),
+        sellExchange: sellExchange.toLowerCase(),
+        volume: plannedVolume.toFixed(8),
+        estimatedProfitUsd: estimatedNetProfitUsd.toFixed(6),
+        netEdgePct: netSpreadPct.toFixed(4),
+        isDryRun: true,
+        krakenPrice: useKraken ? kba.ask.toFixed(4) : kba.bid.toFixed(4),
+        coinbasePrice: useKraken ? cba.bid.toFixed(4) : cba.ask.toFixed(4),
+      });
+      req.log.info({ sym, pair, buyExchange, tradeSizeUsd, estimatedNetProfitUsd }, "Inventory execute (dry run)");
+      res.json({
+        success: true, isDryRun: true, executed: true,
+        asset: sym, pair, buyExchange, sellExchange,
+        volume: plannedVolume, buyPrice, sellPrice,
+        grossSpreadPct, netSpreadPct, estimatedNetProfitUsd,
+        buyOrderId: null, sellOrderId: null, error: null,
+      });
+      return;
+    }
+
+    // 3. Live execution: acquire lock first to prevent concurrent executions
+    //    (graph-execute, OB-execute, or another inventory request) from
+    //    double-spending the same balance.
+    if (liveExecLockHeld) {
+      res.status(409).json({
+        success: false, isDryRun: false, executed: false, asset: sym, pair,
+        buyExchange, sellExchange, volume: null, buyPrice, sellPrice,
+        grossSpreadPct, netSpreadPct, estimatedNetProfitUsd,
+        buyOrderId: null, sellOrderId: null,
+        error: "Another live execution is already in progress — try again in a moment.",
+      });
+      return;
+    }
+    liveExecLockHeld = true;
+    ownsLiveLock = true;
+
+    const KRAKEN_RAW_PAIRS: Record<string, string> = {
+      "BTC/USD": "XXBTZUSD", "ETH/USD": "ETHUSD", "SOL/USD": "SOLUSD",
+      "AVAX/USD": "AVAXUSD", "DOT/USD": "DOTUSD",
+    };
+    const krakenRaw = KRAKEN_RAW_PAIRS[pair] ?? pair.replace("/", "").replace("BTC", "XBT");
+    const log = { info: (m: string) => req.log.info(m), error: (m: string) => req.log.error(m) };
+
+    let buyOrderId = "", sellOrderId = "";
+    let filledVolume = 0;
+    let buySpendUsd = 0, sellProceedsUsd = 0;
+    let anyAccepted = false;
+
+    const CB_TERMINAL = new Set(["FILLED", "CANCELLED", "EXPIRED", "FAILED"]);
+    const waitCoinbaseFill = async (orderId: string) => {
+      for (let i = 0; i < 30; i++) {
+        await new Promise(r => setTimeout(r, 500));
+        try {
+          const d = await coinbaseOrderDetails(cbCreds, orderId);
+          if (CB_TERMINAL.has(d.status)) return d;
+        } catch { /* keep polling */ }
+      }
+      try { await coinbaseCancelOrder(cbCreds, orderId); } catch { /* best effort */ }
+      try { return await coinbaseOrderDetails(cbCreds, orderId); }
+      catch { return { status: "UNKNOWN", filledSize: 0, filledValue: 0, avgPrice: 0, totalFees: 0 }; }
+    };
+    const waitKrakenFill = async (txid: string) => {
+      // Phase 1: poll up to 20 s for a terminal status.
+      const TERMINAL = new Set(["closed", "canceled", "expired"]);
+      for (let i = 0; i < 20; i++) {
+        await new Promise(r => setTimeout(r, 1_000));
+        try {
+          const info = await krakenOrderInfo(kCreds, txid);
+          if (TERMINAL.has(info.status)) return info;
+        } catch { /* transient API error — keep polling */ }
+      }
+      // Phase 2: cancel the resting order (best-effort) to prevent a late fill
+      // from going unhedged, then poll up to 15 more seconds for a terminal
+      // status to be confirmed. We never act on a non-terminal response because
+      // Kraken can still fill a "canceling" order in the race.
+      try { await krakenCancelOrder(kCreds, txid); } catch { /* ignore cancel ack errors */ }
+      for (let i = 0; i < 15; i++) {
+        await new Promise(r => setTimeout(r, 1_000));
+        try {
+          const info = await krakenOrderInfo(kCreds, txid);
+          if (TERMINAL.has(info.status)) return info;
+        } catch { /* transient — keep polling */ }
+      }
+      // Phase 3: order state is still indeterminate after cancel + 15 s polling.
+      // Throw so the caller records a failure and halts; never assume a fill
+      // volume or auto-unwind based on an unknown state.
+      throw new Error(`Kraken order ${txid} status indeterminate after cancel attempt — manual reconciliation required. Do NOT retry automatically.`);
+    };
+
+    try {
+      // ── Buy leg ────────────────────────────────────────────────────────────
+      if (buyExchange === "Kraken") {
+        const r = await krakenRawMarketOrder(kCreds, "buy", plannedVolume, krakenRaw);
+        buyOrderId = r.txid[0] ?? "";
+        if (!buyOrderId) throw new Error("Kraken buy not accepted (no txid).");
+        anyAccepted = true;
+        const fill = await waitKrakenFill(buyOrderId);
+        filledVolume = fill.volExec;
+        buySpendUsd  = fill.cost + fill.fee;
+        if (fill.status !== "closed" || filledVolume <= 0) {
+          if (filledVolume > 0) await tryUnwindMarket(kCreds, "sell", filledVolume, krakenRaw, `unwind partial inv-buy ${sym}`, log);
+          throw new Error(`Kraken buy did not fill (${fill.status}, ${filledVolume.toFixed(8)}/${plannedVolume.toFixed(8)}); unwound.`);
+        }
+      } else {
+        const r = await coinbaseMarketOrder(cbCreds, "BUY", plannedVolume, buyPrice, pair);
+        buyOrderId = r.orderId ?? "";
+        if (!buyOrderId || r.success === false) throw new Error("Coinbase buy rejected.");
+        anyAccepted = true;
+        const d = await waitCoinbaseFill(buyOrderId);
+        filledVolume = d.filledSize;
+        buySpendUsd  = d.filledValue + d.totalFees;
+        if (d.status !== "FILLED") {
+          if (filledVolume > 0) {
+            try { await coinbaseMarketOrder(cbCreds, "SELL", filledVolume, buyPrice, pair); } catch (e) {
+              log.error(`Coinbase partial-buy unwind failed (${filledVolume.toFixed(8)} ${sym}): ${(e as Error).message}`);
+            }
+          }
+          throw new Error(`Coinbase buy ended ${d.status} with ${filledVolume.toFixed(8)} filled; unwound.`);
+        }
+      }
+
+      // ── Sell leg (sell ACTUAL filled volume) ───────────────────────────────
+      try {
+        if (sellExchange === "Kraken") {
+          const r = await krakenRawMarketOrder(kCreds, "sell", filledVolume, krakenRaw);
+          sellOrderId = r.txid[0] ?? "";
+          if (!sellOrderId) throw new Error("Kraken sell not accepted.");
+          const fill = await waitKrakenFill(sellOrderId);
+          sellProceedsUsd = fill.cost - fill.fee;
+          if (fill.status !== "closed" || fill.volExec < filledVolume * 0.999) {
+            const residual = Math.max(0, filledVolume - fill.volExec);
+            throw new ResidualError(`Kraken sell did not fully fill (${fill.volExec.toFixed(8)}/${filledVolume.toFixed(8)}).`, residual);
+          }
+        } else {
+          const r = await coinbaseMarketOrder(cbCreds, "SELL", filledVolume, sellPrice, pair);
+          sellOrderId = r.orderId ?? "";
+          if (!sellOrderId || r.success === false) throw new Error("Coinbase sell rejected.");
+          const d = await waitCoinbaseFill(sellOrderId);
+          sellProceedsUsd = d.filledValue - d.totalFees;
+          if (d.status !== "FILLED") {
+            const residual = Math.max(0, filledVolume - d.filledSize);
+            throw new ResidualError(`Coinbase sell ended ${d.status} (${d.filledSize.toFixed(8)} sold).`, residual);
+          }
+        }
+      } catch (sellErr) {
+        const residual = sellErr instanceof ResidualError ? sellErr.residual : filledVolume;
+        if (residual > 0) {
+          if (buyExchange === "Kraken") {
+            await tryUnwindMarket(kCreds, "sell", residual, krakenRaw, `inv sell-fail unwind ${sym}`, log);
+          } else {
+            try { await coinbaseMarketOrder(cbCreds, "SELL", residual, buyPrice, pair); }
+            catch (e) { log.error(`Coinbase sell-fail unwind failed (${residual.toFixed(8)} ${sym}): ${(e as Error).message}`); }
+          }
+        }
+        throw new Error(`Sell leg failed: ${(sellErr as Error).message} Residual ${residual.toFixed(8)} unwound.`);
+      }
+    } catch (execErr) {
+      const msg = (execErr as Error).message;
+      if (anyAccepted) {
+        try {
+          await db.insert(tradesTable).values({
+            pair: `INV:${sym} ${buyExchange}→${sellExchange} [FAILED]`,
+            buyExchange: buyExchange.toLowerCase(), sellExchange: sellExchange.toLowerCase(),
+            volume: filledVolume.toFixed(8), estimatedProfitUsd: "0", netEdgePct: "0",
+            isDryRun: false, krakenPrice: "0", coinbasePrice: "0",
+            buyOrderId: buyOrderId || null, sellOrderId: sellOrderId || null,
+          });
+        } catch { /* best effort */ }
+      }
+      req.log.error({ sym, pair, buyOrderId, sellOrderId, filledVolume, err: msg }, "Inventory execute LIVE — failed");
+      res.json({
+        success: false, isDryRun: false, executed: anyAccepted,
+        asset: sym, pair, buyExchange, sellExchange,
+        volume: filledVolume || null, buyPrice, sellPrice,
+        grossSpreadPct, netSpreadPct, estimatedNetProfitUsd,
+        buyOrderId: buyOrderId || null, sellOrderId: sellOrderId || null,
+        error: msg,
+      });
+      return;
+    }
+
+    const realizedProfitUsd = buySpendUsd > 0 && sellProceedsUsd > 0 ? sellProceedsUsd - buySpendUsd : estimatedNetProfitUsd;
+    await db.insert(tradesTable).values({
+      pair: `INV:${sym} ${buyExchange}→${sellExchange}`,
+      buyExchange: buyExchange.toLowerCase(), sellExchange: sellExchange.toLowerCase(),
+      volume: filledVolume.toFixed(8),
+      estimatedProfitUsd: realizedProfitUsd.toFixed(6),
+      netEdgePct: (filledVolume > 0 && buySpendUsd > 0 ? (realizedProfitUsd / buySpendUsd) * 100 : netSpreadPct).toFixed(4),
+      isDryRun: false, krakenPrice: "0", coinbasePrice: "0",
+      buyOrderId: buyOrderId || null, sellOrderId: sellOrderId || null,
+    });
+    await snapshotAccountValue({ krakenKey, krakenSecret, coinbaseKey, coinbaseSecret }, "post_trade", req.log);
+    req.log.info({ sym, pair, tradeSizeUsd, filledVolume, buyOrderId, sellOrderId, realizedProfitUsd }, "Inventory execute LIVE — both legs confirmed");
+    res.json({
+      success: true, isDryRun: false, executed: true,
+      asset: sym, pair, buyExchange, sellExchange,
+      volume: filledVolume, buyPrice, sellPrice,
+      grossSpreadPct, netSpreadPct, estimatedNetProfitUsd,
+      realizedProfitUsd, buyOrderId, sellOrderId, error: null,
+    });
+  } catch (err) {
+    req.log.error({ err }, "inventory-execute error");
+    res.status(500).json({ error: (err as Error).message });
+  } finally {
+    if (ownsLiveLock) liveExecLockHeld = false;
+  }
 });
 
 // ── GET /arb/cointegration ─────────────────────────────────────────────────────

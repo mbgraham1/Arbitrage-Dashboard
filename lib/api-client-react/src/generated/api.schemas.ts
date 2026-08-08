@@ -738,3 +738,90 @@ export const GetGraphScanExecutionStyle = {
   maker: 'maker',
 } as const;
 
+export interface InventoryOpportunity {
+  asset: string;
+  pair: string;
+  krakenBid: number;
+  krakenAsk: number;
+  coinbaseBid: number;
+  coinbaseAsk: number;
+  grossSpreadPct: number;
+  netSpreadPct: number;
+  buyExchange: string;
+  sellExchange: string;
+  buyPrice: number;
+  sellPrice: number;
+  tradeSizeUsd: number;
+  estimatedNetProfitUsd: number;
+  /** True when gross spread > 2× fees */
+  meetsThreshold: boolean;
+  scannedAt: string;
+}
+
+export interface InventoryExecuteRequest {
+  krakenKey: string;
+  krakenSecret: string;
+  coinbaseKey: string;
+  coinbaseSecret: string;
+  /** Asset symbol, e.g. BTC */
+  asset?: string;
+  tradeSizeUsd?: number;
+  minProfitUsd?: number;
+  krakenFeesPct?: number;
+  coinbaseFeesPct?: number;
+  isDryRun?: boolean;
+}
+
+export const InventoryRebalanceAlertLevel = { info: 'info', warning: 'warning', critical: 'critical' } as const;
+
+export interface InventoryScanResult {
+  opportunities: InventoryOpportunity[];
+  rebalanceAlerts: InventoryRebalanceAlert[];
+  scannedAt: string;
+}
+
+export type InventoryRebalanceAlertLevel = typeof InventoryRebalanceAlertLevel[keyof typeof InventoryRebalanceAlertLevel];
+
+export interface InventoryRebalanceAlert {
+  asset: string;
+  exchange: string;
+  krakenPct: number;
+  coinbasePct: number;
+  targetPct: number;
+  alertLevel: InventoryRebalanceAlertLevel;
+  message: string;
+}
+
+export interface InventoryExecuteResult {
+  success: boolean;
+  isDryRun: boolean;
+  executed: boolean;
+  asset: string;
+  pair: string;
+  buyExchange: string;
+  sellExchange: string;
+  volume?: number | null;
+  buyPrice: number;
+  sellPrice: number;
+  grossSpreadPct: number;
+  netSpreadPct: number;
+  estimatedNetProfitUsd: number;
+  realizedProfitUsd?: number | null;
+  buyOrderId?: string | null;
+  sellOrderId?: string | null;
+  error?: string | null;
+}
+
+export type GetInventoryScanParams = {
+  /** Comma-separated assets to scan (default "BTC,ETH,SOL") */
+  assets?: string;
+  krakenFeesPct?: number;
+  coinbaseFeesPct?: number;
+  tradeSizeUsd?: number;
+  /** Target % to hold on each exchange (default 50) */
+  targetPct?: number;
+  krakenKey?: string;
+  krakenSecret?: string;
+  coinbaseKey?: string;
+  coinbaseSecret?: string;
+};

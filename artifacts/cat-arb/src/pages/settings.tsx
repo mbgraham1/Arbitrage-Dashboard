@@ -5,8 +5,10 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { useBotContext, ALL_PAIRS } from "@/store/bot-context";
-import { Settings2, KeySquare, SlidersHorizontal, ShieldAlert, CheckCircle2, XCircle, Lock, Layers, BookOpen } from "lucide-react";
+import { Settings2, KeySquare, SlidersHorizontal, ShieldAlert, CheckCircle2, XCircle, Lock, Layers, BookOpen, Repeat2 } from "lucide-react";
 import { useTestKraken, useTestCoinbase } from "@workspace/api-client-react";
+
+const INVENTORY_ASSETS = ["BTC", "ETH", "SOL", "AVAX", "DOT"] as const;
 
 export default function Settings() {
   const { credentials, setCredentials, settings, setSettings, liveMode, setLiveMode, isRunning, secretsLoaded } = useBotContext();
@@ -438,6 +440,101 @@ export default function Settings() {
 
             <Button className="w-full mt-2" onClick={handleSaveSettings} data-testid="button-save-ob-settings">
               SAVE OB HUNTER SETTINGS
+            </Button>
+          </CardContent>
+        </Card>
+
+        {/* Inventory Mode */}
+        <Card className="md:col-span-2">
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2">
+              <Repeat2 className="h-5 w-5" /> Inventory Mode
+            </CardTitle>
+            <CardDescription>
+              Hold balances on both Kraken and Coinbase simultaneously. When an asset is cheaper on one venue, buy there and sell from your existing inventory on the other — no transfer needed. The scanner shows an "Inventory Opportunity" card on the dashboard when spread exceeds 2× fees.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="flex flex-col gap-6">
+            <div className="flex items-center justify-between border-2 border-border p-4">
+              <div className="flex flex-col gap-1">
+                <span className="font-bold text-sm uppercase">Enable Inventory Mode</span>
+                <span className="text-xs font-mono text-muted-foreground">Show inventory opportunities on the dashboard and allow execution</span>
+              </div>
+              <Switch
+                checked={localSettings.inventoryModeEnabled ?? false}
+                onCheckedChange={(checked) => setLocalSettings({ ...localSettings, inventoryModeEnabled: checked })}
+                data-testid="switch-inventory-mode"
+              />
+            </div>
+
+            <div className="space-y-3">
+              <div className="flex flex-col gap-1">
+                <Label>Target % per Exchange</Label>
+                <span className="text-xs text-muted-foreground font-mono">
+                  Ideal split of each asset between Kraken and Coinbase (default 50% each). A rebalance alert fires when one side drops below 20% of this target.
+                </span>
+              </div>
+              <Input
+                type="number"
+                step="5"
+                min="10"
+                max="90"
+                data-testid="input-inventory-target-pct"
+                value={localSettings.inventoryTargetPct ?? 50}
+                onChange={(e) => setLocalSettings({ ...localSettings, inventoryTargetPct: parseFloat(e.target.value) || 50 })}
+              />
+            </div>
+
+            <div className="space-y-3">
+              <div className="flex flex-col gap-1">
+                <Label>Trade Size (USD)</Label>
+                <span className="text-xs text-muted-foreground font-mono">Dollar amount per inventory arb execution (default $10)</span>
+              </div>
+              <Input
+                type="number"
+                step="5"
+                min="1"
+                data-testid="input-inventory-trade-size"
+                value={localSettings.inventoryTradeSizeUsd ?? 10}
+                onChange={(e) => setLocalSettings({ ...localSettings, inventoryTradeSizeUsd: parseFloat(e.target.value) || 10 })}
+              />
+            </div>
+
+            <div className="space-y-3">
+              <Label>Watched Assets</Label>
+              <span className="text-xs text-muted-foreground font-mono">Enable assets to monitor for inventory opportunities</span>
+              <div className="grid grid-cols-3 sm:grid-cols-5 gap-3 mt-2">
+                {INVENTORY_ASSETS.map((asset) => {
+                  const currentAssets: string[] = localSettings.inventoryAssets ?? ["BTC", "ETH", "SOL"];
+                  const enabled = currentAssets.includes(asset);
+                  const isLast = currentAssets.length === 1 && enabled;
+                  return (
+                    <div
+                      key={asset}
+                      className={`flex items-center justify-between gap-2 border-2 px-3 py-2 ${
+                        enabled ? "border-primary/60 bg-primary/5" : "border-border bg-muted/30"
+                      }`}
+                    >
+                      <span className="font-bold font-mono text-sm">{asset}</span>
+                      <Switch
+                        checked={enabled}
+                        disabled={isLast}
+                        title={isLast ? "At least one asset must be enabled" : undefined}
+                        onCheckedChange={(checked) => {
+                          const next = checked
+                            ? [...currentAssets, asset]
+                            : currentAssets.filter(a => a !== asset);
+                          setLocalSettings({ ...localSettings, inventoryAssets: next });
+                        }}
+                      />
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+
+            <Button className="w-full mt-2" onClick={handleSaveSettings} data-testid="button-save-inventory">
+              SAVE INVENTORY SETTINGS
             </Button>
           </CardContent>
         </Card>

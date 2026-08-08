@@ -579,6 +579,74 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
 
+  /arb/inventory-scan:
+    get:
+      operationId: getInventoryScan
+      tags: [trades]
+      summary: Scan live bid/ask across Kraken and Coinbase for inventory arb opportunities
+      description: >
+        Fetches live best-bid/best-ask for each requested asset from both venues,
+        computes gross and net spread (after per-leg fees), and flags any asset
+        whose net spread exceeds 2× total fees. When credentials are supplied the
+        response also includes rebalance alerts when one-side inventory drops
+        below 20% of the target allocation.
+      parameters:
+        - { name: assets,          in: query, schema: { type: string, default: "BTC,ETH,SOL" }, description: "Comma-separated asset symbols" }
+        - { name: krakenFeesPct,   in: query, schema: { type: number, default: 0.16 } }
+        - { name: coinbaseFeesPct, in: query, schema: { type: number, default: 0.4 } }
+        - { name: tradeSizeUsd,    in: query, schema: { type: number, default: 10 } }
+        - { name: targetPct,       in: query, schema: { type: number, default: 50 }, description: "Target % of asset to hold on each exchange (0–100)" }
+      responses:
+        "200":
+          description: Inventory scan result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InventoryScanResult"
+        "500":
+          description: Scan error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /arb/inventory-execute:
+    post:
+      operationId: inventoryExecute
+      tags: [trades]
+      summary: Execute an inventory arb — buy on cheap venue, sell on expensive venue
+      description: >
+        Re-fetches live prices (pre-flight), confirms the spread still exceeds the
+        minimum profit threshold, then places a buy on the cheaper exchange and a
+        sell on the more expensive one using existing inventory. Acquires the
+        process-wide live execution lock so it cannot run concurrently with graph
+        or OB execute. Records the result to the trade ledger.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/InventoryExecuteRequest"
+      responses:
+        "200":
+          description: Execution result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InventoryExecuteResult"
+        "400":
+          description: Bad request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          description: Execution error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
   /trades/summary:
     get:
       operationId: getTradeSummary
@@ -1220,6 +1288,88 @@ components:
         assetsScanned: { type: integer }
         routesEvaluated: { type: integer }
         scannedAt: { type: string, format: date-time }
+
+    InventoryOpportunity:
+      type: object
+      required: [asset, pair, krakenBid, krakenAsk, coinbaseBid, coinbaseAsk, grossSpreadPct, netSpreadPct, buyExchange, sellExchange, buyPrice, sellPrice, tradeSizeUsd, estimatedNetProfitUsd, meetsThreshold, scannedAt]
+      properties:
+        asset: { type: string, description: "Asset symbol, e.g. BTC" }
+        pair: { type: string, description: "Canonical pair, e.g. BTC/USD" }
+        krakenBid: { type: number }
+        krakenAsk: { type: number }
+        coinbaseBid: { type: number }
+        coinbaseAsk: { type: number }
+        grossSpreadPct: { type: number, description: "Gross cross-exchange spread %" }
+        netSpreadPct: { type: number, description: "Net spread after fees" }
+        buyExchange: { type: string }
+        sellExchange: { type: string }
+        buyPrice: { type: number }
+        sellPrice: { type: number }
+        tradeSizeUsd: { type: number }
+        estimatedNetProfitUsd: { type: number }
+        meetsThreshold: { type: boolean, description: "True when gross spread > 2x fees" }
+        scannedAt: { type: string }
+
+    InventoryRebalanceAlert:
+      type: object
+      required: [asset, exchange, krakenPct, coinbasePct, targetPct, alertLevel, message]
+      properties:
+        asset: { type: string }
+        exchange: { type: string }
+        krakenPct: { type: number, description: "Current % of total held on Kraken" }
+        coinbasePct: { type: number, description: "Current % of total held on Coinbase" }
+        targetPct: { type: number, description: "Target % per exchange" }
+        alertLevel: { type: string, enum: [info, warning, critical] }
+        message: { type: string }
+
+    InventoryScanResult:
+      type: object
+      required: [opportunities, rebalanceAlerts, scannedAt]
+      properties:
+        opportunities:
+          type: array
+          items: { $ref: "#/components/schemas/InventoryOpportunity" }
+        rebalanceAlerts:
+          type: array
+          items: { $ref: "#/components/schemas/InventoryRebalanceAlert" }
+        scannedAt: { type: string }
+
+    InventoryExecuteRequest:
+      type: object
+      required: [krakenKey, krakenSecret, coinbaseKey, coinbaseSecret]
+      properties:
+        krakenKey: { type: string }
+        krakenSecret: { type: string }
+        coinbaseKey: { type: string }
+        coinbaseSecret: { type: string }
+        asset: { type: string, description: "Asset to trade, e.g. BTC", default: "BTC" }
+        tradeSizeUsd: { type: number, default: 10 }
+        minProfitUsd: { type: number, default: 0.01 }
+        krakenFeesPct: { type: number, default: 0.16 }
+        coinbaseFeesPct: { type: number, default: 0.40 }
+        isDryRun: { type: boolean, default: true }
+
+    InventoryExecuteResult:
+      type: object
+      required: [success, isDryRun, executed, asset, pair, buyExchange, sellExchange, grossSpreadPct, netSpreadPct, estimatedNetProfitUsd]
+      properties:
+        success: { type: boolean }
+        isDryRun: { type: boolean }
+        executed: { type: boolean }
+        asset: { type: string }
+        pair: { type: string }
+        buyExchange: { type: string }
+        sellExchange: { type: string }
+        volume: { type: number, nullable: true }
+        buyPrice: { type: number }
+        sellPrice: { type: number }
+        grossSpreadPct: { type: number }
+        netSpreadPct: { type: number }
+        estimatedNetProfitUsd: { type: number }
+        realizedProfitUsd: { type: number, nullable: true }
+        buyOrderId: { type: string, nullable: true }
+        sellOrderId: { type: string, nullable: true }
+        error: { type: string, nullable: true }
 
     GraphExecuteRequest:
       type: object
