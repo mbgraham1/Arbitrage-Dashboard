@@ -6,6 +6,7 @@
  * OpenAPI spec version: 0.1.0
  */
 import type { TriangularOpportunity } from './triangularOpportunity';
+import type { TriangularScanResultBtcTriStatus } from './triangularScanResultBtcTriStatus';
 import type { TriangularScanResultPrices } from './triangularScanResultPrices';
 import type { TriangularScanResultPriceSource } from './triangularScanResultPriceSource';
 
@@ -15,5 +16,7 @@ export interface TriangularScanResult {
   prices: TriangularScanResultPrices;
   /** Price source per exchange: 'direct' if live ETH/SOL market data is available, 'synthetic' if cross-rate is used */
   priceSource?: TriangularScanResultPriceSource;
+  /** Availability of Kraken BTC triangular loops. available=false only when the SOL/BTC (SOLXBT) market is confirmed unlisted on Kraken; reason carries the trader-facing explanation. */
+  btcTriStatus?: TriangularScanResultBtcTriStatus;
   scannedAt: string;
 }

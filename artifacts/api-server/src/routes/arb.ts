@@ -195,6 +195,46 @@ function computeBtcTriLoops(
   return result;
 }
 
+// ── SOL/BTC (SOLXBT) listing status ───────────────────────────────────────────
+// Cached REST probe used by the triangular scan when the WS-fed BTC tri price
+// cache is empty. It distinguishes "SOL/BTC is unlisted on Kraken" (the
+// dashboard shows a persistent banner and BTC loops are paused) from a merely
+// stale/warming cache. The execute path also writes this cache so a 503 there
+// surfaces on the very next scan without waiting for a fresh probe.
+const SOL_BTC_UNAVAILABLE_MSG = "SOL/BTC direct market unavailable on Kraken — BTC triangular loops cannot execute";
+const SOL_BTC_CHECK_TTL_MS = 60_000;
+let solBtcCheckCache: { at: number; listed: boolean } | null = null;
+
+function recordSolBtcListing(listed: boolean): void {
+  solBtcCheckCache = { at: Date.now(), listed };
+}
+
+/** Returns true/false when the listing state is known, null when the probe is
+ *  inconclusive (network/API failure) — never flag "unlisted" on a guess. */
+async function checkSolBtcListed(): Promise<boolean | null> {
+  const now = Date.now();
+  if (solBtcCheckCache && now - solBtcCheckCache.at < SOL_BTC_CHECK_TTL_MS) return solBtcCheckCache.listed;
+  try {
+    const r = await fetch("https://api.kraken.com/0/public/Ticker?pair=SOLXBT", {
+      signal: AbortSignal.timeout(5_000),
+    });
+    const data = await r.json() as { error?: string[]; result?: Record<string, unknown> };
+    if (data.result && Object.keys(data.result).some(k => k.startsWith("SOL") && k.includes("XBT"))) {
+      recordSolBtcListing(true);
+      return true;
+    }
+    // Kraken reports an unlisted pair as EQuery:Unknown asset pair — that is a
+    // definitive "not listed". Any other empty/failed response is inconclusive.
+    if ((data.error ?? []).some(e => /unknown asset pair/i.test(e))) {
+      recordSolBtcListing(false);
+      return false;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 const router: IRouter = Router();
 
 // ── GET /prices/all-pairs — cache snapshot, no REST fallbacks ─────────────────
@@ -3058,10 +3098,20 @@ router.get("/arb/triangular", async (_req, res): Promise<void> => {
 
     // BTC triangular loops (v13 Python port — Kraken SOLXBT market)
     const btcPrices = getBtcTriPrices();
+    let btcTriStatus: { available: boolean; reason: string | null } = { available: true, reason: null };
     if (btcPrices) {
       const { solBid, solAsk, btcBid, btcAsk, solBtcBid, solBtcAsk } = btcPrices;
       prices.krakenBtc = { solBid, solAsk, btcBid, btcAsk, solBtcBid, solBtcAsk };
       opportunities.push(...computeBtcTriLoops(solBid, solAsk, btcBid, btcAsk, solBtcBid, solBtcAsk));
+      recordSolBtcListing(true); // live WS prices imply the market is listed
+    } else {
+      // WS cache empty/stale — probe whether SOL/BTC is actually unlisted so
+      // the dashboard can show a persistent "BTC loops paused" banner. An
+      // inconclusive probe never flags unavailability.
+      const listed = await checkSolBtcListed();
+      if (listed === false) {
+        btcTriStatus = { available: false, reason: SOL_BTC_UNAVAILABLE_MSG };
+      }
     }
 
     // Sort all opportunities by profitPct descending
@@ -3085,7 +3135,7 @@ router.get("/arb/triangular", async (_req, res): Promise<void> => {
         .catch(() => {});
     }
 
-    res.json({ opportunities, prices, priceSource, scannedAt: new Date().toISOString() });
+    res.json({ opportunities, prices, priceSource, btcTriStatus, scannedAt: new Date().toISOString() });
   } catch (err) {
     res.status(500).json({ error: (err as Error).message });
   }
@@ -3266,9 +3316,11 @@ router.post("/arb/execute-triangular", async (req, res): Promise<void> => {
         }
         if (!solBtcKey) {
           req.log.warn({ btcKey, solKey }, "SOL/BTC (SOLXBT) market absent from Kraken REST response — BTC triangular loop cannot price its cross leg");
-          res.status(503).json({ error: "SOL/BTC direct market unavailable on Kraken — BTC triangular loops cannot execute" });
+          recordSolBtcListing(false); // surface on the next scan's status banner immediately
+          res.status(503).json({ error: SOL_BTC_UNAVAILABLE_MSG });
           return;
         }
+        recordSolBtcListing(true);
         btcPrices = {
           btcBid:    parseFloat(res_[btcKey].b[0]),    btcAsk:    parseFloat(res_[btcKey].a[0]),
           solBid:    parseFloat(res_[solKey].b[0]),     solAsk:    parseFloat(res_[solKey].a[0]),

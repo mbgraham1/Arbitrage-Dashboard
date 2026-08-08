@@ -163,7 +163,7 @@ export default function Dashboard() {
     isExecutingTriangular,
     emergencyStop, setEmergencyStop,
     startTime, failedTrades, sessionTradeCount, apiLatencyMs,
-    triOpportunities, triPriceSource,
+    triOpportunities, triPriceSource, btcTriStatus,
     isAutoExecutingOb, isExecutingCross,
     forceFeeModel,
   } = useBotContext();
@@ -708,6 +708,7 @@ export default function Dashboard() {
             isRunning={isRunning}
             isExecutingTri={isExecutingTriangular}
             priceSource={triPriceSource}
+            btcTriStatus={btcTriStatus}
             blockedBy={isAutoExecutingOb ? "OB" : isExecutingCross ? "CROSS" : null}
           />
         </div>
@@ -1589,12 +1590,15 @@ function TriangularCard({
   isRunning,
   isExecutingTri,
   priceSource,
+  btcTriStatus,
   blockedBy,
 }: {
   opportunities: Array<{ exchange: string; loop: string; profitPct: number; solUsd: number; ethUsd: number; ethSol: number; variant?: string; timestamp: string }>;
   isRunning: boolean;
   isExecutingTri?: boolean;
   priceSource?: Record<string, "direct" | "synthetic">;
+  /** BTC loop availability — available=false when SOL/BTC is unlisted on Kraken */
+  btcTriStatus?: { available: boolean; reason: string | null } | null;
   /** Which other executor is holding the shared lock, blocking TRI auto-fires */
   blockedBy?: "OB" | "CROSS" | null;
 }) {
@@ -1685,6 +1689,21 @@ function TriangularCard({
         )}
       </CardHeader>
       <CardContent className="p-0">
+        {btcTriStatus && !btcTriStatus.available && (
+          <div
+            className="flex items-start gap-2 px-3 py-2 border-b border-yellow-500/50 bg-yellow-500/10"
+            data-testid="banner-btc-tri-paused"
+          >
+            <span className="text-[9px] font-mono font-bold px-1 mt-0.5 shrink-0 border border-yellow-500 text-yellow-600">
+              BTC LOOPS PAUSED
+            </span>
+            <span className="text-xs font-mono text-yellow-600">
+              {btcTriStatus.reason ??
+                "SOL/BTC direct market unavailable on Kraken — BTC triangular loops cannot execute"}
+              {" "}This notice clears automatically once the market is listed again.
+            </span>
+          </div>
+        )}
         {opportunities.length === 0 ? (
           <div className="p-6 text-center text-sm font-mono text-muted-foreground">
             {isRunning

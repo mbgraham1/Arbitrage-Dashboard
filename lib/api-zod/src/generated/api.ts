@@ -340,6 +340,10 @@ export const ScanTriangularArbResponse = zod.object({
 })),
   "prices": zod.record(zod.string(), zod.unknown()).describe('Raw prices used in this scan'),
   "priceSource": zod.record(zod.string(), zod.enum(['direct', 'synthetic'])).optional().describe('Price source per exchange: \'direct\' if live ETH\/SOL market data is available, \'synthetic\' if cross-rate is used'),
+  "btcTriStatus": zod.object({
+  "available": zod.boolean(),
+  "reason": zod.string().nullish()
+}).optional().describe('Availability of Kraken BTC triangular loops. available=false only when the SOL\/BTC (SOLXBT) market is confirmed unlisted on Kraken; reason carries the trader-facing explanation.'),
   "scannedAt": zod.string()
 })
 

@@ -3254,6 +3254,16 @@ components:
           additionalProperties:
             type: string
             enum: [direct, synthetic]
+        btcTriStatus:
+          type: object
+          description: "Availability of Kraken BTC triangular loops. available=false only when the SOL/BTC (SOLXBT) market is confirmed unlisted on Kraken; reason carries the trader-facing explanation."
+          required: [available]
+          properties:
+            available:
+              type: boolean
+            reason:
+              type: string
+              nullable: true
         scannedAt:
           type: string
 

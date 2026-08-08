@@ -1818,12 +1818,22 @@ export type TriangularScanResultPrices = { [key: string]: unknown };
  */
 export type TriangularScanResultPriceSource = {[key: string]: 'direct' | 'synthetic'};
 
+/**
+ * Availability of Kraken BTC triangular loops. available=false only when the SOL/BTC (SOLXBT) market is confirmed unlisted on Kraken; reason carries the trader-facing explanation.
+ */
+export type TriangularScanResultBtcTriStatus = {
+  available: boolean;
+  reason?: string | null;
+};
+
 export interface TriangularScanResult {
   opportunities: TriangularOpportunity[];
   /** Raw prices used in this scan */
   prices: TriangularScanResultPrices;
   /** Price source per exchange: 'direct' if live ETH/SOL market data is available, 'synthetic' if cross-rate is used */
   priceSource?: TriangularScanResultPriceSource;
+  /** Availability of Kraken BTC triangular loops. available=false only when the SOL/BTC (SOLXBT) market is confirmed unlisted on Kraken; reason carries the trader-facing explanation. */
+  btcTriStatus?: TriangularScanResultBtcTriStatus;
   scannedAt: string;
 }
 

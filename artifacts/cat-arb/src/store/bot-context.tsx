@@ -140,6 +140,11 @@ export interface BotContextType {
    * "direct" = live Kraken ETHSOL WS market; "synthetic" = computed cross rate.
    */
   triPriceSource: Record<string, "direct" | "synthetic">;
+  /**
+   * Availability of Kraken BTC triangular loops from the latest scan.
+   * available=false only when SOL/BTC (SOLXBT) is confirmed unlisted on Kraken.
+   */
+  btcTriStatus: { available: boolean; reason: string | null } | null;
   /** Latest cointegration mean-reversion signals from the Kalman filter scan */
   cointSignals: CointegrationSignal[];
   /** Latest OB scan cycles from the Order Book Hunter */
@@ -284,6 +289,7 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
   const [isAutoExecutingTri, setIsAutoExecutingTri] = useState(false);
   const [triOpportunities, setTriOpportunities] = useState<TriangularOpportunity[]>([]);
   const [triPriceSource, setTriPriceSource] = useState<Record<string, "direct" | "synthetic">>({});
+  const [btcTriStatus, setBtcTriStatus] = useState<{ available: boolean; reason: string | null } | null>(null);
   const [cointSignals, setCointSignals] = useState<CointegrationSignal[]>([]);
   const [isAutoExecutingOb, setIsAutoExecutingOb] = useState(false);
   // Mirrors isExecutingRef for the auto cross-exchange executor so the UI can
@@ -377,6 +383,12 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
     const opps = triScan.data.opportunities;
     setTriOpportunities(opps);
     if (triScan.data.priceSource) setTriPriceSource(triScan.data.priceSource);
+    if (triScan.data.btcTriStatus) {
+      setBtcTriStatus({
+        available: triScan.data.btcTriStatus.available,
+        reason: triScan.data.btcTriStatus.reason ?? null,
+      });
+    }
     if (opps.length > 0) {
       for (const opp of opps) {
         const variant = opp.variant === "btc" ? "BTC" : "ETH";
@@ -1068,6 +1080,7 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
     isExecutingTriangular,
     triOpportunities,
     triPriceSource,
+    btcTriStatus,
     cointSignals,
     obCycles,
     isAutoExecutingOb,
