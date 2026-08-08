@@ -45,6 +45,7 @@ import { OB_ASSETS, OB_USD_PAIRS } from "../lib/order-book";
 import {
   krakenPrivateRequest, krakenRawIocLimitOrder, krakenOrderInfo, getCoinbaseAssetDetail,
   coinbaseIocLimitOrder, coinbaseOrderDetails, getCoinbaseProductIncrements, quantizeDown,
+  krakenPairMeta, KrakenPrecisionError,
   PAIRS, type Pair,
 } from "../lib/exchange";
 import { geminiRoles, type GeminiCreds } from "../lib/gemini";
@@ -80,6 +81,82 @@ function rolling24hSpendUsd(): number {
 }
 function recordSpend(usd: number): void { durable.spendLedger.push({ at: new Date().toISOString(), usd }); saveState(); }
 function setLatch(why: string): void { durable.latch = `${new Date().toISOString()} ${why}`; saveState(); }
+
+/** Error signatures thrown by OUR OWN client-side preflight validators BEFORE
+ * any network request is made. When one of these appears in a latch reason,
+ * it is PROVEN that no order was ever transmitted to the venue — the throw
+ * happens while normalizing request parameters, before the HTTP call. */
+// Deliberately NARROW: only the exact message shapes our own validators emit
+// (normalizeKrakenVolume / krakenPairMeta / quantizeDecimals) — never a shape
+// a venue could plausibly echo back about an order it actually created.
+const CLIENT_PREFLIGHT_REJECTION = /Volume \S+ below Kraken minimum \S+ for \S+|refusing to submit an unvalidated order|Cannot quantize non-positive value|Value \S+ rounds to zero at \d+ decimals/;
+
+/** Deterministic venue-side validation rejections: the venue explicitly
+ * refused to CREATE the order. NOT ACCEPTED / NO ORDER CREATED — never an
+ * ambiguous state, must never set the reconciliation latch. */
+function isDeterministicRejection(e: unknown): boolean {
+  if (e instanceof KrakenPrecisionError) return true;
+  const m = e instanceof Error ? e.message : String(e);
+  if (CLIENT_PREFLIGHT_REJECTION.test(m)) return true;
+  return /EOrder:Order minimum not met|EOrder:Cost minimum not met|EOrder:Volume minimum not met|EGeneral:Invalid arguments|EOrder:Invalid price|EOrder:Invalid order|EOrder:Unknown pair|InvalidQuantity|Coinbase IOC order rejected/i.test(m);
+}
+
+/** One-time recovery for latches wrongly set by client-side preflight errors
+ * (e.g. the BONK "Volume … below Kraken minimum 1200000" latch): those throws
+ * occur BEFORE the HTTP request is built, so no order was ever created.
+ * The worst-case spend already charged to the 24h ledger is deliberately NOT
+ * refunded (fail-safe: ledger can only over-count, never under-count). */
+function autoClearPreflightLatch(context: string): boolean {
+  if (!durable.latch || !CLIENT_PREFLIGHT_REJECTION.test(durable.latch)) return false;
+  const old = durable.latch;
+  durable.latch = null; saveState();
+  pushLog({ at: new Date().toISOString(), kind: "AUTO_CLEAR_LATCH", asset: "-", fromVenue: null, toVenue: "-", qty: 0, notionalUsd: null, feeUsd: null, status: "done", detail: `auto-cleared reconciliation latch (${context}): the recorded error is a client-side preflight rejection thrown BEFORE any API request — NO ORDER WAS CREATED. Worst-case ledger charge kept (fail-safe). Old latch: ${old}`, orderId: null });
+  return true;
+}
+
+// ── exchange minimum-order metadata (live, never assumed) ────────────────────
+
+interface VenueMins { minQty: number; minNotionalUsd: number; qtyStepText: string | null }
+
+/** Live venue order minimums. Throws when metadata cannot be verified —
+ * an order below an unverifiable minimum must never be attempted.
+ * `maxAgeMs` bounds staleness (execution demands ≤5 min; planning may use
+ * the standard 1h cache). */
+const EXEC_META_MAX_AGE_MS = 5 * 60_000;
+async function venueMins(venue: LiveVenueId, asset: string, maxAgeMs?: number): Promise<VenueMins> {
+  if (venue === "kraken") {
+    const kPair = (OB_USD_PAIRS as Record<string, string>)[asset] ?? KRAKEN_EXTRA_PAIRS[asset];
+    if (!kPair) throw new Error(`no Kraken pair mapping for ${asset}`);
+    const m = await krakenPairMeta(kPair, maxAgeMs);
+    return { minQty: m.ordermin, minNotionalUsd: m.costmin, qtyStepText: null };
+  }
+  if (venue === "coinbase") {
+    const pair = (PAIRS as readonly string[]).includes(`${asset}/USD`) ? (`${asset}/USD` as Pair) : null;
+    if (!pair) throw new Error(`Coinbase order routing not verified for ${asset}`);
+    const inc = await getCoinbaseProductIncrements(pair, maxAgeMs);
+    return { minQty: inc.baseMinSize, minNotionalUsd: inc.quoteMinNotional, qtyStepText: inc.baseIncrement };
+  }
+  const d = await geminiSymbolDetails(`${asset}USD`.toLowerCase(), maxAgeMs);
+  return { minQty: d.minOrderSize, minNotionalUsd: 0, qtyStepText: null };
+}
+
+// ── infeasible-route memo: no repeated attempts on a below-minimum route ─────
+// Key includes the observed minimum and the active per-action cap, so the memo
+// self-invalidates when either the venue's minimum or the user's caps change.
+// TTL lets a route re-qualify when market conditions move.
+
+const INFEASIBLE_TTL_MS = 10 * 60_000;
+const infeasibleMemo = new Map<string, { at: number; detail: string }>();
+function infeasibleKey(venue: string, asset: string, minQty: number, capUsd: number): string {
+  return `${venue}:${asset}:min${minQty}:cap${capUsd}`;
+}
+function memoInfeasible(key: string, detail: string): void { infeasibleMemo.set(key, { at: Date.now(), detail }); }
+function isMemoInfeasible(key: string): string | null {
+  const hit = infeasibleMemo.get(key);
+  if (!hit) return null;
+  if (Date.now() - hit.at > INFEASIBLE_TTL_MS) { infeasibleMemo.delete(key); return null; }
+  return hit.detail;
+}
 
 // ── capability probes ────────────────────────────────────────────────────────
 
@@ -231,26 +308,61 @@ async function planActions(c: Creds, vs: Record<LiveVenueId, VenueState>, caps: 
 
     // Option A: LOCAL BUY on the sell venue with USD already there
     const cap = caps.find(x => x.venue === sellV)!;
-    const wc = walkAskCost(sellV, r.asset, shortQty);
     const usdFree = (vs[sellV].usd ?? 0) - (cfg.reservesUsd[sellV] ?? 0);
+    const capUsd = Math.min(cfg.perActionCapUsd, HARD_ACTION_CAP_USD);
+
+    // EXCHANGE MINIMUM preflight on LIVE metadata — before pricing anything.
+    let mins: VenueMins | null = null; let minsErr: string | null = null;
+    try { mins = await venueMins(sellV, r.asset); } catch (e) { minsErr = (e as Error).message; }
+    if (!mins) {
+      actions.push({ ...skel, kind: "LOCAL_BUY", qty: shortQty, reason: `Exchange order-minimum metadata for ${r.asset} on ${sellV} could not be VERIFIED (${minsErr}) — refusing to plan an order that could be rejected or mis-sized.` });
+      continue;
+    }
+    // Below-minimum handling: bump to the smallest valid order ONLY if it
+    // still fits caps/affordability and stays net-positive; else skip loudly.
+    let buyQty = shortQty;
+    let bumped = false;
+    const belowMinQty = mins.minQty > 0 && shortQty < mins.minQty;
+    if (belowMinQty) { buyQty = mins.minQty; bumped = true; }
+    const memoKey = infeasibleKey(sellV, r.asset, mins.minQty, capUsd);
+    const memoHit = isMemoInfeasible(memoKey);
+    if (memoHit) {
+      actions.push({ ...skel, kind: "LOCAL_BUY", qty: shortQty, reason: `On cooldown (≤10 min): ${memoHit}` });
+      continue;
+    }
+
+    const wc = walkAskCost(sellV, r.asset, buyQty);
     if (wc) {
       const feePct = vs[sellV].takerPct / 100;
-      const notional = shortQty * wc.vwap;
-      const overhead = notional * feePct + (wc.vwap - wc.mid) * shortQty; // fee + acquisition premium vs mid
+      const notional = buyQty * wc.vwap;
+      const belowMinNotional = mins.minNotionalUsd > 0 && notional < mins.minNotionalUsd;
+      const overhead = notional * feePct + (wc.vwap - wc.mid) * buyQty; // fee + acquisition premium vs mid
       const net = g.netAfterBufferUsd - overhead;
       const affordable = usdFree >= notional * (1 + feePct);
-      const beneficial = net > 0 && cap.localBuy && affordable && notional <= Math.min(cfg.perActionCapUsd, HARD_ACTION_CAP_USD);
+      const withinDaily = rolling24hSpendUsd() + notional * IOC_PRICE_SLACK <= cfg.dailyCapUsd;
+      const beneficial = net > 0 && cap.localBuy && affordable && notional <= capUsd && !belowMinNotional && withinDaily;
+      const minUsdApprox = mins.minQty > 0 ? mins.minQty * wc.mid : mins.minNotionalUsd;
+      if (bumped && !beneficial) {
+        // Deterministically infeasible at current minimums/caps — memoize so
+        // the engine does not re-plan/re-attempt this route every tick.
+        memoInfeasible(memoKey, `BELOW EXCHANGE MINIMUM — ${sellV} requires ≥ ${fmtQty(mins.minQty)} ${r.asset} (~$${minUsdApprox.toFixed(2)}); the smallest valid order is not justified (net after overhead ${net >= 0 ? "+" : ""}$${net.toFixed(3)}, cap $${capUsd.toFixed(2)}).`);
+      }
       actions.push({
-        ...skel, kind: "LOCAL_BUY", qty: shortQty,
+        ...skel, kind: "LOCAL_BUY", qty: buyQty,
         estNotionalUsd: notional, overheadUsd: overhead, netAfterOverheadUsd: net, beneficial,
         reason: beneficial
-          ? `Buy ${fmtQty(shortQty)} ${r.asset} on ${sellV} for ~$${notional.toFixed(2)}: overhead $${overhead.toFixed(3)} (fee ${vs[sellV].takerPct}% + premium) < route net $${g.netAfterBufferUsd.toFixed(3)} → first cycle still +$${net.toFixed(3)} PROJECTED (not guaranteed). Revalidated on fresh books immediately before any order.`
+          ? `Buy ${fmtQty(buyQty)} ${r.asset} on ${sellV} for ~$${notional.toFixed(2)}${bumped ? ` (BUMPED UP from ${fmtQty(shortQty)} to the exchange minimum ${fmtQty(mins.minQty)} — still within caps and net-positive)` : ""}: overhead $${overhead.toFixed(3)} (fee ${vs[sellV].takerPct}% + premium) < route net $${g.netAfterBufferUsd.toFixed(3)} → first cycle still +$${net.toFixed(3)} PROJECTED (not guaranteed). Revalidated on fresh books immediately before any order.`
+          : bumped ? `BELOW EXCHANGE MINIMUM — route needs only ${fmtQty(shortQty)} ${r.asset} but ${sellV} requires ≥ ${fmtQty(mins.minQty)} ${r.asset} (~$${minUsdApprox.toFixed(2)}). Smallest valid order rejected because ${!cap.localBuy ? `order permission not proven` : !affordable ? `it needs $${(notional * (1 + feePct)).toFixed(2)} free USD (only $${Math.max(0, usdFree).toFixed(2)} above reserve)` : notional > capUsd ? `its $${notional.toFixed(2)} notional exceeds the per-action cap $${capUsd.toFixed(2)}` : !withinDaily ? `it would push the rolling-24h spend past the $${cfg.dailyCapUsd.toFixed(2)} daily cap ($${rolling24hSpendUsd().toFixed(2)} already used)` : belowMinNotional ? `it is still under the venue's $${mins.minNotionalUsd.toFixed(2)} minimum notional` : `net after overhead would be ${net >= 0 ? "+" : ""}$${net.toFixed(3)} — not genuinely positive`}. Route skipped (cooldown 10 min).`
           : !cap.localBuy ? `${sellV} order permission not proven (${cap.missing ?? "keys missing"}) — cannot buy there.`
+          : belowMinNotional ? `BELOW EXCHANGE MINIMUM NOTIONAL — $${notional.toFixed(2)} is under ${sellV}'s $${mins.minNotionalUsd.toFixed(2)} minimum order value.`
           : !affordable ? `Needs $${(notional * (1 + feePct)).toFixed(2)} free USD on ${sellV}; only $${Math.max(0, usdFree).toFixed(2)} above your $${(cfg.reservesUsd[sellV] ?? 0).toFixed(2)} reserve.`
-          : notional > Math.min(cfg.perActionCapUsd, HARD_ACTION_CAP_USD) ? `Notional $${notional.toFixed(2)} exceeds per-action cap $${Math.min(cfg.perActionCapUsd, HARD_ACTION_CAP_USD).toFixed(2)}.`
+          : notional > capUsd ? `Notional $${notional.toFixed(2)} exceeds per-action cap $${capUsd.toFixed(2)}.`
           : `Overhead $${overhead.toFixed(3)} ≥ route net $${g.netAfterBufferUsd.toFixed(3)} — buying here would eat the whole edge (net ${net >= 0 ? "+" : ""}$${net.toFixed(3)}).`,
       });
       if (beneficial) continue;
+    } else if (belowMinQty) {
+      // Can't even price the exchange-minimum size on current books.
+      actions.push({ ...skel, kind: "LOCAL_BUY", qty: shortQty, reason: `BELOW EXCHANGE MINIMUM — ${sellV} requires ≥ ${fmtQty(mins.minQty)} ${r.asset}, and current book depth cannot price that size. Route skipped.` });
     }
 
     // Option B: TRANSFER from Kraken (only supported source), NEVER auto-fired
@@ -344,6 +456,13 @@ async function execLocalBuy(a: PlannedAction, c: Creds, cfg: RebalanceConfig, ge
   } catch (e) { return { ...base, status: "failed", detail: `metadata fetch failed: ${(e as Error).message}`, orderId: null }; }
   if (!stillLive(gen)) return refuse("stopped while fetching metadata — no order sent");
 
+  // EXCHANGE MINIMUM metadata — fetched here (≤5 min fresh, throws otherwise);
+  // validated AFTER final pricing below so the check uses the submitted size.
+  let mins: VenueMins;
+  try { mins = await venueMins(a.venue, a.asset, EXEC_META_MAX_AGE_MS); }
+  catch (e) { return refuse(`exchange minimums could not be VERIFIED fresh (${(e as Error).message}) — refusing to submit. NO ORDER SUBMITTED.`); }
+  if (!stillLive(gen)) return refuse("stopped after minimum-metadata fetch — no order sent");
+
   // FINAL submission-boundary revalidation on a ≤2s book.
   const wc = walkAskCost(a.venue, a.asset, a.qty, EXEC_BOOK_MAX_AGE_MS);
   if (!wc) return refuse(`final check: no ${a.venue} book ≤${EXEC_BOOK_MAX_AGE_MS}ms with depth for ${fmtQty(a.qty)} ${a.asset}`);
@@ -356,6 +475,22 @@ async function execLocalBuy(a: PlannedAction, c: Creds, cfg: RebalanceConfig, ge
   if (vsNow[a.venue].usd == null || usdFree < worstNotional * (1 + feePct)) return refuse(`final check: free USD on ${a.venue} ($${Math.max(0, usdFree).toFixed(2)} above reserve) can't cover worst-case $${(worstNotional * (1 + feePct)).toFixed(2)}`);
   const overheadNow = a.qty * wc.vwap * feePct + (wc.vwap - wc.mid) * a.qty;
   if (a.routeNetUsd - overheadNow <= 0) return refuse(`final check: overhead now $${overheadNow.toFixed(3)} ≥ route net $${a.routeNetUsd.toFixed(3)} — edge gone`);
+
+  // EXCHANGE MINIMUM validation on the FINAL submitted size at FRESH prices —
+  // deterministic refusal, no order, no latch. Quantization (Kraken lot
+  // decimals / Coinbase base increment) only rounds qty DOWN, so validate the
+  // quantized quantity the venue will actually see.
+  const submitQty = a.venue === "coinbase" ? quantizeDown(a.qty, (cbIncs!).baseIncrement).value : a.qty;
+  if (mins.minQty > 0 && submitQty < mins.minQty) {
+    memoInfeasible(infeasibleKey(a.venue, a.asset, mins.minQty, capUsd), `BELOW EXCHANGE MINIMUM — ${a.venue} requires ≥ ${fmtQty(mins.minQty)} ${a.asset}.`);
+    return refuse(`BELOW EXCHANGE MINIMUM — submitted size ${fmtQty(submitQty)} ${a.asset} is under ${a.venue}'s minimum ${fmtQty(mins.minQty)} (~$${(mins.minQty * wc.mid).toFixed(2)}). NO ORDER SUBMITTED. Route on 10-min cooldown.`);
+  }
+  // Conservative notional check: the venue validates cost at the order's own
+  // qty×price; use the LOWER of expected (qty×vwap) — if even the expected
+  // notional is under the minimum, refuse.
+  if (mins.minNotionalUsd > 0 && submitQty * wc.vwap < mins.minNotionalUsd) {
+    return refuse(`BELOW EXCHANGE MINIMUM NOTIONAL — ~$${(submitQty * wc.vwap).toFixed(2)} at fresh prices is under ${a.venue}'s $${mins.minNotionalUsd.toFixed(2)} minimum order value. NO ORDER SUBMITTED.`);
+  }
   if (!stillLive(gen)) return refuse("stopped at submission boundary — no order sent");
 
   try {
@@ -419,7 +554,14 @@ async function execLocalBuy(a: PlannedAction, c: Creds, cfg: RebalanceConfig, ge
     recordSpend(info.notionalUsd || worstNotional);
     return { ...base, qty: info.filledQty, notionalUsd: info.notionalUsd || null, status: full ? "done" : "partial", detail: `filled ${fmtQty(info.filledQty)}/${fmtQty(a.qty)} ${a.asset} @ ~$${info.avgPrice}`, orderId: String(r.orderId) };
   } catch (e) {
-    // Submission threw — we cannot know whether an order reached the venue.
+    // Deterministic validation rejection (ours pre-network, or the venue's
+    // explicit refusal to create the order): NOT ACCEPTED / NO ORDER CREATED.
+    // No latch — a latch is only for genuinely unknowable order states.
+    if (isDeterministicRejection(e)) {
+      return { ...base, status: "refused", detail: `venue REJECTED the order at validation — NOT ACCEPTED, NO ORDER CREATED, no latch: ${(e as Error).message}`, orderId: null };
+    }
+    // Anything else (timeout, network drop mid-request, 5xx) — we truly
+    // cannot know whether an order reached the venue.
     latchAmbiguous(`LOCAL_BUY ${a.asset} on ${a.venue}: submission error with unknown order state: ${(e as Error).message}`, worstNotional);
     return { ...base, status: "failed", detail: `${(e as Error).message} — RECONCILE LATCH SET (worst-case charged to 24h ledger)`, orderId: null };
   }
@@ -495,6 +637,17 @@ router.post("/rebalance/arm", async (req, res): Promise<void> => {
   if (!parsed.success) { res.status(400).json({ error: parsed.error.issues[0]?.message ?? "bad body" }); return; }
   const b = parsed.data;
   if (engine?.armed) { res.status(409).json({ error: "already armed — stop first" }); return; }
+  // Safe recovery: latches recorded from client-side preflight rejections
+  // (thrown before any API request — no order existed) clear automatically.
+  // Belt-and-braces when Kraken keys are provided: confirm no open orders.
+  if (durable.latch && CLIENT_PREFLIGHT_REJECTION.test(durable.latch) && b.krakenKey && b.krakenSecret && /Kraken/i.test(durable.latch)) {
+    try {
+      const oo = await krakenPrivateRequest<{ open: Record<string, unknown> }>("/0/private/OpenOrders", {}, { krakenKey: b.krakenKey, krakenSecret: b.krakenSecret });
+      const openCount = Object.keys(oo.open ?? {}).length;
+      pushLog({ at: new Date().toISOString(), kind: "LATCH_VERIFY", asset: "-", fromVenue: null, toVenue: "-", qty: 0, notionalUsd: null, feeUsd: null, status: "done", detail: `Kraken OpenOrders checked before auto-clear: ${openCount} open order(s) on the account (none expected from this engine — its IOC orders never rest).`, orderId: null });
+    } catch { /* verification is best-effort; the preflight proof stands alone */ }
+  }
+  autoClearPreflightLatch("on arm");
   if (durable.latch) { res.status(409).json({ error: `reconciliation latch set — an earlier order's outcome is unverified. Check the venue's order history, then clear the latch explicitly. Latch: ${durable.latch}` }); return; }
   const hasAnyKeys = (b.krakenKey && b.krakenSecret) || (b.coinbaseKey && b.coinbaseSecret) || (b.geminiKey && b.geminiSecret);
   if (!hasAnyKeys) { res.status(400).json({ error: "no API keys provided — the engine cannot act without at least one venue's keys" }); return; }
@@ -527,6 +680,7 @@ router.post("/rebalance/clear-latch", (req, res): void => {
 });
 
 router.get("/rebalance/status", (_req, res): void => {
+  autoClearPreflightLatch("on status poll");
   res.json({
     armed: engine?.armed ?? false,
     pausedReason: engine?.pausedReason ?? null,

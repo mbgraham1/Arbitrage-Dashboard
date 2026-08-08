@@ -517,18 +517,18 @@ export async function getKrakenBalances(creds: KrakenCreds, fresh = false): Prom
 
 export class KrakenPrecisionError extends Error {}
 
-interface KrakenPairMeta { priceDecimals: number; lotDecimals: number; ordermin: number }
+interface KrakenPairMeta { priceDecimals: number; lotDecimals: number; ordermin: number; costmin: number }
 let pairMetaCache: { at: number; byPair: Map<string, KrakenPairMeta> } | null = null;
 let pairMetaFetch: Promise<void> | null = null;
 const PAIR_META_TTL_MS = 60 * 60 * 1_000;
 
 async function refreshPairMeta(): Promise<void> {
   const r = await fetch("https://api.kraken.com/0/public/AssetPairs", { signal: AbortSignal.timeout(10_000) });
-  const j = await r.json() as { error?: string[]; result?: Record<string, { wsname?: string; altname?: string; pair_decimals?: number; lot_decimals?: number; ordermin?: string }> };
+  const j = await r.json() as { error?: string[]; result?: Record<string, { wsname?: string; altname?: string; pair_decimals?: number; lot_decimals?: number; ordermin?: string; costmin?: string }> };
   if (j.error?.length || !j.result) throw new Error(`AssetPairs: ${j.error?.join(", ") || "empty result"}`);
   const byPair = new Map<string, KrakenPairMeta>();
   for (const [key, v] of Object.entries(j.result)) {
-    const meta = { priceDecimals: v.pair_decimals ?? 8, lotDecimals: v.lot_decimals ?? 8, ordermin: parseFloat(v.ordermin ?? "0") || 0 };
+    const meta = { priceDecimals: v.pair_decimals ?? 8, lotDecimals: v.lot_decimals ?? 8, ordermin: parseFloat(v.ordermin ?? "0") || 0, costmin: parseFloat(v.costmin ?? "0") || 0 };
     // Index under every symbol form Kraken accepts (REST key, altname, wsname).
     byPair.set(key, meta);
     if (v.altname) byPair.set(v.altname, meta);
@@ -537,15 +537,18 @@ async function refreshPairMeta(): Promise<void> {
   pairMetaCache = { at: Date.now(), byPair };
 }
 
-/** Pair precision metadata, cached 1h. Throws if Kraken is unreachable AND no cached copy exists. */
-export async function krakenPairMeta(rawPair: string): Promise<KrakenPairMeta> {
-  if (!pairMetaCache || Date.now() - pairMetaCache.at > PAIR_META_TTL_MS) {
+/** Pair precision metadata, cached 1h. Throws if Kraken is unreachable AND no cached copy exists.
+ * Pass `maxAgeMs` to demand fresher metadata (throws instead of silently
+ * serving a cache older than that bound — for safety-critical preflights). */
+export async function krakenPairMeta(rawPair: string, maxAgeMs: number = PAIR_META_TTL_MS): Promise<KrakenPairMeta> {
+  if (!pairMetaCache || Date.now() - pairMetaCache.at > Math.min(maxAgeMs, PAIR_META_TTL_MS)) {
     try {
       pairMetaFetch ??= refreshPairMeta().finally(() => { pairMetaFetch = null; });
       await pairMetaFetch;
     } catch (e) {
       if (!pairMetaCache) throw new KrakenPrecisionError(`Kraken pair precision metadata unavailable (${(e as Error).message}) — refusing to submit an unvalidated order for ${rawPair}.`);
-      // Stale cache is far safer than guessing decimals — keep it.
+      // Stale cache is far safer than guessing decimals — keep it (unless the caller demanded freshness).
+      if (Date.now() - pairMetaCache.at > maxAgeMs) throw new KrakenPrecisionError(`Kraken pair metadata is ${Math.round((Date.now() - pairMetaCache.at) / 1000)}s old (> ${Math.round(maxAgeMs / 1000)}s demanded) and refresh failed (${(e as Error).message}) — refusing to validate minimums against stale data.`);
     }
   }
   const meta = pairMetaCache!.byPair.get(rawPair);
@@ -1065,7 +1068,7 @@ export async function coinbaseCancelOrder(creds: CoinbaseCreds, orderId: string)
 // Coinbase product increments + safe quantization
 // ---------------------------------------------------------------------------
 
-export interface CoinbaseIncrements { baseIncrement: string; quoteIncrement: string; }
+export interface CoinbaseIncrements { baseIncrement: string; quoteIncrement: string; baseMinSize: number; quoteMinNotional: number; }
 
 /**
  * Quantize a value DOWN to a multiple of the exchange increment (tick/lot),
@@ -1094,19 +1097,23 @@ const CB_INCREMENT_CACHE_MS = 60 * 60_000;
  * the public product endpoint. Throws when unavailable — live maker orders
  * must never be submitted with guessed precision.
  */
-export async function getCoinbaseProductIncrements(pair: Pair): Promise<CoinbaseIncrements> {
+export async function getCoinbaseProductIncrements(pair: Pair, maxAgeMs: number = CB_INCREMENT_CACHE_MS): Promise<CoinbaseIncrements> {
   const product = COINBASE_PRODUCTS[pair];
   const hit = cbIncrementCache.get(product);
-  if (hit && Date.now() - hit.at < CB_INCREMENT_CACHE_MS) return hit.val;
+  if (hit && Date.now() - hit.at < Math.min(maxAgeMs, CB_INCREMENT_CACHE_MS)) return hit.val;
   const resp = await fetch(`https://api.exchange.coinbase.com/products/${product}`, { signal: AbortSignal.timeout(10_000) });
   if (!resp.ok) throw new Error(`Coinbase product info HTTP ${resp.status} for ${product}`);
-  const json = await resp.json() as { base_increment?: string; quote_increment?: string };
+  const json = await resp.json() as { base_increment?: string; quote_increment?: string; base_min_size?: string; min_market_funds?: string };
   const baseIncrement = json.base_increment ?? "";
   const quoteIncrement = json.quote_increment ?? "";
   if (!(parseFloat(baseIncrement) > 0) || !(parseFloat(quoteIncrement) > 0)) {
     throw new Error(`Coinbase: missing/invalid increments for ${product} (base=${baseIncrement} quote=${quoteIncrement})`);
   }
-  const val = { baseIncrement, quoteIncrement };
+  const val = {
+    baseIncrement, quoteIncrement,
+    baseMinSize: parseFloat(json.base_min_size ?? "0") || 0,
+    quoteMinNotional: parseFloat(json.min_market_funds ?? "0") || 0,
+  };
   cbIncrementCache.set(product, { at: Date.now(), val });
   return val;
 }

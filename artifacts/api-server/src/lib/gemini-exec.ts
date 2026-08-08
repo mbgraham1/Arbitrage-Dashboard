@@ -72,10 +72,10 @@ const symCache = new Map<string, { at: number; d: GeminiSymbolDetails }>();
 const SYM_TTL = 60 * 60_000;
 
 /** Public metadata — MANDATORY before any order. Throws when unavailable. */
-export async function geminiSymbolDetails(symbol: string): Promise<GeminiSymbolDetails> {
+export async function geminiSymbolDetails(symbol: string, maxAgeMs: number = SYM_TTL): Promise<GeminiSymbolDetails> {
   const key = symbol.toLowerCase();
   const hit = symCache.get(key);
-  if (hit && Date.now() - hit.at < SYM_TTL) return hit.d;
+  if (hit && Date.now() - hit.at < Math.min(maxAgeMs, SYM_TTL)) return hit.d;
   const r = await fetch(`${BASE}/v1/symbols/details/${key}`, { signal: AbortSignal.timeout(10_000) });
   if (!r.ok) throw new Error(`Gemini symbol details ${symbol}: HTTP ${r.status}`);
   const j = await r.json() as { symbol?: string; min_order_size?: string; tick_size?: number; quote_increment?: number; status?: string };
