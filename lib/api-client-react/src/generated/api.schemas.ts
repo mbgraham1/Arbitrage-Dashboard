@@ -698,6 +698,78 @@ export interface TwoXStats {
   recent?: TwoXStatsRecentItem[];
 }
 
+export interface TwoXFeesRequest {
+  krakenKey: string;
+  krakenSecret: string;
+  coinbaseKey: string;
+  coinbaseSecret: string;
+}
+
+export interface TwoXFeesResult {
+  detected?: boolean;
+  krakenTakerPct?: number;
+  krakenMakerPct?: number | null;
+  coinbaseTakerPct?: number;
+  coinbaseMakerPct?: number;
+  detectedAt?: string;
+}
+
+/**
+ * Side of the Coinbase maker order; omit to auto-pick the better projection
+ */
+export type CbMmExecuteRequestDirection = typeof CbMmExecuteRequestDirection[keyof typeof CbMmExecuteRequestDirection];
+
+
+export const CbMmExecuteRequestDirection = {
+  buy: 'buy',
+  sell: 'sell',
+} as const;
+
+export interface CbMmExecuteRequest {
+  krakenKey: string;
+  krakenSecret: string;
+  coinbaseKey: string;
+  coinbaseSecret: string;
+  /** ETH | BTC | SOL */
+  asset: string;
+  /** Side of the Coinbase maker order; omit to auto-pick the better projection */
+  direction?: CbMmExecuteRequestDirection;
+  /** @maximum 10 */
+  sizeUsd?: number;
+  /** Can only RAISE the maker-floor safeguard, never lower it */
+  minNetUsd?: number;
+  bufferUsd?: number;
+  maxQuoteAgeMs?: number;
+  restWindowSec?: number;
+}
+
+export interface CbMmLeg {
+  venue?: string;
+  side?: string;
+  orderId?: string | null;
+  status?: string;
+  filledQty?: number;
+  avgPrice?: number | null;
+  notionalUsd?: number | null;
+  feeUsd?: number | null;
+  latencyMs?: number;
+}
+
+export type CbMmExecuteResultProjection = { [key: string]: unknown } | null;
+
+export interface CbMmExecuteResult {
+  /** skipped | post_rejected | no_fill | completed | unhedged | indeterminate */
+  outcome?: string;
+  reason?: string;
+  asset?: string;
+  startedAt?: string;
+  finishedAt?: string;
+  makerLeg?: CbMmLeg | null;
+  hedgeLeg?: CbMmLeg | null;
+  realizedProfitUsd?: number | null;
+  projection?: CbMmExecuteResultProjection;
+}
+
 export interface FeeTierRequest {
   krakenKey: string;
   krakenSecret: string;

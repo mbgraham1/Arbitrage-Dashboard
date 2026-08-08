@@ -146,3 +146,66 @@ export function bestMakerHedgeProjection(
   if (!sell) return buy;
   return buy.projectedNetUsd >= sell.projectedNetUsd ? buy : sell;
 }
+
+/**
+ * INVERTED structure: post-only maker on COINBASE (maker fee, earns spread),
+ * taker hedge on KRAKEN after a confirmed fill. Kraken taker (0.40%) is far
+ * cheaper than Coinbase taker (1.20% at intro tier), so this halves the
+ * hedge-side cost versus the original Kraken-maker/Coinbase-hedge shape.
+ * `direction` is the side of the COINBASE maker order.
+ */
+export function projectCbMakerHedge(
+  asset: ObAsset,
+  direction: MmDirection,
+  sizeUsd: number,
+  coinbaseMakerFeePct: number,
+  krakenTakerFeePct: number,
+  makerPriceOverride?: number,
+  qtyOverride?: number,
+): MmProjection | null {
+  const kBook = getStreamBook(OB_USD_PAIRS[asset]);
+  const cBook = getCoinbaseStreamBook(`${asset}-USD`);
+  if (!kBook || !cBook) return null;
+
+  const cTopBid = cBook.bids[0]?.[0] ?? 0;
+  const cTopAsk = cBook.asks[0]?.[0] ?? 0;
+  if (cTopBid <= 0 || cTopAsk <= 0) return null;
+
+  // Join the top of the COINBASE book on our side; post-only guarantees we
+  // never cross even if the book moves between projection and placement.
+  const makerPrice = makerPriceOverride ?? (direction === "buy" ? cTopBid : cTopAsk);
+  if (!(makerPrice > 0)) return null;
+  const makerQty = qtyOverride ?? sizeUsd / makerPrice;
+  const makerNotional = makerQty * makerPrice;
+  const makerFeeUsd = makerNotional * (coinbaseMakerFeePct / 100);
+
+  let projectedNetUsd: number, hedgeVwapPx: number, hedgeTopPx: number, hedgeFeeUsd: number, hedgeSlippageUsd: number;
+  if (direction === "buy") {
+    // Maker BUY on Coinbase → hedge = SELL makerQty into Kraken bids.
+    const h = walkSellIntoBids(kBook.bids, makerQty);
+    if (!h) return null;
+    hedgeVwapPx = h.usd / makerQty; hedgeTopPx = h.top;
+    hedgeFeeUsd = h.usd * (krakenTakerFeePct / 100);
+    hedgeSlippageUsd = Math.max(0, h.top * makerQty - h.usd);
+    projectedNetUsd = h.usd - makerNotional - makerFeeUsd - hedgeFeeUsd;
+  } else {
+    // Maker SELL on Coinbase → hedge = BUY makerQty back from Kraken asks.
+    const h = walkBuyQtyFromAsks(kBook.asks, makerQty);
+    if (!h) return null;
+    hedgeVwapPx = h.usd / makerQty; hedgeTopPx = h.top;
+    hedgeFeeUsd = h.usd * (krakenTakerFeePct / 100);
+    hedgeSlippageUsd = Math.max(0, h.usd - h.top * makerQty);
+    projectedNetUsd = makerNotional - h.usd - makerFeeUsd - hedgeFeeUsd;
+  }
+
+  const legAges: LegAge[] = [
+    { pair: `${asset}-USD[C·maker]`, ageMs: cBook.ageMs, recvAgeMs: Math.max(0, Date.now() - cBook.updatedAtMs) },
+    { pair: `${OB_USD_PAIRS[asset]}[K·hedge]`, ageMs: kBook.ageMs, recvAgeMs: Math.max(0, Date.now() - kBook.updatedAtMs) },
+  ];
+  return {
+    direction, makerPrice, makerQty, projectedNetUsd, makerFeeUsd, hedgeFeeUsd,
+    hedgeVwapPx, hedgeTopPx, hedgeSlippageUsd, legAges,
+    quoteAgeMs: Math.max(kBook.ageMs, cBook.ageMs),
+    marketUpdateMs: Math.max(kBook.updatedAtMs, cBook.updatedAtMs),
+  };
+}

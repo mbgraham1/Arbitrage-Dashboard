@@ -12,3 +12,8 @@ Rules for the maker-post + taker-hedge strategy:
 
 **Why:** hedged-structure strategies only avoid unwind risk if the hedge is guaranteed sized/funded off the actual fill and live book; anything else silently converts "arbitrage" into directional exposure.
 **How to apply:** any new hedged or multi-leg live execution path — same fill-truth, bounded-hedge, honest-partial rules.
+
+## Hedge-decision tolerance rule (2026-08-08)
+Increment tolerances belong ONLY in full-hedge equality checks, never in deciding whether to hedge: any confirmed positive maker fill (even dust) must go to the hedge path or be explicitly reported as unhedged residual. A "no_fill if ≤ 2 increments" shortcut silently leaves real exposure on assets with large increments (BTC).
+Also: a Kraken IOC that is somehow nonterminal after the wait must be cancel-and-confirmed, not just latched — it could keep filling after the response.
+**Inverted shape:** CB-maker (0.6%) + Kraken-taker hedge (0.4%) ≈ 1.0% total vs 1.6% taker-taker — chosen after fills proved CB taker is 1.2% at intro tier.

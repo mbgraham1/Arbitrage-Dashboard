@@ -7,7 +7,7 @@
  * the floor + safety buffer. Cumulative realized P&L (the only proof of
  * profitability) is shown from the ledger.
  */
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { useBotContext } from "@/store/bot-context";
@@ -15,7 +15,7 @@ import { useToast } from "@/hooks/use-toast";
 import {
   useGet2xScan, getGet2xScanQueryKey,
   useGet2xStats, getGet2xStatsQueryKey,
-  useExecute2x, TwoXExecuteResult, TwoXRouteDecision,
+  useExecute2x, useDetect2xFees, TwoXExecuteResult, TwoXRouteDecision, TwoXFeesResult,
 } from "@workspace/api-client-react";
 import { useQueryClient } from "@tanstack/react-query";
 import { cn } from "@/lib/utils";
@@ -28,7 +28,26 @@ export function TwoXScannerCard() {
   const qc = useQueryClient();
   const [running, setRunning] = useState(false);
   const [last, setLast] = useState<TwoXExecuteResult | null>(null);
-  const scan = useGet2xScan(undefined, { query: { queryKey: getGet2xScanQueryKey(), refetchInterval: 3_000 } });
+  const [fees, setFees] = useState<TwoXFeesResult | null>(null);
+  const [feeError, setFeeError] = useState<string | null>(null);
+  const detectFees = useDetect2xFees();
+  // Real detected account fee tiers drive the scan display, so the scanner,
+  // executor, and P&L all use the SAME fee inputs. Without creds (or on
+  // failure) the scan falls back to labelled assumptions — never silently.
+  const { krakenKey, krakenSecret, coinbaseKey, coinbaseSecret } = credentials;
+  useEffect(() => {
+    if (!krakenKey || !krakenSecret || !coinbaseKey || !coinbaseSecret) { setFees(null); setFeeError(null); return; }
+    let cancelled = false;
+    const detect = () => detectFees.mutateAsync({ data: { krakenKey, krakenSecret, coinbaseKey, coinbaseSecret } })
+      .then(f => { if (!cancelled) { setFees(f); setFeeError(null); } })
+      .catch(e => { if (!cancelled) { setFees(null); setFeeError((e as Error).message); } });
+    detect();
+    const iv = setInterval(detect, 10 * 60_000); // tiers can change with volume — refresh bounded
+    return () => { cancelled = true; clearInterval(iv); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [krakenKey, krakenSecret, coinbaseKey, coinbaseSecret]);
+  const scanParams = fees ? { krakenFeePct: fees.krakenTakerPct, coinbaseFeePct: fees.coinbaseTakerPct } : undefined;
+  const scan = useGet2xScan(scanParams, { query: { queryKey: [...getGet2xScanQueryKey(), scanParams ?? "assumed"], refetchInterval: 3_000 } });
   const stats = useGet2xStats({ query: { queryKey: getGet2xStatsQueryKey(), refetchInterval: 15_000 } });
   const exec = useExecute2x();
 
@@ -73,7 +92,7 @@ export function TwoXScannerCard() {
       <CardContent className="space-y-2 text-xs">
         {params && (
           <div className="text-muted-foreground" data-testid="text-2x-params">
-            floor {fmt(params.minNetUsd, 2)} · buffer {fmt(params.bufferUsd, 2)} · max quote age {params.maxQuoteAgeMs}ms · fees {params.feesAssumed ? `ASSUMED (K ${params.krakenFeePct}% / CB ${params.coinbaseFeePct}%) — live execution detects your REAL tiers before firing` : `K ${params.krakenFeePct}% / CB ${params.coinbaseFeePct}%`}
+            floor {fmt(params.minNetUsd, 2)} · buffer {fmt(params.bufferUsd, 2)} · max quote age {params.maxQuoteAgeMs}ms · fees {params.feesAssumed ? `ASSUMED (K ${params.krakenFeePct}% / CB ${params.coinbaseFeePct}%) — ${feeError ? `fee detection failed: ${feeError}` : "enter API keys to use your REAL tiers"}` : `YOUR REAL TIERS (K taker ${params.krakenFeePct}% / CB taker ${params.coinbaseFeePct}%${fees?.coinbaseMakerPct != null ? ` · CB maker ${fees.coinbaseMakerPct}%` : ""}, detected ${fees?.detectedAt ? new Date(fees.detectedAt).toLocaleTimeString() : "now"})`}
           </div>
         )}
         <div className="overflow-x-auto">

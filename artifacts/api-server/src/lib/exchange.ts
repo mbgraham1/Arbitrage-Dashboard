@@ -656,6 +656,27 @@ export async function krakenRawLimitOrder(
   }, creds);
 }
 
+/** Bounded IOC limit order on Kraken (taker-like but price-capped): fills
+ *  immediately up to the limit price, cancels any remainder. NOT post-only.
+ *  fciq keeps cost/fee accounting in the quote currency. */
+export async function krakenIocLimitOrder(
+  creds: KrakenCreds,
+  side: "buy" | "sell",
+  volume: number,
+  price: number,
+  rawPair: string,
+): Promise<{ txid: string[] }> {
+  return krakenPrivateRequest<{ txid: string[] }>("/0/private/AddOrder", {
+    pair: rawPair,
+    type: side,
+    ordertype: "limit",
+    price: await normalizeKrakenPrice(rawPair, price),
+    volume: await normalizeKrakenVolume(rawPair, volume),
+    timeinforce: "IOC",
+    oflags: "fciq",
+  }, creds);
+}
+
 /**
  * Places a market order using an arbitrary raw Kraken pair symbol.
  * Used for triangular arb legs that have no canonical Pair mapping

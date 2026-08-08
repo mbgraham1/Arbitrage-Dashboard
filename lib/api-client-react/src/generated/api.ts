@@ -24,6 +24,8 @@ import type {
   AccountPnlResult,
   AllPairSnapshot,
   BalanceData,
+  CbMmExecuteRequest,
+  CbMmExecuteResult,
   CoinbaseCredentials,
   CointegrationScanResult,
   ConnectionTestResult,
@@ -75,6 +77,8 @@ import type {
   TwoExchangeTestResult,
   TwoXExecuteRequest,
   TwoXExecuteResult,
+  TwoXFeesRequest,
+  TwoXFeesResult,
   TwoXScanResult,
   TwoXStats
 } from './api.schemas';
@@ -2015,6 +2019,227 @@ export function useGet2xStats<TData = Awaited<ReturnType<typeof get2xStats>>, TE
  ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
 
   const queryOptions = getGet2xStatsQueryOptions(options)
+
+  const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+
+export const getDetect2xFeesUrl = () => {
+
+
+
+
+  return `/api/arb/2x-fees`
+}
+
+/**
+ * Queries both exchanges for the caller's actual maker/taker fee tiers so the scanner display, the executor, and P&L all use the SAME fee inputs. Fails explicitly rather than falling back to assumptions.
+ * @summary Detect the account's REAL fee tiers on Kraken and Coinbase
+ */
+export const detect2xFees = async (twoXFeesRequest: TwoXFeesRequest, options?: RequestInit): Promise<TwoXFeesResult> => {
+
+  return customFetch<TwoXFeesResult>(getDetect2xFeesUrl(),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(twoXFeesRequest)
+  }
+);}
+
+
+
+
+
+export const getDetect2xFeesMutationOptions = <TError = ErrorType<unknown>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof detect2xFees>>, TError,{data: BodyType<TwoXFeesRequest>}, TContext>, request?: SecondParameter<typeof customFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof detect2xFees>>, TError,{data: BodyType<TwoXFeesRequest>}, TContext> => {
+
+const mutationKey = ['detect2xFees'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof detect2xFees>>, {data: BodyType<TwoXFeesRequest>}> = (props) => {
+          const {data} = props ?? {};
+
+          return  detect2xFees(data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type Detect2xFeesMutationResult = NonNullable<Awaited<ReturnType<typeof detect2xFees>>>
+    export type Detect2xFeesMutationBody = BodyType<TwoXFeesRequest>
+    export type Detect2xFeesMutationError = ErrorType<unknown>
+
+    /**
+ * @summary Detect the account's REAL fee tiers on Kraken and Coinbase
+ */
+export const useDetect2xFees = <TError = ErrorType<unknown>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof detect2xFees>>, TError,{data: BodyType<TwoXFeesRequest>}, TContext>, request?: SecondParameter<typeof customFetch>}
+ ): UseMutationResult<
+        Awaited<ReturnType<typeof detect2xFees>>,
+        TError,
+        {data: BodyType<TwoXFeesRequest>},
+        TContext
+      > => {
+      return useMutation(getDetect2xFeesMutationOptions(options));
+    }
+
+export const getExecuteCbMmUrl = () => {
+
+
+
+
+  return `/api/arb/cb-mm-execute`
+}
+
+/**
+ * The inverted maker-hedge strategy. Posts a POST-ONLY maker limit on Coinbase (cheap maker fee, earns spread); while it rests, the Kraken hedge is re-projected continuously and the order is cancelled before fill if the projection drops below the floor + buffer. Only a CONFIRMED maker fill triggers the hedge: a bounded IOC on Kraken for exactly the filled quantity. Real detected fees only; maker-floor safeguard enforced; realized P&L recorded only when fully hedged.
+ * @summary Coinbase-maker / Kraken-taker-hedge cycle (post-only, $10 cap)
+ */
+export const executeCbMm = async (cbMmExecuteRequest: CbMmExecuteRequest, options?: RequestInit): Promise<CbMmExecuteResult> => {
+
+  return customFetch<CbMmExecuteResult>(getExecuteCbMmUrl(),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(cbMmExecuteRequest)
+  }
+);}
+
+
+
+
+
+export const getExecuteCbMmMutationOptions = <TError = ErrorType<unknown>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof executeCbMm>>, TError,{data: BodyType<CbMmExecuteRequest>}, TContext>, request?: SecondParameter<typeof customFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof executeCbMm>>, TError,{data: BodyType<CbMmExecuteRequest>}, TContext> => {
+
+const mutationKey = ['executeCbMm'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof executeCbMm>>, {data: BodyType<CbMmExecuteRequest>}> = (props) => {
+          const {data} = props ?? {};
+
+          return  executeCbMm(data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type ExecuteCbMmMutationResult = NonNullable<Awaited<ReturnType<typeof executeCbMm>>>
+    export type ExecuteCbMmMutationBody = BodyType<CbMmExecuteRequest>
+    export type ExecuteCbMmMutationError = ErrorType<unknown>
+
+    /**
+ * @summary Coinbase-maker / Kraken-taker-hedge cycle (post-only, $10 cap)
+ */
+export const useExecuteCbMm = <TError = ErrorType<unknown>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof executeCbMm>>, TError,{data: BodyType<CbMmExecuteRequest>}, TContext>, request?: SecondParameter<typeof customFetch>}
+ ): UseMutationResult<
+        Awaited<ReturnType<typeof executeCbMm>>,
+        TError,
+        {data: BodyType<CbMmExecuteRequest>},
+        TContext
+      > => {
+      return useMutation(getExecuteCbMmMutationOptions(options));
+    }
+
+export const getGetCbMmStatsUrl = () => {
+
+
+
+
+  return `/api/arb/cb-mm-stats`
+}
+
+/**
+ * @summary Cumulative realized P&L for the CB-maker/K-hedge strategy
+ */
+export const getCbMmStats = async ( options?: RequestInit): Promise<TwoXStats> => {
+
+  return customFetch<TwoXStats>(getGetCbMmStatsUrl(),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getGetCbMmStatsQueryKey = () => {
+    return [
+    `/api/arb/cb-mm-stats`
+    ] as const;
+    }
+
+
+export const getGetCbMmStatsQueryOptions = <TData = Awaited<ReturnType<typeof getCbMmStats>>, TError = ErrorType<unknown>>( options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getCbMmStats>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getGetCbMmStatsQueryKey();
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof getCbMmStats>>> = ({ signal }) => getCbMmStats({ signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof getCbMmStats>>, TError, TData> & { queryKey: QueryKey }
+}
+
+export type GetCbMmStatsQueryResult = NonNullable<Awaited<ReturnType<typeof getCbMmStats>>>
+export type GetCbMmStatsQueryError = ErrorType<unknown>
+
+
+/**
+ * @summary Cumulative realized P&L for the CB-maker/K-hedge strategy
+ */
+
+export function useGetCbMmStats<TData = Awaited<ReturnType<typeof getCbMmStats>>, TError = ErrorType<unknown>>(
+  options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getCbMmStats>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+
+ ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+
+  const queryOptions = getGetCbMmStatsQueryOptions(options)
 
   const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
 

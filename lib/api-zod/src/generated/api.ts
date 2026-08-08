@@ -842,6 +842,99 @@ export const Get2xStatsResponse = zod.object({
 
 
 /**
+ * Queries both exchanges for the caller's actual maker/taker fee tiers so the scanner display, the executor, and P&L all use the SAME fee inputs. Fails explicitly rather than falling back to assumptions.
+ * @summary Detect the account's REAL fee tiers on Kraken and Coinbase
+ */
+export const Detect2xFeesBody = zod.object({
+  "krakenKey": zod.string(),
+  "krakenSecret": zod.string(),
+  "coinbaseKey": zod.string(),
+  "coinbaseSecret": zod.string()
+})
+
+export const Detect2xFeesResponse = zod.object({
+  "detected": zod.boolean().optional(),
+  "krakenTakerPct": zod.number().optional(),
+  "krakenMakerPct": zod.number().nullish(),
+  "coinbaseTakerPct": zod.number().optional(),
+  "coinbaseMakerPct": zod.number().optional(),
+  "detectedAt": zod.string().optional()
+})
+
+
+/**
+ * The inverted maker-hedge strategy. Posts a POST-ONLY maker limit on Coinbase (cheap maker fee, earns spread); while it rests, the Kraken hedge is re-projected continuously and the order is cancelled before fill if the projection drops below the floor + buffer. Only a CONFIRMED maker fill triggers the hedge: a bounded IOC on Kraken for exactly the filled quantity. Real detected fees only; maker-floor safeguard enforced; realized P&L recorded only when fully hedged.
+ * @summary Coinbase-maker / Kraken-taker-hedge cycle (post-only, $10 cap)
+ */
+export const executeCbMmBodySizeUsdMax = 10;
+
+
+
+export const ExecuteCbMmBody = zod.object({
+  "krakenKey": zod.string(),
+  "krakenSecret": zod.string(),
+  "coinbaseKey": zod.string(),
+  "coinbaseSecret": zod.string(),
+  "asset": zod.string().describe('ETH | BTC | SOL'),
+  "direction": zod.enum(['buy', 'sell']).optional().describe('Side of the Coinbase maker order; omit to auto-pick the better projection'),
+  "sizeUsd": zod.number().max(executeCbMmBodySizeUsdMax).optional(),
+  "minNetUsd": zod.number().optional().describe('Can only RAISE the maker-floor safeguard, never lower it'),
+  "bufferUsd": zod.number().optional(),
+  "maxQuoteAgeMs": zod.number().optional(),
+  "restWindowSec": zod.number().optional()
+})
+
+export const ExecuteCbMmResponse = zod.object({
+  "outcome": zod.string().optional().describe('skipped | post_rejected | no_fill | completed | unhedged | indeterminate'),
+  "reason": zod.string().optional(),
+  "asset": zod.string().optional(),
+  "startedAt": zod.string().optional(),
+  "finishedAt": zod.string().optional(),
+  "makerLeg": zod.object({
+  "venue": zod.string().optional(),
+  "side": zod.string().optional(),
+  "orderId": zod.string().nullish(),
+  "status": zod.string().optional(),
+  "filledQty": zod.number().optional(),
+  "avgPrice": zod.number().nullish(),
+  "notionalUsd": zod.number().nullish(),
+  "feeUsd": zod.number().nullish(),
+  "latencyMs": zod.number().optional()
+}).nullish(),
+  "hedgeLeg": zod.object({
+  "venue": zod.string().optional(),
+  "side": zod.string().optional(),
+  "orderId": zod.string().nullish(),
+  "status": zod.string().optional(),
+  "filledQty": zod.number().optional(),
+  "avgPrice": zod.number().nullish(),
+  "notionalUsd": zod.number().nullish(),
+  "feeUsd": zod.number().nullish(),
+  "latencyMs": zod.number().optional()
+}).nullish(),
+  "realizedProfitUsd": zod.number().nullish(),
+  "projection": zod.record(zod.string(), zod.unknown()).nullish()
+})
+
+
+/**
+ * @summary Cumulative realized P&L for the CB-maker/K-hedge strategy
+ */
+export const GetCbMmStatsResponse = zod.object({
+  "trades": zod.number().optional(),
+  "completed": zod.number().optional(),
+  "incomplete": zod.number().optional(),
+  "cumulativeRealizedUsd": zod.number().optional(),
+  "recent": zod.array(zod.object({
+  "pair": zod.string().optional(),
+  "realizedUsd": zod.number().nullish(),
+  "status": zod.string().nullish(),
+  "at": zod.string().nullish()
+})).optional()
+})
+
+
+/**
  * Queries Kraken /0/private/TradeVolume for the caller's real taker fee on major pairs (max across pairs). Returns null when the query fails (bad keys, network) so callers can fall back to their configured assumption.
  * @summary Look up the account's actual Kraken taker fee tier
  */

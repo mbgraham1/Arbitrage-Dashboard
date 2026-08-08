@@ -689,6 +689,66 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/TwoXStats"
+  /arb/2x-fees:
+    post:
+      operationId: detect2xFees
+      tags: [trades]
+      summary: Detect the account's REAL fee tiers on Kraken and Coinbase
+      description: >
+        Queries both exchanges for the caller's actual maker/taker fee tiers so
+        the scanner display, the executor, and P&L all use the SAME fee inputs.
+        Fails explicitly rather than falling back to assumptions.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TwoXFeesRequest"
+      responses:
+        "200":
+          description: Real detected maker/taker fee percentages per venue
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TwoXFeesResult"
+  /arb/cb-mm-execute:
+    post:
+      operationId: executeCbMm
+      tags: [trades]
+      summary: Coinbase-maker / Kraken-taker-hedge cycle (post-only, $10 cap)
+      description: >
+        The inverted maker-hedge strategy. Posts a POST-ONLY maker limit on
+        Coinbase (cheap maker fee, earns spread); while it rests, the Kraken
+        hedge is re-projected continuously and the order is cancelled before
+        fill if the projection drops below the floor + buffer. Only a CONFIRMED
+        maker fill triggers the hedge: a bounded IOC on Kraken for exactly the
+        filled quantity. Real detected fees only; maker-floor safeguard
+        enforced; realized P&L recorded only when fully hedged.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CbMmExecuteRequest"
+      responses:
+        "200":
+          description: Execution (or skip/cancel) report with per-leg detail
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CbMmExecuteResult"
+  /arb/cb-mm-stats:
+    get:
+      operationId: getCbMmStats
+      tags: [trades]
+      summary: Cumulative realized P&L for the CB-maker/K-hedge strategy
+      responses:
+        "200":
+          description: Full-history trade counts and realized P&L for MM2 rows only
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TwoXStats"
   /arb/fee-tier:
     post:
       operationId: getFeeTier
@@ -1777,6 +1837,69 @@ components:
               realizedUsd: { type: number, nullable: true }
               status: { type: string, nullable: true }
               at: { type: string, nullable: true }
+    TwoXFeesRequest:
+      type: object
+      required: [krakenKey, krakenSecret, coinbaseKey, coinbaseSecret]
+      properties:
+        krakenKey: { type: string }
+        krakenSecret: { type: string }
+        coinbaseKey: { type: string }
+        coinbaseSecret: { type: string }
+    TwoXFeesResult:
+      type: object
+      properties:
+        detected: { type: boolean }
+        krakenTakerPct: { type: number }
+        krakenMakerPct: { type: number, nullable: true }
+        coinbaseTakerPct: { type: number }
+        coinbaseMakerPct: { type: number }
+        detectedAt: { type: string }
+    CbMmExecuteRequest:
+      type: object
+      required: [krakenKey, krakenSecret, coinbaseKey, coinbaseSecret, asset]
+      properties:
+        krakenKey: { type: string }
+        krakenSecret: { type: string }
+        coinbaseKey: { type: string }
+        coinbaseSecret: { type: string }
+        asset: { type: string, description: "ETH | BTC | SOL" }
+        direction: { type: string, enum: [buy, sell], description: "Side of the Coinbase maker order; omit to auto-pick the better projection" }
+        sizeUsd: { type: number, maximum: 10 }
+        minNetUsd: { type: number, description: "Can only RAISE the maker-floor safeguard, never lower it" }
+        bufferUsd: { type: number }
+        maxQuoteAgeMs: { type: number }
+        restWindowSec: { type: number }
+    CbMmLeg:
+      type: object
+      properties:
+        venue: { type: string }
+        side: { type: string }
+        orderId: { type: string, nullable: true }
+        status: { type: string }
+        filledQty: { type: number }
+        avgPrice: { type: number, nullable: true }
+        notionalUsd: { type: number, nullable: true }
+        feeUsd: { type: number, nullable: true }
+        latencyMs: { type: number }
+    CbMmExecuteResult:
+      type: object
+      properties:
+        outcome: { type: string, description: "skipped | post_rejected | no_fill | completed | unhedged | indeterminate" }
+        reason: { type: string }
+        asset: { type: string }
+        startedAt: { type: string }
+        finishedAt: { type: string }
+        makerLeg:
+          allOf: [{ $ref: "#/components/schemas/CbMmLeg" }]
+          nullable: true
+        hedgeLeg:
+          allOf: [{ $ref: "#/components/schemas/CbMmLeg" }]
+          nullable: true
+        realizedProfitUsd: { type: number, nullable: true }
+        projection:
+          type: object
+          nullable: true
+          additionalProperties: true
     FeeTierRequest:
       type: object
       required: [krakenKey, krakenSecret]

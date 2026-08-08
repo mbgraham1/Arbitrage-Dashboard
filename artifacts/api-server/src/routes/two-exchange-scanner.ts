@@ -25,7 +25,7 @@
 import { Router, type IRouter } from "express";
 import { db, tradesTable } from "@workspace/db";
 import { sql } from "drizzle-orm";
-import { Execute2xBody } from "@workspace/api-zod";
+import { Execute2xBody, Detect2xFeesBody } from "@workspace/api-zod";
 import { crossTakerBreakdown, type CrossBreakdown } from "../lib/cross-pricing";
 import { OB_USD_PAIRS, type ObAsset } from "../lib/order-book";
 import {
@@ -132,6 +132,31 @@ router.get("/arb/2x-scan", (req, res) => {
     params: { sizeUsd, krakenFeePct: kFeePct, coinbaseFeePct: cbFeePct, minNetUsd, bufferUsd, maxQuoteAgeMs, feesAssumed },
     best, routes,
   });
+});
+
+// ── POST /arb/2x-fees ────────────────────────────────────────────────────────
+// Detects the account's REAL fee tiers on both venues so the scanner DISPLAY
+// uses the same fee inputs as the executor and the realized P&L. Refuses to
+// guess: any failure is an explicit error, never a silent fallback.
+router.post("/arb/2x-fees", async (req, res): Promise<void> => {
+  const parsed = Detect2xFeesBody.safeParse(req.body);
+  if (!parsed.success) { res.status(400).json({ error: parsed.error.message }); return; }
+  const b = parsed.data;
+  try {
+    const [kTier, cbTier] = await Promise.all([
+      krakenFeeTiers({ krakenKey: b.krakenKey, krakenSecret: b.krakenSecret }, SCAN_ASSETS.map(a => OB_USD_PAIRS[a])),
+      getCoinbaseFeeTier({ coinbaseKey: b.coinbaseKey, coinbaseSecret: b.coinbaseSecret }),
+    ]);
+    if (!kTier) throw new Error("Kraken fee tier unavailable");
+    res.json({
+      detected: true,
+      krakenTakerPct: kTier.takerFeePct, krakenMakerPct: kTier.makerFeePct,
+      coinbaseTakerPct: cbTier.takerFeePct, coinbaseMakerPct: cbTier.makerFeePct,
+      detectedAt: new Date().toISOString(),
+    });
+  } catch (e) {
+    res.status(502).json({ error: `fee tier detection failed: ${(e as Error).message}` });
+  }
 });
 
 // ── GET /arb/2x-stats ────────────────────────────────────────────────────────
