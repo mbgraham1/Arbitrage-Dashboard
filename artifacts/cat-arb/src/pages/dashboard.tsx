@@ -17,6 +17,38 @@ import { execPreview, useGetTradeSummary, useListTrades, useScanAllPairs, useGet
 
 // ── Small helpers ──────────────────────────────────────────────────────────────
 
+/** Relative elapsed label for the last OB auto-trade ("2m 30s ago").
+ *  Refreshes every minute (same pattern as the control-deck uptime counter).
+ *  Falls back to the absolute time string when elapsed < 10 s to avoid
+ *  "0s ago" flicker right after a fire. */
+function ObAutoTradeAgo({ timestamp }: { timestamp: string }) {
+  const [, setTick] = useState(0);
+  const elapsedS = Math.floor((Date.now() - new Date(timestamp).getTime()) / 1000);
+  useEffect(() => {
+    // One-shot update at the 10 s threshold so the label flips from absolute
+    // time to relative as soon as elapsed crosses 10 s, then a minute cadence.
+    let intervalId: ReturnType<typeof setInterval> | null = null;
+    let timeoutId: ReturnType<typeof setTimeout> | null = null;
+    const startMinuteTicks = () => {
+      intervalId = setInterval(() => setTick(t => t + 1), 60_000);
+    };
+    const remainingMs = 10_000 - (Date.now() - new Date(timestamp).getTime());
+    if (remainingMs > 0) {
+      timeoutId = setTimeout(() => { setTick(t => t + 1); startMinuteTicks(); }, remainingMs);
+    } else {
+      startMinuteTicks();
+    }
+    return () => {
+      if (intervalId != null) clearInterval(intervalId);
+      if (timeoutId != null) clearTimeout(timeoutId);
+    };
+  }, [timestamp]);
+  if (elapsedS < 10) return <>{new Date(timestamp).toLocaleTimeString()}</>;
+  const m = Math.floor(elapsedS / 60);
+  const s = elapsedS % 60;
+  return <>{m > 0 ? `${m}m ${s}s ago` : `${s}s ago`}</>;
+}
+
 function PriceTile({
   label,
   bid,
@@ -1226,7 +1258,7 @@ function OrderBookHunterCard() {
               className="text-[9px] font-mono text-muted-foreground border border-border px-1 py-0.5"
               title={`Last auto-fire: ${lastObAutoTrade.route} at ${new Date(lastObAutoTrade.timestamp).toLocaleTimeString()}`}
             >
-              last: {lastObAutoTrade.route}{lastObAutoTrade.profitUsd != null ? ` $${lastObAutoTrade.profitUsd.toFixed(4)}` : ""} · {new Date(lastObAutoTrade.timestamp).toLocaleTimeString()}
+              last: {lastObAutoTrade.route}{lastObAutoTrade.profitUsd != null ? ` $${lastObAutoTrade.profitUsd.toFixed(4)}` : ""} · <ObAutoTradeAgo timestamp={lastObAutoTrade.timestamp} />
             </span>
           )}
           <span className="flex items-center gap-1 text-[10px] font-mono font-normal text-muted-foreground">
