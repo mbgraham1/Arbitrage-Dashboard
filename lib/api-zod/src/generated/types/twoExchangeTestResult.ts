@@ -11,6 +11,8 @@ import type { TwoExchangeTestResultBalances } from './twoExchangeTestResultBalan
 export interface TwoExchangeTestResult {
   success: boolean;
   isDryRun: boolean;
+  /** Which direction ran: coinbase_to_kraken or kraken_to_coinbase */
+  direction?: string | null;
   /** dry_run_ok | blocked | buy_failed | sell_failed | partial_sell | completed | indeterminate */
   outcome: string;
   blockReason?: string | null;

@@ -96,6 +96,7 @@ export * from './triExecuteResult';
 export * from './triExecuteResultPriceSource';
 export * from './twoExchangeTestLeg';
 export * from './twoExchangeTestRequest';
+export * from './twoExchangeTestRequestDirection';
 export * from './twoExchangeTestResult';
 export * from './twoExchangeTestResultBalances';
 export * from './twoExchangeTestResultBalancesCoinbaseEthAccountsItem';

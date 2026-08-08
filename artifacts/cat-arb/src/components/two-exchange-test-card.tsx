@@ -35,6 +35,7 @@ export function TwoExchangeTestCard() {
   const { toast } = useToast();
   const [last, setLast] = useState<TwoExchangeTestResult | null>(null);
   const [running, setRunning] = useState(false);
+  const [direction, setDirection] = useState<"coinbase_to_kraken" | "kraken_to_coinbase">("coinbase_to_kraken");
   const exec = useRunTwoExchangeTest();
 
   const hasCreds = !!credentials.krakenKey && !!credentials.krakenSecret && !!credentials.coinbaseKey && !!credentials.coinbaseSecret;
@@ -46,7 +47,7 @@ export function TwoExchangeTestCard() {
       const r = await exec.mutateAsync({ data: {
         krakenKey: credentials.krakenKey, krakenSecret: credentials.krakenSecret,
         coinbaseKey: credentials.coinbaseKey, coinbaseSecret: credentials.coinbaseSecret,
-        sizeUsd: 10, isDryRun,
+        sizeUsd: 10, isDryRun, direction,
       } });
       setLast(r);
       const msg = `[2XTEST] ${isDryRun ? "DRY" : "LIVE"} → ${r.outcome}${r.realizedProfitUsd != null ? ` realized $${r.realizedProfitUsd.toFixed(4)}` : ""}${r.blockReason ? ` — ${r.blockReason}` : ""}${r.error ? ` — ${r.error}` : ""}`;
@@ -66,12 +67,18 @@ export function TwoExchangeTestCard() {
         <CardTitle className="text-sm">
           Two-Exchange Test{" "}
           <span className="text-muted-foreground font-normal">
-            (one-shot: buy ~$10 ETH on Kraken → sell confirmed fill on Coinbase — needs pre-funded ETH on Coinbase)
+            (one-shot $10 diagnostic — {direction === "coinbase_to_kraken" ? "buy on Coinbase → sell confirmed fill on Kraken (works with staked Coinbase ETH)" : "buy on Kraken → sell confirmed fill on Coinbase (needs tradable Coinbase ETH)"})
           </span>
         </CardTitle>
       </CardHeader>
       <CardContent className="space-y-2 text-xs">
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 flex-wrap">
+          <label className="flex items-center gap-1">Direction
+            <select className="border rounded bg-background px-2 py-1" value={direction} onChange={e => setDirection(e.target.value as typeof direction)} data-testid="select-2xtest-direction">
+              <option value="coinbase_to_kraken">Coinbase buy → Kraken sell (recommended)</option>
+              <option value="kraken_to_coinbase">Kraken buy → Coinbase sell</option>
+            </select>
+          </label>
           <Button size="sm" variant="secondary" disabled={running || !hasCreds} onClick={() => run(true)} data-testid="button-2xtest-dry">
             {running ? "Running…" : "Check balances (dry)"}
           </Button>
@@ -83,6 +90,7 @@ export function TwoExchangeTestCard() {
         {last && (
           <div className="space-y-2" data-testid="text-2xtest-result">
             <div>
+              {last.direction && <span className="text-muted-foreground mr-2">[{last.direction === "coinbase_to_kraken" ? "Coinbase→Kraken" : "Kraken→Coinbase"}]</span>}
               outcome: <span className={cn("font-semibold", last.outcome === "completed" ? "text-green-500" : last.outcome === "dry_run_ok" ? "" : "text-red-500")}>{last.outcome}</span>
               {last.realizedProfitUsd != null && <> · realized P&L <span className={cn("font-semibold", last.realizedProfitUsd >= 0 ? "text-green-500" : "text-red-500")}>${last.realizedProfitUsd.toFixed(4)}</span></>}
               {last.residualEthOpen != null && last.residualEthOpen > 0 && <span className="text-red-500"> · residual {last.residualEthOpen.toFixed(8)} ETH open</span>}

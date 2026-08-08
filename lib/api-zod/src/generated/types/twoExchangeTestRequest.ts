@@ -5,6 +5,7 @@
  * CAT Arbitrage Dashboard API
  * OpenAPI spec version: 0.1.0
  */
+import type { TwoExchangeTestRequestDirection } from './twoExchangeTestRequestDirection';
 
 export interface TwoExchangeTestRequest {
   krakenKey: string;
@@ -18,4 +19,6 @@ export interface TwoExchangeTestRequest {
   sizeUsd?: number;
   /** When true, verifies balances and prices but places no orders. */
   isDryRun?: boolean;
+  /** coinbase_to_kraken (default): buy ETH on Coinbase with USD, sell the confirmed fill on Kraken from pre-positioned tradable ETH — works when Coinbase ETH is staked. kraken_to_coinbase: original direction, needs tradable ETH on Coinbase. */
+  direction?: TwoExchangeTestRequestDirection;
 }

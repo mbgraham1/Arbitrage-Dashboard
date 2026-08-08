@@ -1531,6 +1531,15 @@ components:
           type: boolean
           default: true
           description: When true, verifies balances and prices but places no orders.
+        direction:
+          type: string
+          enum: [coinbase_to_kraken, kraken_to_coinbase]
+          default: coinbase_to_kraken
+          description: >
+            coinbase_to_kraken (default): buy ETH on Coinbase with USD, sell the
+            confirmed fill on Kraken from pre-positioned tradable ETH — works
+            when Coinbase ETH is staked. kraken_to_coinbase: original direction,
+            needs tradable ETH on Coinbase.
     TwoExchangeTestLeg:
       type: object
       properties:
@@ -1551,6 +1560,7 @@ components:
       properties:
         success: { type: boolean }
         isDryRun: { type: boolean }
+        direction: { type: string, nullable: true, description: "Which direction ran: coinbase_to_kraken or kraken_to_coinbase" }
         outcome:
           type: string
           description: dry_run_ok | blocked | buy_failed | sell_failed | partial_sell | completed | indeterminate

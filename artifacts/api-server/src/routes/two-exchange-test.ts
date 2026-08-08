@@ -6,18 +6,17 @@
  * routes/arb.ts. One manual cycle per call, size hard-capped at $10, never
  * loops, never auto-scales.
  *
- * Flow:
- *   1. Verify BOTH venues' balances and credentials BEFORE any order:
- *      Kraken needs USD for the buy; Coinbase needs pre-positioned ETH for
- *      the sell. Any shortfall → no order placed, blocking reason returned.
- *   2. LIVE: market-buy ~$10 of ETH on Kraken (fee in quote, so cost/fee are
- *      exact USD), poll to a terminal state, take vol_exec as the ONLY truth.
- *   3. Sell the CONFIRMED filled quantity on Coinbase as a bounded IOC limit
- *      (exact base size, 0.5% price collar below the live bid — behaves like
- *      a taker but can never fill at a garbage price).
- *   4. Record exact fills, fees, order ids, timestamps, and realized P&L
- *      ((CB proceeds − CB fees) − (Kraken cost + Kraken fees)) to the trades
- *      ledger under the pair prefix "2XTEST:".
+ * Two directions (both one-shot, both $10-capped):
+ *   - coinbase_to_kraken (DEFAULT): buy ~$10 ETH on Coinbase with USD
+ *     (bounded IOC at ask + 0.5% collar), then sell the CONFIRMED fill on
+ *     Kraken at market from pre-positioned tradable ETH. Works even when the
+ *     trader's Coinbase ETH is staked — the buy needs only USD.
+ *   - kraken_to_coinbase: original direction — buy on Kraken, sell the
+ *     confirmed fill on Coinbase; requires TRADABLE (unstaked) Coinbase ETH.
+ * Both: balances verified BEFORE any order; the second leg fires only on a
+ * confirmed first-leg fill and only for the confirmed quantity; "completed"
+ * requires a full second-leg fill within exchange increment tolerance;
+ * realized P&L from actual fills+fees; ledger prefix "2XTEST:".
  */
 import { Router, type IRouter } from "express";
 import { db, tradesTable } from "@workspace/db";
@@ -49,6 +48,10 @@ type Leg = {
 
 // One-shot guard: refuse concurrent runs of this diagnostic.
 let testInFlight = false;
+// Sticky safety latch: set when a live order's fate could not be confirmed
+// (submitted but terminal state unknown). While set, LIVE runs are refused —
+// the trader must verify the order on the exchange first. Dry runs still work.
+let liveNeedsReconcile: string | null = null;
 
 router.post("/arb/two-exchange-test", async (req, res): Promise<void> => {
   const parsed = RunTwoExchangeTestBody.safeParse(req.body);
@@ -59,6 +62,7 @@ router.post("/arb/two-exchange-test", async (req, res): Promise<void> => {
   const startedAt = new Date().toISOString();
   const kCreds = { krakenKey: b.krakenKey, krakenSecret: b.krakenSecret };
   const cbCreds = { coinbaseKey: b.coinbaseKey, coinbaseSecret: b.coinbaseSecret };
+  const direction = b.direction ?? "coinbase_to_kraken";
 
   let balancesSeen: {
     krakenUsd: number; coinbaseEth: number; coinbaseEthStaked: number; coinbaseEthHold: number; coinbaseEthTotal: number;
@@ -67,46 +71,60 @@ router.post("/arb/two-exchange-test", async (req, res): Promise<void> => {
     coinbaseUsd: number; krakenEth: number;
   } | null = null;
   const blocked = (reason: string) => {
-    res.json({ success: false, isDryRun, outcome: "blocked", blockReason: reason, balances: balancesSeen, buyLeg: null, sellLeg: null, realizedProfitUsd: null, residualEthOpen: null, startedAt, finishedAt: new Date().toISOString(), error: null });
+    res.json({ success: false, isDryRun, direction, outcome: "blocked", blockReason: reason, balances: balancesSeen, buyLeg: null, sellLeg: null, realizedProfitUsd: null, residualEthOpen: null, startedAt, finishedAt: new Date().toISOString(), error: null });
   };
 
   if (!b.krakenKey || !b.krakenSecret) { blocked("Kraken API credentials missing."); return; }
   if (!b.coinbaseKey || !b.coinbaseSecret) { blocked("Coinbase API credentials missing."); return; }
   if (testInFlight) { blocked("A two-exchange test is already running — one at a time."); return; }
+  if (!isDryRun && liveNeedsReconcile) { blocked(`LIVE runs are locked: a previous order's outcome could not be confirmed (${liveNeedsReconcile}). Verify it on the exchange's order history first; restart the server to clear the lock once reconciled.`); return; }
   testInFlight = true;
   try {
     // ── 1. Pre-flight: prices + balances on BOTH venues, no orders yet ──────
-    let kAsk: number, cbBid: number;
+    let kAsk: number, cbBid: number, cbAsk: number, kBid: number;
     try {
       const [k, c] = await Promise.all([getKrakenBidAsk("ETH/USD"), getCoinbaseBidAsk("ETH/USD")]);
-      kAsk = k.ask; cbBid = c.bid;
-      if (!(kAsk > 0) || !(cbBid > 0)) throw new Error("zero/invalid quotes");
+      kAsk = k.ask; kBid = k.bid; cbBid = c.bid; cbAsk = c.ask;
+      // Only the quotes the selected direction actually uses may block it.
+      if (direction === "coinbase_to_kraken" ? (!(cbAsk > 0) || !(kBid > 0)) : (!(kAsk > 0) || !(cbBid > 0))) throw new Error("zero/invalid quotes");
     } catch (e) {
       blocked(`Could not fetch live ETH/USD quotes from both venues: ${(e as Error).message}`); return;
     }
-    const estQty = sizeUsd / kAsk;
-    let kUsd = 0, cbEth = 0;
+    // First-leg buy price depends on direction.
+    const estQty = direction === "coinbase_to_kraken" ? sizeUsd / cbAsk : sizeUsd / kAsk;
+    let kUsd = 0, cbEth = 0, kEthAvail = 0, cbUsdAvail = 0;
     try {
       const [kBals, ethDetail, usdDetail] = await Promise.all([
         getKrakenBalances(kCreds, true),
         getCoinbaseAssetDetail(cbCreds, "ETH"),
-        getCoinbaseAssetDetail(cbCreds, "USD"),
+        // USD detail is only REQUIRED for the reverse direction; for the
+        // legacy direction it is advisory display data and must not block.
+        direction === "coinbase_to_kraken"
+          ? getCoinbaseAssetDetail(cbCreds, "USD")
+          : getCoinbaseAssetDetail(cbCreds, "USD").catch(() => ({ available: 0, hold: 0, staked: 0, total: 0, accounts: [], accountsScanned: 0 })),
       ]);
       kUsd = kBals.filter(x => ["ZUSD", "USD"].includes(x.currency)).reduce((a, x) => a + x.amount, 0);
       // Kraken ETH (tradable) — needed for the REVERSE direction's sell leg.
-      const kEth = kBals.filter(x => ["XETH", "ETH"].includes(x.currency)).reduce((a, x) => a + x.amount, 0);
+      kEthAvail = kBals.filter(x => ["XETH", "ETH"].includes(x.currency)).reduce((a, x) => a + x.amount, 0);
       cbEth = ethDetail.available; // ONLY tradable ETH counts — staked/held ETH cannot fund a sell
       balancesSeen = {
         krakenUsd: kUsd, coinbaseEth: ethDetail.available, coinbaseEthStaked: ethDetail.staked,
         coinbaseEthHold: ethDetail.hold, coinbaseEthTotal: ethDetail.total,
         coinbaseEthAccounts: ethDetail.accounts, coinbaseAccountsScanned: ethDetail.accountsScanned,
-        coinbaseUsd: usdDetail.available, krakenEth: kEth,
+        coinbaseUsd: usdDetail.available, krakenEth: kEthAvail,
       };
-      req.log.info({ eth: ethDetail, krakenUsd: kUsd }, "[2XTEST] balance check breakdown");
+      cbUsdAvail = usdDetail.available;
+      req.log.info({ eth: ethDetail, krakenUsd: kUsd, coinbaseUsd: cbUsdAvail, krakenEth: kEthAvail, direction }, "[2XTEST] balance check breakdown");
     } catch (e) {
       blocked(`Balance check failed (bad credentials or exchange error): ${(e as Error).message}`); return;
     }
     const needEth = estQty * 1.02; // cushion: a market buy can fill slightly more qty than the ask-based estimate
+    if (direction === "coinbase_to_kraken") {
+      // REVERSE direction: needs USD on Coinbase (buy leg) + tradable ETH on
+      // Kraken (sell leg). Coinbase's staked ETH is irrelevant here.
+      if (cbUsdAvail < sizeUsd * 1.01) { blocked(`Insufficient USD on Coinbase: need ~$${(sizeUsd * 1.01).toFixed(2)} incl. fees, have $${cbUsdAvail.toFixed(2)}.`); return; }
+      if (kEthAvail < needEth) { blocked(`Insufficient tradable ETH on Kraken for the sell leg: need ~${needEth.toFixed(8)} ETH (incl. 2% fill cushion), have ${kEthAvail.toFixed(8)} — short by ${(needEth - kEthAvail).toFixed(8)} ETH.`); return; }
+    } else {
     if (kUsd < sizeUsd * 1.01) { blocked(`Insufficient USD on Kraken: need ~$${(sizeUsd * 1.01).toFixed(2)} incl. fees, have $${kUsd.toFixed(2)}.`); return; }
     if (cbEth < needEth) {
       const b = balancesSeen;
@@ -118,17 +136,136 @@ router.post("/arb/two-exchange-test", async (req, res): Promise<void> => {
           : b && b.coinbaseEthAccounts.length === 0
             ? ` The trading API found NO ETH account in the portfolio this API key can see (${b.coinbaseAccountsScanned} accounts scanned). Your ETH (and its staking) likely lives in a DIFFERENT Coinbase portfolio, or in staking that the trading API cannot see or sell. Either move/buy unstaked ETH in the portfolio this API key is scoped to, or create a key on the portfolio that holds the ETH.`
             : "";
-      blocked(`Insufficient TRADABLE ETH on Coinbase: need ~${needEth.toFixed(8)} ETH (incl. 2% fill cushion), tradable is ${cbEth.toFixed(8)} — short by ${shortfall.toFixed(8)} ETH.${stakedNote} Only unstaked/tradable ETH counts. Fund with ~$${(sizeUsd + 1).toFixed(0)} of unstaked ETH to proceed.`);
+      blocked(`Insufficient TRADABLE ETH on Coinbase: need ~${needEth.toFixed(8)} ETH (incl. 2% fill cushion), tradable is ${cbEth.toFixed(8)} — short by ${shortfall.toFixed(8)} ETH.${stakedNote} Only unstaked/tradable ETH counts. Fund with ~$${(sizeUsd + 1).toFixed(0)} of unstaked ETH — or switch to the Coinbase→Kraken direction, which needs no Coinbase ETH.`);
       return;
+    }
     }
 
     if (isDryRun) {
+      const legs = direction === "coinbase_to_kraken"
+        ? {
+            buyLeg: { exchange: "coinbase", side: "buy", orderId: null, status: "not_placed", filledQty: estQty, avgPrice: cbAsk, notionalUsd: sizeUsd, feeUsd: null, placedAt: null, terminalAt: null, error: null },
+            sellLeg: { exchange: "kraken", side: "sell", orderId: null, status: "not_placed", filledQty: estQty, avgPrice: kBid, notionalUsd: estQty * kBid, feeUsd: null, placedAt: null, terminalAt: null, error: null },
+          }
+        : {
+            buyLeg: { exchange: "kraken", side: "buy", orderId: null, status: "not_placed", filledQty: estQty, avgPrice: kAsk, notionalUsd: sizeUsd, feeUsd: null, placedAt: null, terminalAt: null, error: null },
+            sellLeg: { exchange: "coinbase", side: "sell", orderId: null, status: "not_placed", filledQty: estQty, avgPrice: cbBid, notionalUsd: estQty * cbBid, feeUsd: null, placedAt: null, terminalAt: null, error: null },
+          };
       res.json({
-        success: true, isDryRun, outcome: "dry_run_ok", blockReason: null, balances: balancesSeen,
-        buyLeg: { exchange: "kraken", side: "buy", orderId: null, status: "not_placed", filledQty: estQty, avgPrice: kAsk, notionalUsd: sizeUsd, feeUsd: null, placedAt: null, terminalAt: null, error: null },
-        sellLeg: { exchange: "coinbase", side: "sell", orderId: null, status: "not_placed", filledQty: estQty, avgPrice: cbBid, notionalUsd: estQty * cbBid, feeUsd: null, placedAt: null, terminalAt: null, error: null },
+        success: true, isDryRun, direction, outcome: "dry_run_ok", blockReason: null, balances: balancesSeen,
+        ...legs,
         realizedProfitUsd: null, residualEthOpen: null, startedAt, finishedAt: new Date().toISOString(),
         error: null,
+      });
+      return;
+    }
+
+    // ══ REVERSE DIRECTION: Coinbase buy → Kraken sell ══════════════════════
+    if (direction === "coinbase_to_kraken") {
+      // Leg 1: bounded IOC BUY on Coinbase — exact base size, 0.5% collar
+      // above the live ask; can never spend unbounded quote.
+      const incs = await getCoinbaseProductIncrements("ETH/USD").catch(() => undefined);
+      const qBase = (v: number) => incs ? quantizeDown(v, incs.baseIncrement).value : v;
+      const buyQty = qBase(estQty);
+      const buyPlacedAt = new Date().toISOString();
+      let buyOrderId: string | null = null;
+      let buy: { status: string; filledSize: number; filledValue: number; avgPrice: number; totalFees: number } | null = null;
+      try {
+        const fresh = await getCoinbaseBidAsk("ETH/USD");
+        const limitPx = fresh.ask * 1.005;
+        const r = await coinbaseIocLimitOrder(cbCreds, "BUY", buyQty, limitPx, "ETH/USD", incs);
+        buyOrderId = r.orderId ?? null;
+        if (!buyOrderId) throw new Error("Coinbase returned no order id");
+        const dl = Date.now() + TERMINAL_WAIT_MS;
+        while (Date.now() < dl) {
+          try {
+            const d = await coinbaseOrderDetails(cbCreds, buyOrderId);
+            if (["FILLED", "CANCELLED", "EXPIRED", "FAILED"].includes(d.status)) { buy = d; break; }
+          } catch { /* poll again */ }
+          await new Promise(r => setTimeout(r, POLL_MS));
+        }
+        if (!buy) buy = await coinbaseOrderDetails(cbCreds, buyOrderId);
+      } catch (e) {
+        // Post-submit ambiguity: the order MAY exist on Coinbase (request
+        // timeout, details fetch failure). NEVER claim "nothing was traded";
+        // latch live runs until the trader reconciles manually.
+        liveNeedsReconcile = `Coinbase BUY ${buyOrderId ?? "(order id unknown — check Coinbase order history around ${buyPlacedAt})"} unconfirmed: ${(e as Error).message}`;
+        res.json({ success: false, isDryRun, direction, outcome: "indeterminate", blockReason: null, balances: balancesSeen, buyLeg: { exchange: "coinbase", side: "buy", orderId: buyOrderId, status: "unknown", filledQty: null, avgPrice: null, notionalUsd: null, feeUsd: null, placedAt: buyPlacedAt, terminalAt: null, error: (e as Error).message }, sellLeg: null, realizedProfitUsd: null, residualEthOpen: null, startedAt, finishedAt: new Date().toISOString(), error: `Coinbase buy outcome UNCONFIRMED — it may or may not have filled. Check Coinbase order history (placed ~${buyPlacedAt}) before running again. Live runs are locked until then. ${(e as Error).message}` });
+        return;
+      }
+      const buyTerminalAt = new Date().toISOString();
+      const cbFilled = buy?.filledSize ?? 0;
+      const buyLegR: Leg = { exchange: "coinbase", side: "buy", orderId: buyOrderId, status: buy?.status ?? "unknown", filledQty: cbFilled, avgPrice: buy?.avgPrice || null, notionalUsd: buy?.filledValue || null, feeUsd: buy?.totalFees ?? null, placedAt: buyPlacedAt, terminalAt: buyTerminalAt, error: null };
+      if (buy && !["FILLED", "CANCELLED", "EXPIRED", "FAILED"].includes(buy.status)) {
+        liveNeedsReconcile = `Coinbase BUY ${buyOrderId} not terminal after ${TERMINAL_WAIT_MS / 1000}s`;
+        res.json({ success: false, isDryRun, direction, outcome: "indeterminate", blockReason: null, balances: balancesSeen, buyLeg: buyLegR, sellLeg: null, realizedProfitUsd: null, residualEthOpen: cbFilled || null, startedAt, finishedAt: new Date().toISOString(), error: `Coinbase order ${buyOrderId} did not reach a terminal state within ${TERMINAL_WAIT_MS / 1000}s — check Coinbase manually before selling anything. NOT selling on Kraken.` });
+        return;
+      }
+      if (cbFilled <= 1e-12) {
+        res.json({ success: false, isDryRun, direction, outcome: "buy_failed", blockReason: null, balances: balancesSeen, buyLeg: buyLegR, sellLeg: null, realizedProfitUsd: null, residualEthOpen: 0, startedAt, finishedAt: new Date().toISOString(), error: "Coinbase buy reached a terminal state with zero fill (IOC missed the collar) — nothing was traded. Try again." });
+        return;
+      }
+
+      // Leg 2: Kraken market SELL of the CONFIRMED Coinbase fill, from
+      // pre-positioned Kraken ETH (never more than exists there). Kraken
+      // ETH/USD lot_decimals is 8 — quantize DOWN so the request is exactly
+      // representable; only that truncation remainder is tolerated below.
+      const KRAKEN_LOT_STEP = 1e-8;
+      const sellTarget = Math.floor(Math.min(cbFilled, kEthAvail) / KRAKEN_LOT_STEP) * KRAKEN_LOT_STEP;
+      const krakenShort = sellTarget < cbFilled - Math.max(KRAKEN_LOT_STEP, cbFilled * 1e-6);
+      const sellPlacedAt = new Date().toISOString();
+      let sellTxid: string | null = null;
+      let sellInfo = { status: "unknown", volExec: 0, price: 0, cost: 0, fee: 0 };
+      let sellError: string | null = null;
+      try {
+        const r = await krakenRawMarketOrder(kCreds, "sell", sellTarget, PAIR_KRAKEN);
+        sellTxid = r.txid?.[0] ?? "";
+        if (!sellTxid) throw new Error("Kraken returned no txid");
+        const dl = Date.now() + TERMINAL_WAIT_MS;
+        while (Date.now() < dl) {
+          try { sellInfo = await krakenOrderInfo(kCreds, sellTxid); } catch { /* poll again */ }
+          if (["closed", "canceled", "expired"].includes(sellInfo.status)) break;
+          await new Promise(r => setTimeout(r, POLL_MS));
+        }
+      } catch (e) {
+        sellError = (e as Error).message;
+      }
+      const sellTerminalAt = new Date().toISOString();
+      const kSold = sellInfo.volExec || 0;
+      const sellLegR: Leg = { exchange: "kraken", side: "sell", orderId: sellTxid, status: sellInfo.status, filledQty: kSold, avgPrice: sellInfo.price || null, notionalUsd: sellInfo.cost || null, feeUsd: sellInfo.fee || null, placedAt: sellPlacedAt, terminalAt: sellTerminalAt, error: sellError };
+      const indeterminateSell = sellTxid && !sellError && !["closed", "canceled", "expired"].includes(sellInfo.status);
+      if (indeterminateSell) liveNeedsReconcile = `Kraken SELL ${sellTxid} not terminal after ${TERMINAL_WAIT_MS / 1000}s`;
+      // Full completion requires terminal CLOSED (never canceled/expired) and
+      // the entire lot-quantized target sold — tolerance is ONE lot step, the
+      // only unavoidable truncation remainder.
+      const fullySold = !indeterminateSell && !krakenShort && sellInfo.status === "closed" && kSold >= sellTarget - KRAKEN_LOT_STEP;
+      const realized = fullySold && buy ? (sellInfo.cost - sellInfo.fee) - (buy.filledValue + buy.totalFees) : null;
+      const residual = Math.max(0, cbFilled - kSold);
+      const outcome = indeterminateSell ? "indeterminate" : kSold <= 1e-12 ? "sell_failed" : fullySold ? "completed" : "partial_sell";
+      try {
+        await db.insert(tradesTable).values({
+          pair: `2XTEST:ETH CB-buy→K-sell${outcome !== "completed" ? ` [${outcome}: residual ${residual.toFixed(8)} ETH]` : ""}`,
+          buyExchange: "coinbase", sellExchange: "kraken",
+          volume: cbFilled.toFixed(8),
+          estimatedProfitUsd: "0", netEdgePct: "0", isDryRun: false,
+          krakenPrice: (sellInfo.price || 0).toFixed(8), coinbasePrice: (buy?.avgPrice ?? 0).toFixed(8),
+          buyOrderId: buyOrderId, sellOrderId: sellTxid,
+          status: outcome === "completed" ? "verified" : "unhedged",
+          realizedProfitUsd: realized != null ? realized.toFixed(6) : null,
+        });
+      } catch (e) {
+        req.log.error({ err: e }, "[2XTEST] failed to write trades ledger row");
+      }
+      req.log.info({ buyOrderId, sellTxid, outcome, realized, direction }, "[2XTEST] two-exchange test finished");
+      res.json({
+        success: outcome === "completed", isDryRun, direction, outcome, blockReason: null, balances: balancesSeen,
+        buyLeg: buyLegR, sellLeg: sellLegR,
+        realizedProfitUsd: realized, residualEthOpen: residual > 1e-12 ? residual : 0,
+        startedAt, finishedAt: new Date().toISOString(),
+        error: outcome === "completed" ? null
+          : outcome === "indeterminate" ? `Kraken sell ${sellTxid} did not confirm terminal within ${TERMINAL_WAIT_MS / 1000}s — verify on Kraken before doing anything else.`
+          : outcome === "sell_failed" ? `Coinbase buy FILLED ${cbFilled.toFixed(8)} ETH but the Kraken sell did not fill — the bought ETH sits on Coinbase unsold (no loss locked in; net ETH position increased). ${sellError ?? ""}`.trim()
+          : `Kraken sold ${kSold.toFixed(8)} of ${cbFilled.toFixed(8)} ETH${krakenShort ? " (Kraken tradable ETH was short of the confirmed Coinbase fill)" : ""} — residual ${residual.toFixed(8)} ETH remains long. P&L not realized.`,
       });
       return;
     }
@@ -141,7 +278,7 @@ router.post("/arb/two-exchange-test", async (req, res): Promise<void> => {
       buyTxid = r.txid?.[0] ?? "";
       if (!buyTxid) throw new Error("Kraken returned no txid");
     } catch (e) {
-      res.json({ success: false, isDryRun, outcome: "buy_failed", blockReason: null, balances: balancesSeen, buyLeg: { exchange: "kraken", side: "buy", orderId: null, status: "rejected", filledQty: 0, avgPrice: null, notionalUsd: null, feeUsd: null, placedAt: buyPlacedAt, terminalAt: new Date().toISOString(), error: (e as Error).message }, sellLeg: null, realizedProfitUsd: null, residualEthOpen: null, startedAt, finishedAt: new Date().toISOString(), error: `Kraken buy rejected — nothing was traded. ${(e as Error).message}` });
+      res.json({ success: false, isDryRun, direction, outcome: "buy_failed", blockReason: null, balances: balancesSeen, buyLeg: { exchange: "kraken", side: "buy", orderId: null, status: "rejected", filledQty: 0, avgPrice: null, notionalUsd: null, feeUsd: null, placedAt: buyPlacedAt, terminalAt: new Date().toISOString(), error: (e as Error).message }, sellLeg: null, realizedProfitUsd: null, residualEthOpen: null, startedAt, finishedAt: new Date().toISOString(), error: `Kraken buy rejected — nothing was traded. ${(e as Error).message}` });
       return;
     }
     let info = { status: "unknown", volExec: 0, price: 0, cost: 0, fee: 0 };
@@ -155,12 +292,12 @@ router.post("/arb/two-exchange-test", async (req, res): Promise<void> => {
     const buyLeg: Leg = { exchange: "kraken", side: "buy", orderId: buyTxid, status: info.status, filledQty: info.volExec, avgPrice: info.price || null, notionalUsd: info.cost || null, feeUsd: info.fee || null, placedAt: buyPlacedAt, terminalAt: buyTerminalAt, error: null };
     if (!["closed", "canceled", "expired"].includes(info.status)) {
       // Market order not confirmed terminal — do NOT fire the sell against an unknown position.
-      res.json({ success: false, isDryRun, outcome: "indeterminate", blockReason: null, balances: balancesSeen, buyLeg, sellLeg: null, realizedProfitUsd: null, residualEthOpen: info.volExec || null, startedAt, finishedAt: new Date().toISOString(), error: `Kraken order ${buyTxid} did not reach a terminal state within ${TERMINAL_WAIT_MS / 1000}s — check Kraken manually before selling anything. NOT selling on Coinbase.` });
+      res.json({ success: false, isDryRun, direction, outcome: "indeterminate", blockReason: null, balances: balancesSeen, buyLeg, sellLeg: null, realizedProfitUsd: null, residualEthOpen: info.volExec || null, startedAt, finishedAt: new Date().toISOString(), error: `Kraken order ${buyTxid} did not reach a terminal state within ${TERMINAL_WAIT_MS / 1000}s — check Kraken manually before selling anything. NOT selling on Coinbase.` });
       return;
     }
     const filledQty = info.volExec || 0;
     if (filledQty <= 1e-12) {
-      res.json({ success: false, isDryRun, outcome: "buy_failed", blockReason: null, balances: balancesSeen, buyLeg, sellLeg: null, realizedProfitUsd: null, residualEthOpen: 0, startedAt, finishedAt: new Date().toISOString(), error: "Kraken buy reached a terminal state with zero fill — nothing was traded, nothing to sell." });
+      res.json({ success: false, isDryRun, direction, outcome: "buy_failed", blockReason: null, balances: balancesSeen, buyLeg, sellLeg: null, realizedProfitUsd: null, residualEthOpen: 0, startedAt, finishedAt: new Date().toISOString(), error: "Kraken buy reached a terminal state with zero fill — nothing was traded, nothing to sell." });
       return;
     }
 
@@ -226,7 +363,7 @@ router.post("/arb/two-exchange-test", async (req, res): Promise<void> => {
     }
     req.log.info({ buyTxid, sellOrderId, outcome, realized }, "[2XTEST] two-exchange test finished");
     res.json({
-      success: outcome === "completed", isDryRun, outcome, blockReason: null, balances: balancesSeen, buyLeg, sellLeg,
+      success: outcome === "completed", isDryRun, direction, outcome, blockReason: null, balances: balancesSeen, buyLeg, sellLeg,
       realizedProfitUsd: realized, residualEthOpen: residual > 1e-12 ? residual : 0,
       startedAt, finishedAt: new Date().toISOString(),
       error: outcome === "completed" ? null : outcome === "sell_failed"

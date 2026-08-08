@@ -495,6 +495,17 @@ export interface CrossMmStats {
   recent?: CrossMmStatsRecentItem[];
 }
 
+/**
+ * coinbase_to_kraken (default): buy ETH on Coinbase with USD, sell the confirmed fill on Kraken from pre-positioned tradable ETH — works when Coinbase ETH is staked. kraken_to_coinbase: original direction, needs tradable ETH on Coinbase.
+ */
+export type TwoExchangeTestRequestDirection = typeof TwoExchangeTestRequestDirection[keyof typeof TwoExchangeTestRequestDirection];
+
+
+export const TwoExchangeTestRequestDirection = {
+  coinbase_to_kraken: 'coinbase_to_kraken',
+  kraken_to_coinbase: 'kraken_to_coinbase',
+} as const;
+
 export interface TwoExchangeTestRequest {
   krakenKey: string;
   krakenSecret: string;
@@ -507,6 +518,8 @@ export interface TwoExchangeTestRequest {
   sizeUsd?: number;
   /** When true, verifies balances and prices but places no orders. */
   isDryRun?: boolean;
+  /** coinbase_to_kraken (default): buy ETH on Coinbase with USD, sell the confirmed fill on Kraken from pre-positioned tradable ETH — works when Coinbase ETH is staked. kraken_to_coinbase: original direction, needs tradable ETH on Coinbase. */
+  direction?: TwoExchangeTestRequestDirection;
 }
 
 export interface TwoExchangeTestLeg {
@@ -558,6 +571,8 @@ export type TwoExchangeTestResultBalances = {
 export interface TwoExchangeTestResult {
   success: boolean;
   isDryRun: boolean;
+  /** Which direction ran: coinbase_to_kraken or kraken_to_coinbase */
+  direction?: string | null;
   /** dry_run_ok | blocked | buy_failed | sell_failed | partial_sell | completed | indeterminate */
   outcome: string;
   blockReason?: string | null;

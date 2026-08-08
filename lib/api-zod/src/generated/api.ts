@@ -608,6 +608,7 @@ export const runTwoExchangeTestBodySizeUsdDefault = 10;
 export const runTwoExchangeTestBodySizeUsdMax = 10;
 
 export const runTwoExchangeTestBodyIsDryRunDefault = true;
+export const runTwoExchangeTestBodyDirectionDefault = `coinbase_to_kraken`;
 
 export const RunTwoExchangeTestBody = zod.object({
   "krakenKey": zod.string(),
@@ -615,12 +616,14 @@ export const RunTwoExchangeTestBody = zod.object({
   "coinbaseKey": zod.string(),
   "coinbaseSecret": zod.string(),
   "sizeUsd": zod.number().max(runTwoExchangeTestBodySizeUsdMax).default(runTwoExchangeTestBodySizeUsdDefault).describe('USD size of the Kraken buy. Hard-capped at $10 — this is a diagnostic, not a strategy.'),
-  "isDryRun": zod.boolean().default(runTwoExchangeTestBodyIsDryRunDefault).describe('When true, verifies balances and prices but places no orders.')
+  "isDryRun": zod.boolean().default(runTwoExchangeTestBodyIsDryRunDefault).describe('When true, verifies balances and prices but places no orders.'),
+  "direction": zod.enum(['coinbase_to_kraken', 'kraken_to_coinbase']).default(runTwoExchangeTestBodyDirectionDefault).describe('coinbase_to_kraken (default): buy ETH on Coinbase with USD, sell the confirmed fill on Kraken from pre-positioned tradable ETH — works when Coinbase ETH is staked. kraken_to_coinbase: original direction, needs tradable ETH on Coinbase.\n')
 })
 
 export const RunTwoExchangeTestResponse = zod.object({
   "success": zod.boolean(),
   "isDryRun": zod.boolean(),
+  "direction": zod.string().nullish().describe('Which direction ran: coinbase_to_kraken or kraken_to_coinbase'),
   "outcome": zod.string().describe('dry_run_ok | blocked | buy_failed | sell_failed | partial_sell | completed | indeterminate'),
   "blockReason": zod.string().nullish(),
   "balances": zod.object({
