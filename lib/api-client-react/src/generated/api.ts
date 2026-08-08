@@ -50,6 +50,7 @@ import type {
   ListTradesParams,
   ObExecuteRequest,
   ObExecuteResult,
+  ObPairsRefresh200,
   ObScanResult,
   PairScanEntry,
   PreloadedCredentials,
@@ -1085,6 +1086,84 @@ export function useGetObScan<TData = Awaited<ReturnType<typeof getObScan>>, TErr
  ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
 
   const queryOptions = getGetObScanQueryOptions(params,options)
+
+  const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+
+export const getObPairsRefreshUrl = () => {
+
+
+
+
+  return `/api/arb/ob-pairs-refresh`
+}
+
+/**
+ * Invalidates the cached AssetPairs discovery result and re-queries Kraken immediately, so new listings appear in ob-scan without a server restart. When the refresh fails but a previous discovered set exists, that set is kept (refreshed=false only when running on the hardcoded fallback).
+ * @summary Force-refresh the discovered Kraken cross-pair list
+ */
+export const obPairsRefresh = async ( options?: RequestInit): Promise<ObPairsRefresh200> => {
+
+  return customFetch<ObPairsRefresh200>(getObPairsRefreshUrl(),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getObPairsRefreshQueryKey = () => {
+    return [
+    `/api/arb/ob-pairs-refresh`
+    ] as const;
+    }
+
+
+export const getObPairsRefreshQueryOptions = <TData = Awaited<ReturnType<typeof obPairsRefresh>>, TError = ErrorType<ErrorResponse>>( options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof obPairsRefresh>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getObPairsRefreshQueryKey();
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof obPairsRefresh>>> = ({ signal }) => obPairsRefresh({ signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof obPairsRefresh>>, TError, TData> & { queryKey: QueryKey }
+}
+
+export type ObPairsRefreshQueryResult = NonNullable<Awaited<ReturnType<typeof obPairsRefresh>>>
+export type ObPairsRefreshQueryError = ErrorType<ErrorResponse>
+
+
+/**
+ * @summary Force-refresh the discovered Kraken cross-pair list
+ */
+
+export function useObPairsRefresh<TData = Awaited<ReturnType<typeof obPairsRefresh>>, TError = ErrorType<ErrorResponse>>(
+  options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof obPairsRefresh>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+
+ ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+
+  const queryOptions = getObPairsRefreshQueryOptions(options)
 
   const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
 

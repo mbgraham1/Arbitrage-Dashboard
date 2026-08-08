@@ -378,6 +378,44 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
 
+  /arb/ob-pairs-refresh:
+    get:
+      operationId: obPairsRefresh
+      tags: [arb]
+      summary: Force-refresh the discovered Kraken cross-pair list
+      description: >
+        Invalidates the cached AssetPairs discovery result and re-queries
+        Kraken immediately, so new listings appear in ob-scan without a server
+        restart. When the refresh fails but a previous discovered set exists,
+        that set is kept (refreshed=false only when running on the hardcoded
+        fallback).
+      responses:
+        "200":
+          description: Refresh result
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [refreshed, crossPairsDiscovered, cachedAt]
+                properties:
+                  refreshed:
+                    type: boolean
+                    description: True when a real discovered set is active (fresh or previous good cache)
+                  crossPairsDiscovered:
+                    type: integer
+                    description: Number of crypto cross pairs in the active discovered set (0 = hardcoded fallback)
+                  cachedAt:
+                    type: string
+                    format: date-time
+                    nullable: true
+                    description: When the active discovered set was cached (null on hardcoded fallback)
+        "500":
+          description: Refresh error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
   /arb/ob-execute:
     post:
       operationId: obExecute

@@ -341,6 +341,23 @@ router.get("/arb/ob-scan", async (req, res): Promise<void> => {
   }
 });
 
+// ── GET /arb/ob-pairs-refresh ─────────────────────────────────────────────────
+// Force-invalidates the discovered cross-pair cache and re-queries Kraken
+// AssetPairs immediately, so an operator can pick up new listings on demand.
+router.get("/arb/ob-pairs-refresh", async (req, res): Promise<void> => {
+  try {
+    const d = await discoverCrossPairs(true);
+    res.json({
+      refreshed: d.cachedAt > 0,
+      crossPairsDiscovered: d.cachedAt > 0 ? d.crossMap.length : 0,
+      cachedAt: d.cachedAt > 0 ? new Date(d.cachedAt).toISOString() : null,
+    });
+  } catch (err) {
+    req.log.error({ err }, "ob-pairs-refresh error");
+    res.status(500).json({ error: (err as Error).message });
+  }
+});
+
 // ── POST /arb/ob-execute ──────────────────────────────────────────────────────
 // Port of Python v18 "MANUAL EXECUTION BUTTON": re-fetches FRESH order books
 // for the top route, re-simulates (pre-flight), and only places orders when

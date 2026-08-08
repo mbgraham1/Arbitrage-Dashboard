@@ -887,6 +887,15 @@ maxSlippagePct?: number;
 volatilityFilter?: boolean;
 };
 
+export type ObPairsRefresh200 = {
+  /** True when a real discovered set is active (fresh or previous good cache) */
+  refreshed: boolean;
+  /** Number of crypto cross pairs in the active discovered set (0 = hardcoded fallback) */
+  crossPairsDiscovered: number;
+  /** When the active discovered set was cached (null on hardcoded fallback) */
+  cachedAt: string | null;
+};
+
 export type GetGraphScanParams = {
 tradeSizeUsd?: number;
 krakenFeesPct?: number;

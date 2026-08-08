@@ -161,9 +161,13 @@ export function _testOnly_clearCrossCache(): void { crossPairsCache = null; }
  *   → baseAsset-quoteAsset: aIsQuote=false (sell base)
  *
  * Falls back to the hardcoded CROSS_LOOKUP / OB_CROSS_MAP on any error.
+ *
+ * @param forceRefresh — bypass the cache and re-query Kraken now. On failure
+ * the previous cache (if any) is kept so a failed forced refresh never
+ * downgrades the scanner to the hardcoded fallback.
  */
-export async function discoverCrossPairs(): Promise<DiscoveredCrossPairs> {
-  if (crossPairsCache && Date.now() - crossPairsCache.cachedAt < ASSET_PAIRS_CACHE_TTL_MS) {
+export async function discoverCrossPairs(forceRefresh = false): Promise<DiscoveredCrossPairs> {
+  if (!forceRefresh && crossPairsCache && Date.now() - crossPairsCache.cachedAt < ASSET_PAIRS_CACHE_TTL_MS) {
     return crossPairsCache;
   }
   try {
@@ -220,11 +224,49 @@ export async function discoverCrossPairs(): Promise<DiscoveredCrossPairs> {
     }
     throw new Error("discovery returned 0 cross pairs");
   } catch (err) {
+    // On a failed FORCED refresh, keep serving the previous good cache rather
+    // than downgrading to the hardcoded fallback.
+    if (crossPairsCache) {
+      console.warn("[OB] AssetPairs refresh failed — keeping previous discovered set:", err);
+      return crossPairsCache;
+    }
     console.warn("[OB] AssetPairs discovery failed — using hardcoded fallback:", err);
     // Return a cache-skipping wrapper so each scan retries on the next call
     // (but use the hardcoded map in the meantime).
     return { lookup: CROSS_LOOKUP, crossMap: OB_CROSS_MAP, cachedAt: 0 };
   }
+}
+
+// ── Background cross-pair auto-refresh ────────────────────────────────────────
+
+const CROSS_REFRESH_INTERVAL_MS = 4 * 60 * 60 * 1_000; // 4 hours
+const CROSS_REFRESH_RETRY_MS    = 10 * 60 * 1_000;     // retry sooner on failure
+
+let crossRefreshTimer: NodeJS.Timeout | null = null;
+
+/**
+ * Starts a background loop that force-refreshes the discovered cross-pair
+ * list every 4 hours (retrying after 10 minutes when Kraken is unreachable),
+ * so new Kraken listings appear without a server restart. Idempotent.
+ */
+export function startCrossPairsAutoRefresh(): void {
+  if (crossRefreshTimer) return;
+  const tick = async (): Promise<void> => {
+    let ok = false;
+    try {
+      const d = await discoverCrossPairs(true);
+      // cachedAt > 0 means a real discovered set (fresh or previous good cache)
+      ok = d.cachedAt > 0;
+    } catch { /* discoverCrossPairs never throws, but be safe */ }
+    const delay = ok ? CROSS_REFRESH_INTERVAL_MS : CROSS_REFRESH_RETRY_MS;
+    crossRefreshTimer = setTimeout(() => { void tick(); }, delay);
+    crossRefreshTimer.unref?.();
+  };
+  // First refresh happens one full interval from startup — the first scan's
+  // own discoverCrossPairs() call populates the cache immediately anyway.
+  crossRefreshTimer = setTimeout(() => { void tick(); }, CROSS_REFRESH_INTERVAL_MS);
+  crossRefreshTimer.unref?.();
+  console.log(`[OB] Cross-pair auto-refresh started (every ${CROSS_REFRESH_INTERVAL_MS / 3_600_000}h)`);
 }
 
 // ── Order book fetch with short cache ─────────────────────────────────────────

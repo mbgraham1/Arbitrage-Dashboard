@@ -55,6 +55,7 @@ export * from './obCycleEntry';
 export * from './obCycleEntryStatus';
 export * from './obExecuteRequest';
 export * from './obExecuteResult';
+export * from './obPairsRefresh200';
 export * from './obScalingRow';
 export * from './obScalingRowStatus';
 export * from './obScanResult';

@@ -360,6 +360,17 @@ export const GetObScanResponse = zod.object({
 
 
 /**
+ * Invalidates the cached AssetPairs discovery result and re-queries Kraken immediately, so new listings appear in ob-scan without a server restart. When the refresh fails but a previous discovered set exists, that set is kept (refreshed=false only when running on the hardcoded fallback).
+ * @summary Force-refresh the discovered Kraken cross-pair list
+ */
+export const ObPairsRefreshResponse = zod.object({
+  "refreshed": zod.boolean().describe('True when a real discovered set is active (fresh or previous good cache)'),
+  "crossPairsDiscovered": zod.number().describe('Number of crypto cross pairs in the active discovered set (0 = hardcoded fallback)'),
+  "cachedAt": zod.coerce.date().nullable().describe('When the active discovered set was cached (null on hardcoded fallback)')
+})
+
+
+/**
  * Port of the Python v18 MANUAL EXECUTION BUTTON. Re-fetches fresh order books for the route (cache bypassed), re-simulates the cycle (pre-flight), and only places 3 sequential Kraken market orders when the fresh profit exceeds minProfitUsd × (size/10). Dry-run records a ledger row without placing orders. Legs are sized from the pre-flight simulation with orientation-aware cross-pair sides.
  * @summary Manually execute the top Order Book Hunter route (v18 port)
  */
