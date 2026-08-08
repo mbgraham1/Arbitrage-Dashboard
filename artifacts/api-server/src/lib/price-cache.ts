@@ -414,16 +414,38 @@ export interface TriPrices {
  * SOL/USD and ETH/USD legs come from pairCache; ETH/SOL comes from the direct WS market
  * (Kraken only) or falls back to a synthetic cross using same-exchange legs.
  */
-export function getTriPrices(): TriPrices {
-  const now = Date.now();
-
-  const syntheticEthSol = (
-    ethBid: number, ethAsk: number,
-    solBid: number, solAsk: number,
-  ): { bid: number; ask: number } => ({
+/**
+ * Synthetic ETH/SOL cross rate from same-exchange USD legs.
+ *
+ * bid = ethBid / solAsk  (what you'd realistically receive selling ETH for SOL
+ *                         via USD: sell ETH at ethBid, buy SOL at solAsk)
+ * ask = ethAsk / solBid  (cost of buying ETH with SOL via USD)
+ *
+ * Bias note (validated 2026-08, see synthetic-ethsol.test.ts + live
+ * cross-exchange check: Kraken synthetic mid agreed with the independent
+ * Coinbase synthetic mid within ~1.3 bp): the synthetic MID tracks the true
+ * ETH/SOL cross within a few basis points, but the synthetic SPREAD is the
+ * *compounded* spread of both USD legs (relative spread ≈ ethSpread% +
+ * solSpread%), so it is consistently WIDER than a real direct book would be.
+ * This bias is conservative for the triangular edge calculation: loops that
+ * cross the synthetic leg pay the widened spread, so computed edges
+ * UNDERSTATE (never overstate) the profit a real direct ETH/SOL order would
+ * capture. No correction is applied — a pessimistic edge is the safe side
+ * for live execution, and live ETH execution is separately blocked while the
+ * source is "synthetic" (see arb-ethsol-guard).
+ */
+export function syntheticEthSol(
+  ethBid: number, ethAsk: number,
+  solBid: number, solAsk: number,
+): { bid: number; ask: number } {
+  return {
     bid: solAsk > 0 ? ethBid / solAsk : 0,
     ask: solBid > 0 ? ethAsk / solBid : 0,
-  });
+  };
+}
+
+export function getTriPrices(): TriPrices {
+  const now = Date.now();
 
   // ── Kraken ────────────────────────────────────────────────────────────────
   let krakenResult: TriPrices["kraken"] = null;
