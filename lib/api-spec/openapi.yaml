@@ -625,6 +625,70 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
 
+  /arb/2x-scan:
+    get:
+      operationId: get2xScan
+      tags: [trades]
+      summary: Profitability-gated two-exchange scanner (Kraken↔Coinbase, both directions)
+      description: >
+        Prices BOTH directions per asset (ETH, BTC, SOL) from live depth books:
+        depth-walked VWAP for the intended size, per-venue taker fees, slippage
+        vs top-of-book, safety buffer, freshness. Every route gets an explicit
+        FIRE/SKIP decision with the exact reason. Never trades. Fees are
+        assumed defaults unless krakenFeePct/coinbaseFeePct query params carry
+        real detected tiers (feesAssumed flags this).
+      parameters:
+        - { name: sizeUsd, in: query, schema: { type: number } }
+        - { name: krakenFeePct, in: query, schema: { type: number } }
+        - { name: coinbaseFeePct, in: query, schema: { type: number } }
+        - { name: minNetUsd, in: query, schema: { type: number } }
+        - { name: bufferUsd, in: query, schema: { type: number } }
+        - { name: maxQuoteAgeMs, in: query, schema: { type: number } }
+      responses:
+        "200":
+          description: All routes with FIRE/SKIP decisions plus the best route
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TwoXScanResult"
+  /arb/2x-execute:
+    post:
+      operationId: execute2x
+      tags: [trades]
+      summary: Execute ONE profitability-gated two-exchange cycle (hard $10 cap)
+      description: >
+        Re-projects the route on CURRENT books with REAL detected fee tiers on
+        both venues (refuses to guess), re-checks freshness, inventory, floor
+        and buffer, takes the SHARED live execution lock, then places the buy,
+        waits for the CONFIRMED fill, and immediately sells exactly that
+        quantity on the other venue from pre-positioned inventory. Full
+        fills/fees/latency/realized P&L logged. Post-submit ambiguity latches
+        live runs off until manually reconciled.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TwoXExecuteRequest"
+      responses:
+        "200":
+          description: Execution (or skip) report with per-leg detail
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TwoXExecuteResult"
+  /arb/2x-stats:
+    get:
+      operationId: get2xStats
+      tags: [trades]
+      summary: Cumulative realized P&L for the two-exchange strategy (2X + 2XTEST rows)
+      responses:
+        "200":
+          description: Trade counts and cumulative realized P&L — the only proof of profitability
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TwoXStats"
   /arb/fee-tier:
     post:
       operationId: getFeeTier
@@ -1604,6 +1668,115 @@ components:
         startedAt: { type: string, nullable: true }
         finishedAt: { type: string, nullable: true }
         error: { type: string, nullable: true }
+    TwoXRouteDecision:
+      type: object
+      properties:
+        asset: { type: string }
+        buyVenue: { type: string }
+        direction: { type: string }
+        decision: { type: string, description: "FIRE | SKIP" }
+        reason: { type: string }
+        grossSpreadUsd: { type: number, nullable: true }
+        feesUsd: { type: number, nullable: true }
+        slippageUsd: { type: number, nullable: true }
+        bufferUsd: { type: number }
+        netProfitUsd: { type: number, nullable: true }
+        baseQty: { type: number, nullable: true }
+        quoteAgeMs: { type: number, nullable: true }
+        legs:
+          type: array
+          nullable: true
+          items:
+            type: object
+            properties:
+              venue: { type: string }
+              pair: { type: string }
+              side: { type: string }
+              topPx: { type: number }
+              vwapPx: { type: number }
+              feePct: { type: number }
+    TwoXScanResult:
+      type: object
+      properties:
+        scannedAt: { type: string }
+        params:
+          type: object
+          properties:
+            sizeUsd: { type: number }
+            krakenFeePct: { type: number }
+            coinbaseFeePct: { type: number }
+            minNetUsd: { type: number }
+            bufferUsd: { type: number }
+            maxQuoteAgeMs: { type: number }
+            feesAssumed: { type: boolean }
+        best:
+          allOf: [{ $ref: "#/components/schemas/TwoXRouteDecision" }]
+          nullable: true
+        routes:
+          type: array
+          items:
+            $ref: "#/components/schemas/TwoXRouteDecision"
+    TwoXExecuteRequest:
+      type: object
+      required: [krakenKey, krakenSecret, coinbaseKey, coinbaseSecret, asset, buyVenue]
+      properties:
+        krakenKey: { type: string }
+        krakenSecret: { type: string }
+        coinbaseKey: { type: string }
+        coinbaseSecret: { type: string }
+        asset: { type: string, description: "ETH | BTC | SOL" }
+        buyVenue: { type: string, enum: [kraken, coinbase] }
+        sizeUsd: { type: number, maximum: 10, description: "Hard $10 cap until realized track record is positive" }
+        minNetUsd: { type: number }
+        bufferUsd: { type: number }
+        maxQuoteAgeMs: { type: number }
+    TwoXLeg:
+      type: object
+      properties:
+        venue: { type: string }
+        orderId: { type: string, nullable: true }
+        status: { type: string }
+        filledQty: { type: number, nullable: true }
+        avgPrice: { type: number, nullable: true }
+        notionalUsd: { type: number, nullable: true }
+        feeUsd: { type: number, nullable: true }
+        latencyMs: { type: number }
+    TwoXExecuteResult:
+      type: object
+      properties:
+        executed: { type: boolean }
+        outcome: { type: string, description: "skipped | completed | partial_sell | sell_failed | indeterminate | unhedged" }
+        reason: { type: string }
+        asset: { type: string }
+        buyVenue: { type: string }
+        startedAt: { type: string }
+        finishedAt: { type: string }
+        buyLeg:
+          allOf: [{ $ref: "#/components/schemas/TwoXLeg" }]
+          nullable: true
+        sellLeg:
+          allOf: [{ $ref: "#/components/schemas/TwoXLeg" }]
+          nullable: true
+        realizedProfitUsd: { type: number, nullable: true }
+        projection:
+          allOf: [{ $ref: "#/components/schemas/TwoXRouteDecision" }]
+          nullable: true
+    TwoXStats:
+      type: object
+      properties:
+        trades: { type: number }
+        completed: { type: number }
+        incomplete: { type: number }
+        cumulativeRealizedUsd: { type: number }
+        recent:
+          type: array
+          items:
+            type: object
+            properties:
+              pair: { type: string }
+              realizedUsd: { type: number, nullable: true }
+              status: { type: string, nullable: true }
+              at: { type: string, nullable: true }
     FeeTierRequest:
       type: object
       required: [krakenKey, krakenSecret]

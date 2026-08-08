@@ -588,6 +588,116 @@ export interface TwoExchangeTestResult {
   error?: string | null;
 }
 
+export type TwoXRouteDecisionLegsItem = {
+  venue?: string;
+  pair?: string;
+  side?: string;
+  topPx?: number;
+  vwapPx?: number;
+  feePct?: number;
+};
+
+export interface TwoXRouteDecision {
+  asset?: string;
+  buyVenue?: string;
+  direction?: string;
+  /** FIRE | SKIP */
+  decision?: string;
+  reason?: string;
+  grossSpreadUsd?: number | null;
+  feesUsd?: number | null;
+  slippageUsd?: number | null;
+  bufferUsd?: number;
+  netProfitUsd?: number | null;
+  baseQty?: number | null;
+  quoteAgeMs?: number | null;
+  legs?: TwoXRouteDecisionLegsItem[] | null;
+}
+
+export type TwoXScanResultParams = {
+  sizeUsd?: number;
+  krakenFeePct?: number;
+  coinbaseFeePct?: number;
+  minNetUsd?: number;
+  bufferUsd?: number;
+  maxQuoteAgeMs?: number;
+  feesAssumed?: boolean;
+};
+
+export interface TwoXScanResult {
+  scannedAt?: string;
+  params?: TwoXScanResultParams;
+  best?: TwoXRouteDecision | null;
+  routes?: TwoXRouteDecision[];
+}
+
+export type TwoXExecuteRequestBuyVenue = typeof TwoXExecuteRequestBuyVenue[keyof typeof TwoXExecuteRequestBuyVenue];
+
+
+export const TwoXExecuteRequestBuyVenue = {
+  kraken: 'kraken',
+  coinbase: 'coinbase',
+} as const;
+
+export interface TwoXExecuteRequest {
+  krakenKey: string;
+  krakenSecret: string;
+  coinbaseKey: string;
+  coinbaseSecret: string;
+  /** ETH | BTC | SOL */
+  asset: string;
+  buyVenue: TwoXExecuteRequestBuyVenue;
+  /**
+     * Hard $10 cap until realized track record is positive
+     * @maximum 10
+     */
+  sizeUsd?: number;
+  minNetUsd?: number;
+  bufferUsd?: number;
+  maxQuoteAgeMs?: number;
+}
+
+export interface TwoXLeg {
+  venue?: string;
+  orderId?: string | null;
+  status?: string;
+  filledQty?: number | null;
+  avgPrice?: number | null;
+  notionalUsd?: number | null;
+  feeUsd?: number | null;
+  latencyMs?: number;
+}
+
+export interface TwoXExecuteResult {
+  executed?: boolean;
+  /** skipped | completed | partial_sell | sell_failed | indeterminate | unhedged */
+  outcome?: string;
+  reason?: string;
+  asset?: string;
+  buyVenue?: string;
+  startedAt?: string;
+  finishedAt?: string;
+  buyLeg?: TwoXLeg | null;
+  sellLeg?: TwoXLeg | null;
+  realizedProfitUsd?: number | null;
+  projection?: TwoXRouteDecision | null;
+}
+
+export type TwoXStatsRecentItem = {
+  pair?: string;
+  realizedUsd?: number | null;
+  status?: string | null;
+  at?: string | null;
+};
+
+export interface TwoXStats {
+  trades?: number;
+  completed?: number;
+  incomplete?: number;
+  cumulativeRealizedUsd?: number;
+  recent?: TwoXStatsRecentItem[];
+}
+
 export interface FeeTierRequest {
   krakenKey: string;
   krakenSecret: string;
@@ -1232,6 +1342,15 @@ export type GetInventoryImbalance200AssetsItem = {
 export type GetInventoryImbalance200 = {
   assets: GetInventoryImbalance200AssetsItem[];
   note: string;
+};
+
+export type Get2xScanParams = {
+sizeUsd?: number;
+krakenFeePct?: number;
+coinbaseFeePct?: number;
+minNetUsd?: number;
+bufferUsd?: number;
+maxQuoteAgeMs?: number;
 };
 
 export type GetGraphScanParams = {

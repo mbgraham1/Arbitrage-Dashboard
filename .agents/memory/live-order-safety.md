@@ -77,3 +77,7 @@ Ledger rows carry status: verified | failed | simulated | estimated. Rules that 
 
 ## Adaptive is profitability-first (trader-mandated, Aug 2026)
 Trader's rule ordering: fresh taker breakdown (real fees/leg, depth-walked slip, buffer) BEFORE any maker order; taker net ≥ floor → taker immediately; else maker expected realized (net × fill prob − unwind cost) ≥ floor → maker; else skip. Unavailable fresh books = SKIP, never a maker authorization. The adaptive decision is terminal — don't let generic downstream floor gates re-reject it (double-counts the buffer). Stale scanner edge never overrides the fresh pre-flight.
+
+## Submit ambiguity classification (added 2026-08-08)
+Only EXPLICIT API-level rejections (Kraken `EOrder:`/`EAPI:Invalid`/etc., Coinbase `success:false`) may be reported as "nothing traded". Any other post-submit failure (timeout, network, parse) means the order MAY exist: latch live runs off (sticky reconcile flag), write an auditable indeterminate ledger row, and require manual verification before trading again.
+**Why:** a lost response after acceptance otherwise lets the trader safely-looking rerun and double-buy.

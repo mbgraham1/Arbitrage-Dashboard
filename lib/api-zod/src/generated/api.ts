@@ -679,6 +679,169 @@ export const RunTwoExchangeTestResponse = zod.object({
 
 
 /**
+ * Prices BOTH directions per asset (ETH, BTC, SOL) from live depth books: depth-walked VWAP for the intended size, per-venue taker fees, slippage vs top-of-book, safety buffer, freshness. Every route gets an explicit FIRE/SKIP decision with the exact reason. Never trades. Fees are assumed defaults unless krakenFeePct/coinbaseFeePct query params carry real detected tiers (feesAssumed flags this).
+ * @summary Profitability-gated two-exchange scanner (Kraken↔Coinbase, both directions)
+ */
+export const Get2xScanQueryParams = zod.object({
+  "sizeUsd": zod.coerce.number().optional(),
+  "krakenFeePct": zod.coerce.number().optional(),
+  "coinbaseFeePct": zod.coerce.number().optional(),
+  "minNetUsd": zod.coerce.number().optional(),
+  "bufferUsd": zod.coerce.number().optional(),
+  "maxQuoteAgeMs": zod.coerce.number().optional()
+})
+
+export const Get2xScanResponse = zod.object({
+  "scannedAt": zod.string().optional(),
+  "params": zod.object({
+  "sizeUsd": zod.number().optional(),
+  "krakenFeePct": zod.number().optional(),
+  "coinbaseFeePct": zod.number().optional(),
+  "minNetUsd": zod.number().optional(),
+  "bufferUsd": zod.number().optional(),
+  "maxQuoteAgeMs": zod.number().optional(),
+  "feesAssumed": zod.boolean().optional()
+}).optional(),
+  "best": zod.object({
+  "asset": zod.string().optional(),
+  "buyVenue": zod.string().optional(),
+  "direction": zod.string().optional(),
+  "decision": zod.string().optional().describe('FIRE | SKIP'),
+  "reason": zod.string().optional(),
+  "grossSpreadUsd": zod.number().nullish(),
+  "feesUsd": zod.number().nullish(),
+  "slippageUsd": zod.number().nullish(),
+  "bufferUsd": zod.number().optional(),
+  "netProfitUsd": zod.number().nullish(),
+  "baseQty": zod.number().nullish(),
+  "quoteAgeMs": zod.number().nullish(),
+  "legs": zod.array(zod.object({
+  "venue": zod.string().optional(),
+  "pair": zod.string().optional(),
+  "side": zod.string().optional(),
+  "topPx": zod.number().optional(),
+  "vwapPx": zod.number().optional(),
+  "feePct": zod.number().optional()
+})).nullish()
+}).nullish(),
+  "routes": zod.array(zod.object({
+  "asset": zod.string().optional(),
+  "buyVenue": zod.string().optional(),
+  "direction": zod.string().optional(),
+  "decision": zod.string().optional().describe('FIRE | SKIP'),
+  "reason": zod.string().optional(),
+  "grossSpreadUsd": zod.number().nullish(),
+  "feesUsd": zod.number().nullish(),
+  "slippageUsd": zod.number().nullish(),
+  "bufferUsd": zod.number().optional(),
+  "netProfitUsd": zod.number().nullish(),
+  "baseQty": zod.number().nullish(),
+  "quoteAgeMs": zod.number().nullish(),
+  "legs": zod.array(zod.object({
+  "venue": zod.string().optional(),
+  "pair": zod.string().optional(),
+  "side": zod.string().optional(),
+  "topPx": zod.number().optional(),
+  "vwapPx": zod.number().optional(),
+  "feePct": zod.number().optional()
+})).nullish()
+})).optional()
+})
+
+
+/**
+ * Re-projects the route on CURRENT books with REAL detected fee tiers on both venues (refuses to guess), re-checks freshness, inventory, floor and buffer, takes the SHARED live execution lock, then places the buy, waits for the CONFIRMED fill, and immediately sells exactly that quantity on the other venue from pre-positioned inventory. Full fills/fees/latency/realized P&L logged. Post-submit ambiguity latches live runs off until manually reconciled.
+ * @summary Execute ONE profitability-gated two-exchange cycle (hard $10 cap)
+ */
+export const execute2xBodySizeUsdMax = 10;
+
+
+
+export const Execute2xBody = zod.object({
+  "krakenKey": zod.string(),
+  "krakenSecret": zod.string(),
+  "coinbaseKey": zod.string(),
+  "coinbaseSecret": zod.string(),
+  "asset": zod.string().describe('ETH | BTC | SOL'),
+  "buyVenue": zod.enum(['kraken', 'coinbase']),
+  "sizeUsd": zod.number().max(execute2xBodySizeUsdMax).optional().describe('Hard $10 cap until realized track record is positive'),
+  "minNetUsd": zod.number().optional(),
+  "bufferUsd": zod.number().optional(),
+  "maxQuoteAgeMs": zod.number().optional()
+})
+
+export const Execute2xResponse = zod.object({
+  "executed": zod.boolean().optional(),
+  "outcome": zod.string().optional().describe('skipped | completed | partial_sell | sell_failed | indeterminate | unhedged'),
+  "reason": zod.string().optional(),
+  "asset": zod.string().optional(),
+  "buyVenue": zod.string().optional(),
+  "startedAt": zod.string().optional(),
+  "finishedAt": zod.string().optional(),
+  "buyLeg": zod.object({
+  "venue": zod.string().optional(),
+  "orderId": zod.string().nullish(),
+  "status": zod.string().optional(),
+  "filledQty": zod.number().nullish(),
+  "avgPrice": zod.number().nullish(),
+  "notionalUsd": zod.number().nullish(),
+  "feeUsd": zod.number().nullish(),
+  "latencyMs": zod.number().optional()
+}).nullish(),
+  "sellLeg": zod.object({
+  "venue": zod.string().optional(),
+  "orderId": zod.string().nullish(),
+  "status": zod.string().optional(),
+  "filledQty": zod.number().nullish(),
+  "avgPrice": zod.number().nullish(),
+  "notionalUsd": zod.number().nullish(),
+  "feeUsd": zod.number().nullish(),
+  "latencyMs": zod.number().optional()
+}).nullish(),
+  "realizedProfitUsd": zod.number().nullish(),
+  "projection": zod.object({
+  "asset": zod.string().optional(),
+  "buyVenue": zod.string().optional(),
+  "direction": zod.string().optional(),
+  "decision": zod.string().optional().describe('FIRE | SKIP'),
+  "reason": zod.string().optional(),
+  "grossSpreadUsd": zod.number().nullish(),
+  "feesUsd": zod.number().nullish(),
+  "slippageUsd": zod.number().nullish(),
+  "bufferUsd": zod.number().optional(),
+  "netProfitUsd": zod.number().nullish(),
+  "baseQty": zod.number().nullish(),
+  "quoteAgeMs": zod.number().nullish(),
+  "legs": zod.array(zod.object({
+  "venue": zod.string().optional(),
+  "pair": zod.string().optional(),
+  "side": zod.string().optional(),
+  "topPx": zod.number().optional(),
+  "vwapPx": zod.number().optional(),
+  "feePct": zod.number().optional()
+})).nullish()
+}).nullish()
+})
+
+
+/**
+ * @summary Cumulative realized P&L for the two-exchange strategy (2X + 2XTEST rows)
+ */
+export const Get2xStatsResponse = zod.object({
+  "trades": zod.number().optional(),
+  "completed": zod.number().optional(),
+  "incomplete": zod.number().optional(),
+  "cumulativeRealizedUsd": zod.number().optional(),
+  "recent": zod.array(zod.object({
+  "pair": zod.string().optional(),
+  "realizedUsd": zod.number().nullish(),
+  "status": zod.string().nullish(),
+  "at": zod.string().nullish()
+})).optional()
+})
+
+
+/**
  * Queries Kraken /0/private/TradeVolume for the caller's real taker fee on major pairs (max across pairs). Returns null when the query fails (bad keys, network) so callers can fall back to their configured assumption.
  * @summary Look up the account's actual Kraken taker fee tier
  */

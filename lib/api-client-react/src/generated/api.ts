@@ -40,6 +40,7 @@ import type {
   ExecutionStatusResult,
   FeeTierRequest,
   FeeTierResult,
+  Get2xScanParams,
   GetAllPairSnapshotsParams,
   GetGraphScanParams,
   GetInventoryImbalance200,
@@ -71,7 +72,11 @@ import type {
   TriExecuteResult,
   TriangularScanResult,
   TwoExchangeTestRequest,
-  TwoExchangeTestResult
+  TwoExchangeTestResult,
+  TwoXExecuteRequest,
+  TwoXExecuteResult,
+  TwoXScanResult,
+  TwoXStats
 } from './api.schemas';
 
 import { customFetch } from '../custom-fetch';
@@ -1787,6 +1792,240 @@ export const useRunTwoExchangeTest = <TError = ErrorType<ErrorResponse>,
       > => {
       return useMutation(getRunTwoExchangeTestMutationOptions(options));
     }
+
+export const getGet2xScanUrl = (params?: Get2xScanParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/arb/2x-scan?${stringifiedParams}` : `/api/arb/2x-scan`
+}
+
+/**
+ * Prices BOTH directions per asset (ETH, BTC, SOL) from live depth books: depth-walked VWAP for the intended size, per-venue taker fees, slippage vs top-of-book, safety buffer, freshness. Every route gets an explicit FIRE/SKIP decision with the exact reason. Never trades. Fees are assumed defaults unless krakenFeePct/coinbaseFeePct query params carry real detected tiers (feesAssumed flags this).
+ * @summary Profitability-gated two-exchange scanner (Kraken↔Coinbase, both directions)
+ */
+export const get2xScan = async (params?: Get2xScanParams, options?: RequestInit): Promise<TwoXScanResult> => {
+
+  return customFetch<TwoXScanResult>(getGet2xScanUrl(params),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getGet2xScanQueryKey = (params?: Get2xScanParams,) => {
+    return [
+    `/api/arb/2x-scan`, ...(params ? [params] : [])
+    ] as const;
+    }
+
+
+export const getGet2xScanQueryOptions = <TData = Awaited<ReturnType<typeof get2xScan>>, TError = ErrorType<unknown>>(params?: Get2xScanParams, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof get2xScan>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getGet2xScanQueryKey(params);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof get2xScan>>> = ({ signal }) => get2xScan(params, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof get2xScan>>, TError, TData> & { queryKey: QueryKey }
+}
+
+export type Get2xScanQueryResult = NonNullable<Awaited<ReturnType<typeof get2xScan>>>
+export type Get2xScanQueryError = ErrorType<unknown>
+
+
+/**
+ * @summary Profitability-gated two-exchange scanner (Kraken↔Coinbase, both directions)
+ */
+
+export function useGet2xScan<TData = Awaited<ReturnType<typeof get2xScan>>, TError = ErrorType<unknown>>(
+ params?: Get2xScanParams, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof get2xScan>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+
+ ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+
+  const queryOptions = getGet2xScanQueryOptions(params,options)
+
+  const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+
+export const getExecute2xUrl = () => {
+
+
+
+
+  return `/api/arb/2x-execute`
+}
+
+/**
+ * Re-projects the route on CURRENT books with REAL detected fee tiers on both venues (refuses to guess), re-checks freshness, inventory, floor and buffer, takes the SHARED live execution lock, then places the buy, waits for the CONFIRMED fill, and immediately sells exactly that quantity on the other venue from pre-positioned inventory. Full fills/fees/latency/realized P&L logged. Post-submit ambiguity latches live runs off until manually reconciled.
+ * @summary Execute ONE profitability-gated two-exchange cycle (hard $10 cap)
+ */
+export const execute2x = async (twoXExecuteRequest: TwoXExecuteRequest, options?: RequestInit): Promise<TwoXExecuteResult> => {
+
+  return customFetch<TwoXExecuteResult>(getExecute2xUrl(),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(twoXExecuteRequest)
+  }
+);}
+
+
+
+
+
+export const getExecute2xMutationOptions = <TError = ErrorType<unknown>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof execute2x>>, TError,{data: BodyType<TwoXExecuteRequest>}, TContext>, request?: SecondParameter<typeof customFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof execute2x>>, TError,{data: BodyType<TwoXExecuteRequest>}, TContext> => {
+
+const mutationKey = ['execute2x'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof execute2x>>, {data: BodyType<TwoXExecuteRequest>}> = (props) => {
+          const {data} = props ?? {};
+
+          return  execute2x(data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type Execute2xMutationResult = NonNullable<Awaited<ReturnType<typeof execute2x>>>
+    export type Execute2xMutationBody = BodyType<TwoXExecuteRequest>
+    export type Execute2xMutationError = ErrorType<unknown>
+
+    /**
+ * @summary Execute ONE profitability-gated two-exchange cycle (hard $10 cap)
+ */
+export const useExecute2x = <TError = ErrorType<unknown>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof execute2x>>, TError,{data: BodyType<TwoXExecuteRequest>}, TContext>, request?: SecondParameter<typeof customFetch>}
+ ): UseMutationResult<
+        Awaited<ReturnType<typeof execute2x>>,
+        TError,
+        {data: BodyType<TwoXExecuteRequest>},
+        TContext
+      > => {
+      return useMutation(getExecute2xMutationOptions(options));
+    }
+
+export const getGet2xStatsUrl = () => {
+
+
+
+
+  return `/api/arb/2x-stats`
+}
+
+/**
+ * @summary Cumulative realized P&L for the two-exchange strategy (2X + 2XTEST rows)
+ */
+export const get2xStats = async ( options?: RequestInit): Promise<TwoXStats> => {
+
+  return customFetch<TwoXStats>(getGet2xStatsUrl(),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getGet2xStatsQueryKey = () => {
+    return [
+    `/api/arb/2x-stats`
+    ] as const;
+    }
+
+
+export const getGet2xStatsQueryOptions = <TData = Awaited<ReturnType<typeof get2xStats>>, TError = ErrorType<unknown>>( options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof get2xStats>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getGet2xStatsQueryKey();
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof get2xStats>>> = ({ signal }) => get2xStats({ signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof get2xStats>>, TError, TData> & { queryKey: QueryKey }
+}
+
+export type Get2xStatsQueryResult = NonNullable<Awaited<ReturnType<typeof get2xStats>>>
+export type Get2xStatsQueryError = ErrorType<unknown>
+
+
+/**
+ * @summary Cumulative realized P&L for the two-exchange strategy (2X + 2XTEST rows)
+ */
+
+export function useGet2xStats<TData = Awaited<ReturnType<typeof get2xStats>>, TError = ErrorType<unknown>>(
+  options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof get2xStats>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+
+ ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+
+  const queryOptions = getGet2xStatsQueryOptions(options)
+
+  const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
 
 export const getGetFeeTierUrl = () => {
 

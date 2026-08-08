@@ -11,6 +11,7 @@ import {
 import { format } from "date-fns";
 import { CrossMmCard } from "@/components/cross-mm-card";
 import { TwoExchangeTestCard } from "@/components/two-exchange-test-card";
+import { TwoXScannerCard } from "@/components/two-x-scanner-card";
 import { cn } from "@/lib/utils";
 import { useToast } from "@/hooks/use-toast";
 import { useLocalStorage } from "@/hooks/use-local-storage";
@@ -680,6 +681,7 @@ export default function Dashboard() {
       <CrossMmCard />
 
       {/* One-shot two-exchange diagnostic (fully separate from all strategies) */}
+      <TwoXScannerCard />
       <TwoExchangeTestCard />
 
       <TriangularCard

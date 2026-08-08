@@ -546,27 +546,35 @@ function liveLockBusy(): boolean {
 }
 /** Returns a generation token; pass it to releaseLiveLock so a stale-evicted
  *  holder can never release a NEWER execution's lock. */
-function acquireLiveLock(): number {
+export function acquireLiveLock(): number {
   liveExecLockHeld = true;
   liveExecLockSinceMs = Date.now();
   return ++liveExecLockGen;
 }
 /** Heartbeat for live executors that don't drive execStatus (graph-cross,
  *  inventory): call from every poll/order/unwind step to prove liveness. */
-function touchLiveLock(): void {
+export function touchLiveLock(): void {
   if (liveExecLockHeld) liveExecLockSinceMs = Date.now();
 }
-function releaseLiveLock(gen: number): void {
+export function releaseLiveLock(gen: number): void {
   if (gen === liveExecLockGen && liveExecLockHeld) {
     liveExecLockHeld = false;
     execStatus = idleExecStatus();
   }
 }
 
+/** Cross-module tryAcquire for OTHER route modules (e.g. the two-exchange
+ *  scanner): refuses whenever ANY live executor holds the shared lock — no
+ *  stale eviction, refusal is always the safe answer for an opportunistic
+ *  strategy. Returns a generation token or null. */
+export function tryAcquireSharedLiveLock(): number | null {
+  return liveExecLockHeld ? null : acquireLiveLock();
+}
+
 /** True while `gen` is still the CURRENT lock owner. A KILL/HARD RESET bumps
  *  the generation, so executors can check this before placing further orders
  *  (cooperative abort). */
-function liveLockOwned(gen: number): boolean {
+export function liveLockOwned(gen: number): boolean {
   return liveExecLockHeld && gen === liveExecLockGen;
 }
 /** Milliseconds since the current lock holder's last heartbeat. */

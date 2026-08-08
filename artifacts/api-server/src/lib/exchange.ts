@@ -920,6 +920,19 @@ export type CoinbaseAssetAccount = {
   currency: string; name: string | null; type: string | null;
   available: number; hold: number; staked: boolean;
 };
+/** Real Coinbase taker/maker fee tier for THIS account, from the
+ *  transaction_summary endpoint. Throws on failure — callers must refuse to
+ *  guess fees for live gating. Returned as percent (0.4 = 0.40%). */
+export async function getCoinbaseFeeTier(creds: CoinbaseCreds): Promise<{ takerFeePct: number; makerFeePct: number }> {
+  const d = await coinbaseRequest<{ fee_tier?: { taker_fee_rate?: string; maker_fee_rate?: string } }>(
+    creds, "GET", "/api/v3/brokerage/transaction_summary",
+  );
+  const taker = parseFloat(d.fee_tier?.taker_fee_rate ?? "");
+  const maker = parseFloat(d.fee_tier?.maker_fee_rate ?? "");
+  if (!Number.isFinite(taker) || taker <= 0) throw new Error("Coinbase fee tier unavailable");
+  return { takerFeePct: taker * 100, makerFeePct: Number.isFinite(maker) ? maker * 100 : taker * 100 };
+}
+
 export async function getCoinbaseAssetDetail(
   creds: CoinbaseCreds,
   currency: string,
