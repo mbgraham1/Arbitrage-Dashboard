@@ -625,7 +625,10 @@ export const RunTwoExchangeTestResponse = zod.object({
   "blockReason": zod.string().nullish(),
   "balances": zod.object({
   "krakenUsd": zod.number().optional(),
-  "coinbaseEth": zod.number().optional()
+  "coinbaseEth": zod.number().optional().describe('Tradable (available) ETH — the only ETH the sell leg can use'),
+  "coinbaseEthStaked": zod.number().optional().describe('Staked ETH — NOT tradable until unstaked'),
+  "coinbaseEthHold": zod.number().optional().describe('ETH locked by open orders \/ pending activity'),
+  "coinbaseEthTotal": zod.number().optional().describe('Total ETH held (available + hold + staked)')
 }).nullish().describe('Balances actually read from the exchanges during the check'),
   "buyLeg": zod.object({
   "exchange": zod.string().optional(),

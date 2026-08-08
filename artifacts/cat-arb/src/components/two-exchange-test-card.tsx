@@ -88,8 +88,17 @@ export function TwoExchangeTestCard() {
               {last.residualEthOpen != null && last.residualEthOpen > 0 && <span className="text-red-500"> · residual {last.residualEthOpen.toFixed(8)} ETH open</span>}
             </div>
             {last.balances && (
-              <div data-testid="text-2xtest-balances">
-                balances read: Kraken <span className="font-semibold">${last.balances.krakenUsd?.toFixed(2)}</span> USD · Coinbase <span className="font-semibold">{last.balances.coinbaseEth?.toFixed(6)}</span> ETH
+              <div className="space-y-0.5" data-testid="text-2xtest-balances">
+                <div>Kraken available: <span className="font-semibold">${last.balances.krakenUsd?.toFixed(2)}</span> USD</div>
+                <div>
+                  Coinbase ETH — total <span className="font-semibold">{(last.balances.coinbaseEthTotal ?? last.balances.coinbaseEth ?? 0).toFixed(8)}</span>
+                  {" · "}staked <span className={cn("font-semibold", (last.balances.coinbaseEthStaked ?? 0) > 0 && "text-amber-500")}>{(last.balances.coinbaseEthStaked ?? 0).toFixed(8)}</span>
+                  {(last.balances.coinbaseEthHold ?? 0) > 0 && <> · on hold <span className="font-semibold">{(last.balances.coinbaseEthHold ?? 0).toFixed(8)}</span></>}
+                  {" · "}tradable <span className={cn("font-semibold", (last.balances.coinbaseEth ?? 0) > 0 ? "text-green-500" : "text-red-500")}>{(last.balances.coinbaseEth ?? 0).toFixed(8)}</span>
+                </div>
+                {(last.balances.coinbaseEthStaked ?? 0) > 0 && (last.balances.coinbaseEth ?? 0) < ((last.balances.coinbaseEthTotal ?? 0)) && (
+                  <div className="text-amber-500">Staked ETH cannot be used for the sell leg — only the tradable amount counts.</div>
+                )}
               </div>
             )}
             {last.blockReason && <div className="text-amber-500">blocked: {last.blockReason}</div>}

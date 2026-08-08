@@ -1561,7 +1561,10 @@ components:
           description: Balances actually read from the exchanges during the check
           properties:
             krakenUsd: { type: number }
-            coinbaseEth: { type: number }
+            coinbaseEth: { type: number, description: "Tradable (available) ETH — the only ETH the sell leg can use" }
+            coinbaseEthStaked: { type: number, description: "Staked ETH — NOT tradable until unstaked" }
+            coinbaseEthHold: { type: number, description: "ETH locked by open orders / pending activity" }
+            coinbaseEthTotal: { type: number, description: "Total ETH held (available + hold + staked)" }
         buyLeg:
           allOf: [{ $ref: "#/components/schemas/TwoExchangeTestLeg" }]
           nullable: true

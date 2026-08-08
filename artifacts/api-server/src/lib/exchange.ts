@@ -908,6 +908,48 @@ export async function getCoinbaseBalances(creds: CoinbaseCreds): Promise<Balance
   return out;
 }
 
+/**
+ * Detailed per-asset Coinbase balance breakdown from the SAME credentials and
+ * accounts the order path uses. Distinguishes:
+ *  - available: tradable right now (what a sell order can actually use)
+ *  - hold:      locked by open orders / pending activity
+ *  - staked:    held in staking wrappers (e.g. ETH2 or accounts marked staked)
+ * Staked funds are NOT tradable until unstaked.
+ */
+export async function getCoinbaseAssetDetail(
+  creds: CoinbaseCreds,
+  currency: string,
+): Promise<{ available: number; hold: number; staked: number; total: number }> {
+  const want = currency.toUpperCase();
+  let available = 0, hold = 0, staked = 0;
+  let cursor: string | undefined;
+  for (let page = 0; page < 20; page++) {
+    const qs = `limit=250${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`;
+    const data = await coinbaseRequest<{
+      accounts: Array<{
+        currency: string; name?: string; type?: string;
+        available_balance: { value: string }; hold?: { value: string };
+      }>;
+      has_next?: boolean; cursor?: string;
+    }>(creds, "GET", `/api/v3/brokerage/accounts?${qs}`);
+    for (const a of data.accounts || []) {
+      const cur = (a.currency || "").toUpperCase();
+      const avail = parseFloat(a.available_balance?.value ?? "0") || 0;
+      const held = parseFloat(a.hold?.value ?? "0") || 0;
+      const isStakedWrapper = cur === `${want}2` || /staked/i.test(a.name ?? "") || /staked/i.test(a.type ?? "");
+      if (cur === want && !isStakedWrapper) {
+        available += avail;
+        hold += held;
+      } else if (isStakedWrapper && (cur === want || cur === `${want}2`)) {
+        staked += avail + held;
+      }
+    }
+    if (!data.has_next || !data.cursor) break;
+    cursor = data.cursor;
+  }
+  return { available, hold, staked, total: available + hold + staked };
+}
+
 export async function coinbaseMarketOrder(
   creds: CoinbaseCreds,
   side: "BUY" | "SELL",

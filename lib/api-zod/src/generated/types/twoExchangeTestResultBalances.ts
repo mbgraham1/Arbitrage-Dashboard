@@ -11,5 +11,12 @@
  */
 export type TwoExchangeTestResultBalances = {
   krakenUsd?: number;
+  /** Tradable (available) ETH — the only ETH the sell leg can use */
   coinbaseEth?: number;
+  /** Staked ETH — NOT tradable until unstaked */
+  coinbaseEthStaked?: number;
+  /** ETH locked by open orders / pending activity */
+  coinbaseEthHold?: number;
+  /** Total ETH held (available + hold + staked) */
+  coinbaseEthTotal?: number;
 } | null;
