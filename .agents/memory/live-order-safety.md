@@ -41,3 +41,8 @@ Any 'current edge beats history' bypass of fill-rate gates/blacklists must be li
 - Rate-limit backoff sleeps must beat the lock heartbeat (hook in the private-API limiter). Without it, any "evict silent lock" threshold shorter than the max backoff (~60s) risks double-spend.
 - Manual lock-clear/kill endpoints on an unauthenticated server must require exchange credentials (verified via a private call) — clearing a concurrency lock is a money-safety control.
 - KILL = CancelAll BEFORE releasing the lock (a resting maker leg could fill after release), plus cooperative generation checks in executors before each new leg so an evicted run stops committing capital and unwinds.
+
+## Lock adoption + revoked-run order ban
+- A single-flight execution lock checked both by an outer route handler AND inside the executor it calls will SELF-BLOCK (executor sees its caller's lock). Pass the held generation token down (`heldLockGen`); only the acquirer releases.
+- A run whose lock was revoked (KILL/eviction) may cancel its own resting order and unwind ACTUAL confirmed fills, but must NEVER place new orders (taker fallbacks, retries). Enforce with a typed LockRevokedError carrying the confirmed fill so catch blocks can unwind without guessing volumes; re-check ownership immediately before every fallback order.
+- Leg 1 (no inventory at risk) can rest a post-only order long (30s) IF paired with a periodic fresh-edge re-check that cancels early — time patience, edge discipline. Inventory-holding legs keep short windows.

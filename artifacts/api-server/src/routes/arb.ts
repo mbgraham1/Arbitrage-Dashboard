@@ -539,6 +539,16 @@ class IndeterminateOrderError extends Error {
   }
 }
 
+/** Thrown when a KILL / HARD RESET / FORCE eviction revoked this run's
+ * execution lock mid-leg. Must propagate to the top-level catch WITHOUT
+ * triggering taker fallbacks or retries — a revoked run may cancel its own
+ * resting order and unwind ACTUAL fills, but must never place new orders. */
+class LockRevokedError extends Error {
+  constructor(label: string, detail: string, public readonly fill?: { volExec: number; cost: number; fee: number; txid: string }) {
+    super(`${label}: execution lock revoked (KILL/HARD RESET) — ${detail}`);
+  }
+}
+
 router.get("/arb/execution-status", (_req, res): void => {
   const s = execStatus;
   res.json({
@@ -654,6 +664,11 @@ async function runKrakenTriangle(input: TriangleExecInput, reqLog: ReqLog): Prom
       lockGen = acquireLiveLock();
       ownsLock = true;
     }
+    // An ADOPTED lock may already be stale (caller evicted during its own
+    // preflight). Verify ownership BEFORE placing any order.
+    if (!liveLockOwned(lockGen)) {
+      throw new LockRevokedError("leg1", "aborted before any order was placed.");
+    }
     legsCompleted = 0;
 
     const log = { info: (m: string) => reqLog.info(m), error: (m: string) => reqLog.error(m) };
@@ -685,6 +700,11 @@ async function runKrakenTriangle(input: TriangleExecInput, reqLog: ReqLog): Prom
     // covers taker fees; legs 2/3 always complete at market — we already
     // hold inventory, and completing beats unwinding at the same taker cost.
     const MAKER_LEG_TIMEOUT_MS = input.makerTimeoutMs ?? 3_000; // fill-or-abort: 3s per maker window (2s on probes)
+    // Leg 1 rests longer: no inventory is at risk before it fills, so give the
+    // passive order a real chance to be hit — while the edge-recheck cancels
+    // it early if the opportunity decays. Legs 2/3 keep the short window (we
+    // hold inventory there; completing at market beats waiting).
+    const LEG1_MAX_REST_MS = input.makerTimeoutMs ?? 30_000;
     const MAX_LEG_ATTEMPTS = 1;
     interface AggFill { volExec: number; cost: number; fee: number; txid: string }
     const isFinal = (s: string) => s === "closed" || s === "canceled" || s === "expired";
@@ -700,7 +720,13 @@ async function runKrakenTriangle(input: TriangleExecInput, reqLog: ReqLog): Prom
       legIndex: number, label: string,
       spec: { pair: string; side: "buy" | "sell"; volume: number; limitPrice: number },
       beforeRetry: () => Promise<number | null>,
+      // Edge-aware resting (leg 1 only): rest up to restMs, but re-check the
+      // edge every EDGE_CHECK_EVERY_MS and cancel EARLY the moment fresh books
+      // say the route is no longer profitable. Time patience, edge discipline.
+      opts?: { restMs?: number; edgeStillGood?: () => Promise<boolean> },
     ): Promise<AggFill> => {
+      const restMs = opts?.restMs ?? MAKER_LEG_TIMEOUT_MS;
+      const EDGE_CHECK_EVERY_MS = 4_000;
       let remaining = spec.volume;
       let limit = spec.limitPrice;
       const agg: AggFill = { volExec: 0, cost: 0, fee: 0, txid: "" };
@@ -729,15 +755,35 @@ async function runKrakenTriangle(input: TriangleExecInput, reqLog: ReqLog): Prom
         }
         agg.txid = txid;
         setExecStatus({ orderId: txid, phase: "waiting for fill" });
-        const deadline = Date.now() + MAKER_LEG_TIMEOUT_MS;
+        const deadline = Date.now() + restMs;
+        let nextEdgeCheck = Date.now() + EDGE_CHECK_EVERY_MS;
+        let edgeGone = false;
+        let revoked = false;
         let info = await safeInfo(txid);
         while (!isFinal(info.status) && Date.now() < deadline) {
           await new Promise(r => setTimeout(r, 1_000));
           info = await safeInfo(txid);
           setExecStatus({ filledPct: pctOf(agg.volExec + info.volExec) });
+          // Cooperative KILL: if HARD RESET / KILL / FORCE eviction revoked our
+          // lock while this order rests, cancel it and stop — no new orders.
+          if (lockGen != null && !liveLockOwned(lockGen)) {
+            log.info(`${label}: execution lock revoked while resting — cancelling order and aborting`);
+            revoked = true;
+            break;
+          }
+          if (opts?.edgeStillGood && Date.now() >= nextEdgeCheck && !isFinal(info.status)) {
+            nextEdgeCheck = Date.now() + EDGE_CHECK_EVERY_MS;
+            setExecStatus({ phase: "resting — re-checking edge" });
+            if (!(await opts.edgeStillGood())) {
+              log.info(`${label}: edge no longer clears the floor while resting — cancelling early`);
+              edgeGone = true;
+              break;
+            }
+            setExecStatus({ phase: "waiting for fill" });
+          }
         }
         if (!isFinal(info.status)) {
-          setExecStatus({ phase: "fill timer expired — cancelling" });
+          setExecStatus({ phase: edgeGone ? "edge gone — cancelling" : "fill timer expired — cancelling" });
           await tryCancel(creds, txid, label, log);
           // A cancel ACK is not terminal — the order can still fill in the
           // race. Poll until Kraken reports a TERMINAL status; if we can't
@@ -754,6 +800,7 @@ async function runKrakenTriangle(input: TriangleExecInput, reqLog: ReqLog): Prom
         remaining = spec.volume - agg.volExec;
         setExecStatus({ filledPct: pctOf(agg.volExec) });
         if (agg.volExec >= spec.volume * FILL_TOLERANCE) return agg; // filled
+        if (revoked) throw new LockRevokedError(label, `order cancelled while resting; ${agg.volExec.toFixed(8)}/${spec.volume.toFixed(8)} confirmed filled — no fallback, no retry.`, agg);
         if (attempt >= MAX_LEG_ATTEMPTS) return agg;
         setExecStatus({ phase: "retrying — fresh book + pre-flight" });
         const freshPx = await beforeRetry();
@@ -806,9 +853,25 @@ async function runKrakenTriangle(input: TriangleExecInput, reqLog: ReqLog): Prom
           const fresh = await preflightObCycle(assetA as ObAsset, assetB as ObAsset, tradeSizeUsd, effectiveFeesPct, "maker");
           if (!fresh || fresh.profitUsd <= threshold) return null; // edge gone — stop retrying
           return fresh.legs[0].limitPrice;
+        }, {
+          // Leg 1 holds no inventory, so patience is free: rest the post-only
+          // order up to LEG1_MAX_REST_MS, but abort the MOMENT fresh books say
+          // the cycle no longer clears the floor.
+          restMs: LEG1_MAX_REST_MS,
+          edgeStillGood: async () => {
+            const fresh = await preflightObCycle(assetA as ObAsset, assetB as ObAsset, tradeSizeUsd, effectiveFeesPct, "maker");
+            return !!fresh && fresh.profitUsd > threshold;
+          },
         });
       } catch (e) {
         if (e instanceof IndeterminateOrderError) throw e;
+        if (e instanceof LockRevokedError) {
+          // Revoked mid-rest: unwind any ACTUAL leg-1 fill (money-safest exit),
+          // then abort — no taker fallback, no further legs.
+          const v = e.fill?.volExec ?? 0;
+          if (v > 0) await tryUnwindMarket(creds, "sell", v, pairA, `sell ${assetA} (unwind leg1 after lock revoked)`, log);
+          throw e;
+        }
         log.info(`leg1 maker attempt placed nothing (${(e as Error).message}) — evaluating taker fallback`);
       }
       leg1Id = f1.txid;
@@ -819,6 +882,11 @@ async function runKrakenTriangle(input: TriangleExecInput, reqLog: ReqLog): Prom
         // Taker fallback gate: nothing is at risk yet, so only pay taker fees
         // when a FRESH taker-priced pre-flight (depth-walked, taker tier) says
         // the cycle still clears the profit floor.
+        // A revoked run must not place NEW orders — re-verify lock ownership
+        // immediately before the fallback order.
+        if (lockGen != null && !liveLockOwned(lockGen)) {
+          throw new LockRevokedError("leg1", "aborted before taker fallback — no new orders placed.");
+        }
         const takerFeePct = tiers?.takerFeePct ?? effectiveFeesPct;
         const freshTaker = await preflightObCycle(assetA as ObAsset, assetB as ObAsset, tradeSizeUsd, takerFeePct, "taker");
         if (freshTaker && freshTaker.profitUsd > threshold) {
@@ -831,7 +899,7 @@ async function runKrakenTriangle(input: TriangleExecInput, reqLog: ReqLog): Prom
       }
       if (aHeld < l1.volume * FILL_TOLERANCE) {
         if (aHeld > 0) await tryUnwindMarket(creds, "sell", aHeld, pairA, `sell ${assetA} (unwind partial leg1)`, log);
-        throw new Error(`Leg 1 timeout: no fill within the ${MAKER_LEG_TIMEOUT_MS / 1000}s window and taker fallback ${aHeld > 0 ? "left a shortfall" : "was declined (edge doesn't cover taker fees)"} (${aHeld.toFixed(8)}/${l1.volume.toFixed(8)} ${assetA}); order canceled, lock released.`);
+        throw new Error(`Leg 1 unfilled: rested up to ${LEG1_MAX_REST_MS / 1000}s (cancelled early if the edge decayed) and taker fallback ${aHeld > 0 ? "left a shortfall" : "was declined (edge doesn't cover taker fees)"} (${aHeld.toFixed(8)}/${l1.volume.toFixed(8)} ${assetA}); order canceled, lock released.`);
       }
       legsCompleted = 1;
     }
@@ -857,6 +925,17 @@ async function runKrakenTriangle(input: TriangleExecInput, reqLog: ReqLog): Prom
       // Indeterminate order state: the order may still be live/filling —
       // do NOT unwind on assumed volumes; surface for manual review.
       if (e instanceof IndeterminateOrderError) throw e;
+      if (e instanceof LockRevokedError) {
+        // Revoked mid-rest: unwind ACTUAL holdings only, then abort — no
+        // taker fallback (that would be a NEW order on a revoked run).
+        const fl = e.fill ?? { volExec: 0, cost: 0, fee: 0, txid: "" };
+        const aConsumedR = cross.aIsQuote ? fl.cost + fl.fee : fl.volExec;
+        const bAcquiredR = cross.aIsQuote ? fl.volExec : Math.max(0, fl.cost - fl.fee);
+        const aResidualR = Math.max(0, aHeld - aConsumedR);
+        if (aResidualR > 0) await tryUnwindMarket(creds, "sell", aResidualR, pairA, `sell residual ${assetA} (leg2 lock revoked)`, log);
+        if (bAcquiredR > 0) await tryUnwindMarket(creds, "sell", bAcquiredR, pairB, `sell acquired ${assetB} (leg2 lock revoked)`, log);
+        throw e;
+      }
       // Nothing placed — fall through to the taker fallback below: we hold A,
       // and completing at market beats unwinding at market (same taker cost).
       log.info(`leg2 maker attempt placed nothing (${(e as Error).message}) — completing at market`);
@@ -932,6 +1011,14 @@ async function runKrakenTriangle(input: TriangleExecInput, reqLog: ReqLog): Prom
     } catch (e) {
       // Indeterminate order state: do NOT unwind on assumed volumes.
       if (e instanceof IndeterminateOrderError) throw e;
+      if (e instanceof LockRevokedError) {
+        // Revoked mid-rest on the final leg: selling the remaining B is the
+        // unwind itself — do it, then abort with the revocation surfaced.
+        const soldR = e.fill?.volExec ?? 0;
+        const bRemaining = Math.max(0, bHeld - soldR);
+        if (bRemaining > 0) await tryUnwindMarket(creds, "sell", bRemaining, pairB, `sell remaining ${assetB} (leg3 lock revoked)`, log);
+        throw e;
+      }
       // Nothing placed — fall through to the taker fallback: selling B at
       // market IS the intended trade here, not an unwind.
       log.info(`leg3 maker attempt placed nothing (${(e as Error).message}) — completing at market`);
