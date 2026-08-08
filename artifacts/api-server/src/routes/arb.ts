@@ -2771,7 +2771,7 @@ async function tryCancel(
 }
 
 // waitForTriLimitFill and TriFillResult live in lib/tri-fill.ts for testability.
-export { waitForTriLimitFill, type TriFillResult } from "../lib/tri-fill.js";
+export { waitForTriLimitFill, TriIndeterminateOrderError, type TriFillResult } from "../lib/tri-fill.js";
 
 /** Place a market counter-order to unwind an already-filled leg. */
 async function tryUnwindMarket(

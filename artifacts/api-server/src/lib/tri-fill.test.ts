@@ -14,7 +14,7 @@ vi.mock("./exchange.js", () => ({
   krakenCancelOrder: vi.fn(),
 }));
 
-import { waitForTriLimitFill } from "./tri-fill.js";
+import { waitForTriLimitFill, TriIndeterminateOrderError } from "./tri-fill.js";
 import * as exchange from "./exchange.js";
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -205,23 +205,79 @@ describe("waitForTriLimitFill", () => {
     expect(krakenOrderInfo).toHaveBeenCalledTimes(3);
   });
 
-  it("falls back to zero volExec when post-cancel krakenOrderInfo also throws", async () => {
-    // All polls return open; post-cancel query throws too
-    krakenOrderInfo
-      .mockImplementation(() => Promise.resolve(orderInfo("open")));
+  it("throws TriIndeterminateOrderError when post-cancel krakenOrderInfo keeps throwing", async () => {
+    // All polls return open; every post-cancel query throws — no terminal
+    // status can ever be confirmed. The order may still be resting, so the
+    // helper must FAIL CLOSED instead of reporting "cancelled, no fill".
     const openThenThrow = vi
       .fn()
+      .mockResolvedValueOnce(orderInfo("open"))
       .mockResolvedValueOnce(orderInfo("open"))
       .mockRejectedValue(new Error("exchange down"));
     krakenOrderInfo.mockImplementation(openThenThrow);
 
+    const { log, messages } = makeLog();
+    const resultP = waitForTriLimitFill(CREDS, TXID, "leg2 BTC buy", log, 1_000);
+    const guarded = resultP.catch((e: unknown) => e); // attach handler before timers run
+    await runWithFakeTimers(guarded, 40);
+    const err = await guarded;
+
+    expect(err).toBeInstanceOf(TriIndeterminateOrderError);
+    expect((err as TriIndeterminateOrderError).txid).toBe(TXID);
+    expect((err as Error).message).toContain(TXID);
+    expect(krakenCancelOrder).toHaveBeenCalledOnce();
+    expect(messages.some(m => m.includes("INDETERMINATE"))).toBe(true);
+  });
+
+  it("throws TriIndeterminateOrderError when the order stays 'open' after cancel (cancel never lands)", async () => {
+    // Cancel ACK is not terminal — if Kraken keeps reporting "open" past the
+    // confirm window, the order may still rest and fill later. Fail closed.
+    krakenOrderInfo.mockResolvedValue(orderInfo("open"));
+
     const { log } = makeLog();
+    const resultP = waitForTriLimitFill(CREDS, TXID, "leg1 SOL buy", log, 1_000);
+    const guarded = resultP.catch((e: unknown) => e);
+    await runWithFakeTimers(guarded, 40);
+    const err = await guarded;
+
+    expect(err).toBeInstanceOf(TriIndeterminateOrderError);
+    expect(krakenCancelOrder).toHaveBeenCalledOnce();
+  });
+
+  it("polls to terminal after cancel: open→open→closed is a cancel-race fill, not a cancellation", async () => {
+    // The first post-cancel reads still show "open" (cancel pending) before
+    // Kraken reports the order actually CLOSED — the fill must be returned
+    // with actual volumes so the caller continues the cycle.
+    krakenOrderInfo
+      .mockResolvedValueOnce(orderInfo("open"))            // poll 1
+      .mockResolvedValueOnce(orderInfo("open"))            // poll 2 → timeout
+      .mockResolvedValueOnce(orderInfo("open"))            // post-cancel read 1 (cancel pending)
+      .mockResolvedValueOnce(orderInfo("open"))            // post-cancel read 2 (still pending)
+      .mockResolvedValue(orderInfo("closed", 2.2, 440, 0.07)); // terminal: filled in the race
+
+    const { log, messages } = makeLog();
     const result = await runWithFakeTimers(
-      waitForTriLimitFill(CREDS, TXID, "leg2 BTC buy", log, 1_000), 10
+      waitForTriLimitFill(CREDS, TXID, "leg2 SOL buy", log, 1_000), 15
     );
 
-    // Cannot determine true state — defaults to filled=false, volExec=0
-    expect(result).toMatchObject({ filled: false, volExec: 0 });
+    expect(result).toEqual({ filled: true, volExec: 2.2, cost: 440, fee: 0.07 });
+    expect(krakenCancelOrder).toHaveBeenCalledOnce();
+    expect(messages.some(m => m.includes("cancel-race"))).toBe(true);
+  });
+
+  it("polls to terminal after cancel: open→canceled returns the actual partial for unwind sizing", async () => {
+    krakenOrderInfo
+      .mockResolvedValueOnce(orderInfo("open"))            // poll 1
+      .mockResolvedValueOnce(orderInfo("open"))            // poll 2 → timeout
+      .mockResolvedValueOnce(orderInfo("open"))            // post-cancel read 1 (cancel pending)
+      .mockResolvedValue(orderInfo("canceled", 0.4, 80, 0.013)); // terminal with partial
+
+    const { log } = makeLog();
+    const result = await runWithFakeTimers(
+      waitForTriLimitFill(CREDS, TXID, "leg3 SOL sell", log, 1_000), 15
+    );
+
+    expect(result).toMatchObject({ filled: false, volExec: 0.4, cost: 80, fee: 0.013 });
     expect(krakenCancelOrder).toHaveBeenCalledOnce();
   });
 
