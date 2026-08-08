@@ -391,7 +391,14 @@ let liveExecLockGen = 0;     // generation token: only the CURRENT holder may re
 // await) — clear it instead of refusing new trades forever. Deliberately far
 // above the longest single bounded wait (~15s confirm polls, ~35s exchange
 // waits) so a slow-but-alive execution is never evicted.
-const LIVE_LOCK_STALE_MS = 180_000;
+// 30s of heartbeat SILENCE (not runtime) evicts a dead lock holder. Every
+// executor heartbeats each status update and every 1s poll tick, so a live
+// trade never goes quiet this long; a crashed one is cleared in ≤30s. A hard
+// wall-clock cap (e.g. 5s) is unsafe: legs legitimately take longer, and
+// evicting a lock mid-order lets two executions spend the same balance.
+// 90s clears the worst legitimate silence: Kraken private-API rate-limit
+// backoff can stall a single awaited call up to ~60s with no poll tick.
+const LIVE_LOCK_STALE_MS = 90_000;
 function liveLockBusy(): boolean {
   if (!liveExecLockHeld) return false;
   if (Date.now() - liveExecLockSinceMs > LIVE_LOCK_STALE_MS) {
@@ -426,7 +433,7 @@ function releaseLiveLock(gen: number): void {
 // engine immediately moves to the next best route instead of grinding a dead
 // one. A single completed cycle resets the streak. Scoped per account+style.
 const ROUTE_BLACKLIST_AFTER = 3;
-const ROUTE_BLACKLIST_MS = 15 * 60_000;
+const ROUTE_BLACKLIST_MS = 5 * 60_000;
 const routeFailStreaks = new Map<string, { streak: number; blacklistedUntil: number }>();
 const streakKey = (accountId: string, style: string, route: string) => `${accountId}|${style}|${route}`;
 function noteRouteLiveResult(accountId: string, style: string, route: string, filled: boolean): void {
@@ -468,6 +475,8 @@ interface TriangleExecInput {
   krakenKey: string; krakenSecret: string;
   assetA: string; assetB: string;
   tradeSizeUsd: number; feesPct: number; minProfitUsd: number; isDryRun: boolean;
+  /** Override the per-leg maker fill window (e.g. 2s probe attempts). */
+  makerTimeoutMs?: number;
 }
 interface TriangleExecOut { badRequest?: string; body?: Record<string, unknown>; }
 type ReqLog = { info: (o: unknown, m?: string) => void; error: (o: unknown, m?: string) => void };
@@ -585,7 +594,7 @@ async function runKrakenTriangle(input: TriangleExecInput, reqLog: ReqLog): Prom
     // than missing the window. Leg 1 only falls back when the edge still
     // covers taker fees; legs 2/3 always complete at market — we already
     // hold inventory, and completing beats unwinding at the same taker cost.
-    const MAKER_LEG_TIMEOUT_MS = 3_000; // fill-or-abort: 3s per maker window
+    const MAKER_LEG_TIMEOUT_MS = input.makerTimeoutMs ?? 3_000; // fill-or-abort: 3s per maker window (2s on probes)
     const MAX_LEG_ATTEMPTS = 1;
     interface AggFill { volExec: number; cost: number; fee: number; txid: string }
     const isFinal = (s: string) => s === "closed" || s === "canceled" || s === "expired";
@@ -978,7 +987,12 @@ async function recordQuality(row: {
 // Feedback-loop gate tuning (advisor-reviewed):
 const GATE_MIN_ATTEMPTS = 10;        // don't blacklist on a thin sample — 3 misses can just be a fast market
 const GATE_MIN_FILL_RATE = 0.5;      // block when fewer than half of attempts ever fill
-const GATE_DECAY_MS = 60 * 60_000;   // 1h since last attempt → penalty decays, route earns a fresh probe
+const GATE_DECAY_MS = 5 * 60_000;    // 5 min since last attempt → penalty decays, route earns a fresh probe
+const GATE_BIG_EDGE_MULT = 2;        // current edge > 2× the route's historical avg expected edge → treat as a NEW opportunity, never block
+const PROBE_MAKER_TIMEOUT_MS = 2_000; // low-fill-rate probe attempts get a tighter 2s maker window
+// One probe per route per decay window: a 0/10 route still gets ONE fresh
+// attempt (with the tighter timer) instead of being blocked outright.
+const routeProbeAt = new Map<string, number>();
 
 /**
  * Batch live fill-rate stats per route for one execution style, over each
@@ -1017,27 +1031,45 @@ async function routeFillStats(style: string, accountId: string): Promise<Map<str
  *    this opportunity doesn't actually execute. Blocks decay: once the last
  *    attempt is over an hour old, the route gets one fresh probe.
  */
-async function routeQualityPenalty(route: string, style: string, tradeSizeUsd: number, accountId: string): Promise<{ shortfallUsd: number; attempts: number; blockReason: string | null }> {
+async function routeQualityPenalty(route: string, style: string, tradeSizeUsd: number, accountId: string, currentNetUsd = 0, allowProbe = false): Promise<{ shortfallUsd: number; attempts: number; blockReason: string | null; bigEdgeBypass: boolean; probe: boolean }> {
   try {
     const rows = await db.select().from(executionQualityTable)
       .where(dbAnd(dbEq(executionQualityTable.route, route), dbEq(executionQualityTable.style, style), dbEq(executionQualityTable.isDryRun, false),
         dbInArray(executionQualityTable.accountId, [accountId, "legacy"])))
       .orderBy(dbDesc(executionQualityTable.id)).limit(20);
-    if (rows.length === 0) return { shortfallUsd: 0, attempts: 0, blockReason: null };
+    if (rows.length === 0) return { shortfallUsd: 0, attempts: 0, blockReason: null, bigEdgeBypass: false, probe: false };
     const fills = rows.filter(r => r.filled);
+    // Historical average EXPECTED edge, normalized per trade size and scaled
+    // to the CURRENT size. If today's edge is > 2× that average, the market
+    // moved — treat it as a NEW opportunity and never block on history.
+    const sized = rows.filter(r => parseFloat(r.tradeSizeUsd) > 0);
+    const avgEdgeUsd = sized.length > 0
+      ? (sized.reduce((s, r) => s + parseFloat(r.expectedProfitUsd) / parseFloat(r.tradeSizeUsd), 0) / sized.length) * tradeSizeUsd
+      : 0;
+    const bigEdgeBypass = avgEdgeUsd > 0 && currentNetUsd > GATE_BIG_EDGE_MULT * avgEdgeUsd;
+    if (bigEdgeBypass) return { shortfallUsd: 0, attempts: rows.length, blockReason: null, bigEdgeBypass: true, probe: false };
     const lastAttemptAt = rows[0]?.createdAt ? new Date(rows[0].createdAt).getTime() : 0;
     const recentStreak = Date.now() - lastAttemptAt < GATE_DECAY_MS;
     if (rows.length >= GATE_MIN_ATTEMPTS && fills.length / rows.length < GATE_MIN_FILL_RATE && recentStreak) {
-      return { shortfallUsd: 0, attempts: rows.length, blockReason: `historical fill rate ${fills.length}/${rows.length} (needs ≥${Math.round(GATE_MIN_FILL_RATE * 100)}% over ≥${GATE_MIN_ATTEMPTS} attempts) — this route rarely executes; not committing funds. Block decays 1h after the last attempt.` };
+      // Even a 0/10 route earns ONE probe per decay window: a single attempt
+      // under a tighter 2s maker timer. If it doesn't fill, the failure is
+      // recorded and the block resumes until the next window.
+      const probeKey = `${accountId}|${style}|${route}`;
+      const lastProbe = routeProbeAt.get(probeKey) ?? 0;
+      if (allowProbe && Date.now() - lastProbe >= GATE_DECAY_MS) {
+        routeProbeAt.set(probeKey, Date.now());
+        return { shortfallUsd: 0, attempts: rows.length, blockReason: null, bigEdgeBypass: false, probe: true };
+      }
+      return { shortfallUsd: 0, attempts: rows.length, blockReason: `historical fill rate ${fills.length}/${rows.length} (needs ≥${Math.round(GATE_MIN_FILL_RATE * 100)}% over ≥${GATE_MIN_ATTEMPTS} attempts) — this route rarely executes; not committing funds. Next 2s probe in ≤${Math.ceil((GATE_DECAY_MS - (Date.now() - lastProbe)) / 60_000)} min; block decays ${GATE_DECAY_MS / 60_000} min after the last attempt.`, bigEdgeBypass: false, probe: false };
     }
     const realized = fills.filter(r => r.realizedProfitUsd != null && parseFloat(r.tradeSizeUsd) > 0);
-    if (realized.length < 2) return { shortfallUsd: 0, attempts: rows.length, blockReason: null };
+    if (realized.length < 2) return { shortfallUsd: 0, attempts: rows.length, blockReason: null, bigEdgeBypass: false, probe: false };
     // Normalize shortfall by each attempt's trade size, then scale to the
     // CURRENT size — a $5 miss on a $1,000 trade must not block a $10 trade.
     const avgShortfallPct = realized.reduce((s, r) =>
       s + (parseFloat(r.expectedProfitUsd) - parseFloat(r.realizedProfitUsd!)) / parseFloat(r.tradeSizeUsd), 0) / realized.length;
-    return { shortfallUsd: Math.max(0, avgShortfallPct * tradeSizeUsd), attempts: rows.length, blockReason: null };
-  } catch { return { shortfallUsd: 0, attempts: 0, blockReason: null }; }
+    return { shortfallUsd: Math.max(0, avgShortfallPct * tradeSizeUsd), attempts: rows.length, blockReason: null, bigEdgeBypass: false, probe: false };
+  } catch { return { shortfallUsd: 0, attempts: 0, blockReason: null, bigEdgeBypass: false, probe: false }; }
 }
 
 // liveGraphExecInFlight is now an alias for the shared liveExecLockHeld.
@@ -1256,16 +1288,30 @@ router.post("/arb/graph-execute", async (req, res): Promise<void> => {
     // 2b. FEEDBACK-LOOP gate (live only): this route's own execution history.
     //     Routes that historically filled short of expectation must clear the
     //     average shortfall too; routes that rarely fill are blocked outright.
+    const realHops = route.hops.filter(h => h.exchange !== "bridge");
+    const isKrakenTriangle = route.hops.length === 3 && realHops.length === 3 && realHops.every(h => h.exchange === "kraken");
+    const isCrossInventory = realHops.length === 2 && route.hops.length === 3 &&
+      realHops[0]!.side === "buy" && realHops[1]!.side === "sell" &&
+      asset(realHops[0]!.to) === asset(realHops[1]!.from);
+
+    let probeAttempt = false;
     if (!isDryRun) {
       // 2a-bis. Consecutive-failure blacklist: 3 failed live cycles in a row
-      // bans the route for 15 minutes — the dashboard's fall-through treats
+      // bans the route for 5 minutes — the dashboard's fall-through treats
       // any "Feedback-loop gate" error as "try the next best route".
+      // Big-edge bypass and probes only apply to Kraken triangles: that path
+      // re-validates the edge with its OWN fresh order-book pre-flight before
+      // any order is placed, so a stale scanner edge can't authorize a trade.
+      // Cross/inventory shapes have no equivalent final re-quote — for them
+      // history gates stay fully in force.
+      const hist = await routeQualityPenalty(route.description, executionStyle, tradeSizeUsd, accountIdFromKey(krakenKey, coinbaseKey), isKrakenTriangle ? route.netProfitUsd : 0, isKrakenTriangle);
+      // Big-edge bypass overrides the blacklist too: an edge > 2× this
+      // route's historical average is a NEW opportunity, not the old pattern.
       const banMs = routeBlacklistRemainingMs(accountIdFromKey(krakenKey, coinbaseKey), executionStyle, route.description);
-      if (banMs > 0) {
+      if (banMs > 0 && !hist.bigEdgeBypass) {
         res.json({ success: false, isDryRun, executed: false, route: route.description, preflightProfitUsd: route.netProfitUsd, error: `Feedback-loop gate: route blacklisted for ${Math.ceil(banMs / 60_000)} more min after ${ROUTE_BLACKLIST_AFTER} consecutive failed live cycles — moving to the next best route.` });
         return;
       }
-      const hist = await routeQualityPenalty(route.description, executionStyle, tradeSizeUsd, accountIdFromKey(krakenKey, coinbaseKey));
       if (hist.blockReason) {
         res.json({ success: false, isDryRun, executed: false, route: route.description, preflightProfitUsd: route.netProfitUsd, error: `Feedback-loop gate: ${hist.blockReason} (${hist.attempts} recorded live attempts).` });
         return;
@@ -1274,13 +1320,8 @@ router.post("/arb/graph-execute", async (req, res): Promise<void> => {
         res.json({ success: false, isDryRun, executed: false, route: route.description, preflightProfitUsd: route.netProfitUsd, error: `Feedback-loop gate: this route historically realizes $${hist.shortfallUsd.toFixed(4)} less than the scanner expects (${hist.attempts} live attempts); edge after that shortfall ≤ minimum $${minProfitUsd.toFixed(4)}.` });
         return;
       }
+      probeAttempt = hist.probe;
     }
-
-    const realHops = route.hops.filter(h => h.exchange !== "bridge");
-    const isKrakenTriangle = route.hops.length === 3 && realHops.length === 3 && realHops.every(h => h.exchange === "kraken");
-    const isCrossInventory = realHops.length === 2 && route.hops.length === 3 &&
-      realHops[0]!.side === "buy" && realHops[1]!.side === "sell" &&
-      asset(realHops[0]!.to) === asset(realHops[1]!.from);
 
     // 3a. Kraken-only triangle → same machinery as ob-execute (incl. its own
     //     fresh order-book pre-flight, actual fee tier, fill confirm, unwind).
@@ -1290,6 +1331,7 @@ router.post("/arb/graph-execute", async (req, res): Promise<void> => {
         assetA: asset(route.hops[0]!.to),
         assetB: asset(route.hops[1]!.to),
         tradeSizeUsd, feesPct: krakenFeesPct, minProfitUsd, isDryRun,
+        makerTimeoutMs: probeAttempt ? PROBE_MAKER_TIMEOUT_MS : undefined,
       }, req.log);
       if (out.badRequest) { res.status(400).json({ error: out.badRequest }); return; }
       const b = out.body!;
