@@ -7,6 +7,7 @@ import { format } from "date-fns";
 import { ArrowRight, BarChart2, Activity, Triangle, ChevronLeft, ChevronRight } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { TriProfitChart } from "@/components/tri-profit-chart";
+import { useBotContext } from "@/store/bot-context";
 
 const TRI_PAGE_SIZE = 100;
 const EXEC_PAGE_SIZE = 50;
@@ -31,6 +32,7 @@ function loadStoredTriSize(): number {
 type Tab = "executions" | "triangular";
 
 export default function Trades() {
+  const { settings } = useBotContext();
   const [tab, setTab] = useState<Tab>("executions");
   const [statusFilter, setStatusFilter] = useState<"all" | "verified" | "failed" | "simulated">("all");
   const [expandedId, setExpandedId] = useState<number | null>(null);
@@ -403,6 +405,12 @@ export default function Trades() {
                 />
                 /trade
               </label>
+              <span className="text-[10px] font-mono opacity-70 leading-tight">
+                Analysis-only assumption — independent of the live scan trade size
+                {settings.obTradeSize !== triSizeUsd && (
+                  <> (currently ${settings.obTradeSize})</>
+                )}
+              </span>
             </CardContent>
           </Card>
         </div>
