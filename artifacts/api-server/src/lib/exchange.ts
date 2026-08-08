@@ -465,6 +465,88 @@ export async function getKrakenBalances(creds: KrakenCreds, fresh = false): Prom
   return val;
 }
 
+// ── Kraken pair precision metadata ───────────────────────────────────────────
+// Kraken rejects orders whose price/volume exceed the pair's allowed decimals
+// ("EOrder:Invalid price: ETH/USD price can only be specified up to 2
+// decimals"). Every AddOrder path below normalizes through this metadata —
+// covering normal orders, maker reprices, retries, fallbacks, and unwinds.
+
+export class KrakenPrecisionError extends Error {}
+
+interface KrakenPairMeta { priceDecimals: number; lotDecimals: number; ordermin: number }
+let pairMetaCache: { at: number; byPair: Map<string, KrakenPairMeta> } | null = null;
+let pairMetaFetch: Promise<void> | null = null;
+const PAIR_META_TTL_MS = 60 * 60 * 1_000;
+
+async function refreshPairMeta(): Promise<void> {
+  const r = await fetch("https://api.kraken.com/0/public/AssetPairs", { signal: AbortSignal.timeout(10_000) });
+  const j = await r.json() as { error?: string[]; result?: Record<string, { wsname?: string; altname?: string; pair_decimals?: number; lot_decimals?: number; ordermin?: string }> };
+  if (j.error?.length || !j.result) throw new Error(`AssetPairs: ${j.error?.join(", ") || "empty result"}`);
+  const byPair = new Map<string, KrakenPairMeta>();
+  for (const [key, v] of Object.entries(j.result)) {
+    const meta = { priceDecimals: v.pair_decimals ?? 8, lotDecimals: v.lot_decimals ?? 8, ordermin: parseFloat(v.ordermin ?? "0") || 0 };
+    // Index under every symbol form Kraken accepts (REST key, altname, wsname).
+    byPair.set(key, meta);
+    if (v.altname) byPair.set(v.altname, meta);
+    if (v.wsname) byPair.set(v.wsname, meta);
+  }
+  pairMetaCache = { at: Date.now(), byPair };
+}
+
+/** Pair precision metadata, cached 1h. Throws if Kraken is unreachable AND no cached copy exists. */
+export async function krakenPairMeta(rawPair: string): Promise<KrakenPairMeta> {
+  if (!pairMetaCache || Date.now() - pairMetaCache.at > PAIR_META_TTL_MS) {
+    try {
+      pairMetaFetch ??= refreshPairMeta().finally(() => { pairMetaFetch = null; });
+      await pairMetaFetch;
+    } catch (e) {
+      if (!pairMetaCache) throw new KrakenPrecisionError(`Kraken pair precision metadata unavailable (${(e as Error).message}) — refusing to submit an unvalidated order for ${rawPair}.`);
+      // Stale cache is far safer than guessing decimals — keep it.
+    }
+  }
+  const meta = pairMetaCache!.byPair.get(rawPair);
+  if (!meta) throw new KrakenPrecisionError(`No Kraken precision metadata for pair "${rawPair}" — refusing to submit an unvalidated order.`);
+  return meta;
+}
+
+/** Decimal-safe quantization: truncates toward zero to `decimals` places (string math — no float artifacts). */
+function quantizeDecimals(value: number, decimals: number): string {
+  if (!Number.isFinite(value) || value <= 0) throw new KrakenPrecisionError(`Cannot quantize non-positive value ${value}`);
+  const s = value.toFixed(Math.min(12, decimals + 4)); // extra guard digits, then truncate
+  const dot = s.indexOf(".");
+  const out = decimals <= 0 ? s.slice(0, dot) : s.slice(0, dot + 1 + decimals);
+  if (parseFloat(out) <= 0) throw new KrakenPrecisionError(`Value ${value} rounds to zero at ${decimals} decimals`);
+  return out;
+}
+
+/** Normalize a limit price to the pair's allowed decimals. Buys round DOWN, sells round UP would cross-risk — we truncate for both (conservative for buys; a sell truncated is ≤1 tick more aggressive, never rejected). */
+export async function normalizeKrakenPrice(rawPair: string, price: number): Promise<string> {
+  const meta = await krakenPairMeta(rawPair);
+  const out = quantizeDecimals(price, meta.priceDecimals);
+  if (parseFloat(out) !== price) console.log(`[KRAKEN·PRECISION] ${rawPair} raw price ${price} -> ${out} (${meta.priceDecimals} decimals)`);
+  return out;
+}
+
+/** Normalize order volume to lot decimals (truncate down) and enforce the pair minimum. */
+export async function normalizeKrakenVolume(rawPair: string, volume: number): Promise<string> {
+  const meta = await krakenPairMeta(rawPair);
+  const out = quantizeDecimals(volume, meta.lotDecimals);
+  if (meta.ordermin > 0 && parseFloat(out) < meta.ordermin) {
+    throw new KrakenPrecisionError(`Volume ${out} below Kraken minimum ${meta.ordermin} for ${rawPair}`);
+  }
+  if (parseFloat(out) !== volume) console.log(`[KRAKEN·PRECISION] ${rawPair} raw volume ${volume} -> ${out} (${meta.lotDecimals} lot decimals)`);
+  return out;
+}
+
+/** Startup validation: confirm precision metadata resolves for every tradable pair. Returns missing pairs. */
+export async function validateKrakenPrecision(pairs: string[]): Promise<string[]> {
+  const missing: string[] = [];
+  for (const p of pairs) {
+    try { await krakenPairMeta(p); } catch { missing.push(p); }
+  }
+  return missing;
+}
+
 /** KILL SWITCH support: cancel ALL open Kraken orders on the account. */
 export async function krakenCancelAllOrders(creds: KrakenCreds): Promise<number> {
   const result = await krakenPrivateRequest<{ count: number }>("/0/private/CancelAll", {}, creds);
@@ -477,11 +559,12 @@ export async function krakenMarketOrder(
   volume: number,
   pair: Pair = "SOL/USD",
 ): Promise<{ txid: string[] }> {
+  const rawPair = KRAKEN_REST_PAIRS[pair];
   return krakenPrivateRequest<{ txid: string[] }>("/0/private/AddOrder", {
-    pair: KRAKEN_REST_PAIRS[pair],
+    pair: rawPair,
     type: side,
     ordertype: "market",
-    volume: volume.toFixed(8),
+    volume: await normalizeKrakenVolume(rawPair, volume),
   }, creds);
 }
 
@@ -492,13 +575,14 @@ export async function krakenLimitOrder(
   price: number,
   pair: Pair = "SOL/USD",
 ): Promise<{ txid: string[] }> {
+  const rawPair = KRAKEN_REST_PAIRS[pair];
   return krakenPrivateRequest<{ txid: string[] }>("/0/private/AddOrder", {
-    pair: KRAKEN_REST_PAIRS[pair],
+    pair: rawPair,
     type: side,
     ordertype: "limit",
     post_only: "true",
-    volume: volume.toFixed(8),
-    price: price.toFixed(2),
+    volume: await normalizeKrakenVolume(rawPair, volume),
+    price: await normalizeKrakenPrice(rawPair, price),
   }, creds);
 }
 
@@ -518,8 +602,8 @@ export async function krakenRawLimitOrder(
     pair: rawPair,
     type: side,
     ordertype: "limit",
-    price: price.toFixed(8),
-    volume: volume.toFixed(8),
+    price: await normalizeKrakenPrice(rawPair, price),
+    volume: await normalizeKrakenVolume(rawPair, volume),
     // post-only: rejected if it would cross spread (maker only).
     // fciq: fee always charged in the QUOTE currency, so cost/fee accounting
     // (aConsumed = cost + fee, received = cost − fee) is guaranteed correct
@@ -543,7 +627,7 @@ export async function krakenRawMarketOrder(
     pair: rawPair,
     type: side,
     ordertype: "market",
-    volume: volume.toFixed(8),
+    volume: await normalizeKrakenVolume(rawPair, volume),
     oflags: "fciq", // fee in QUOTE currency — keeps cost/fee accounting exact
   }, creds);
 }
@@ -565,8 +649,8 @@ export async function krakenRawIocLimitOrder(
     pair: rawPair,
     type: side,
     ordertype: "limit",
-    price: price.toFixed(8),
-    volume: volume.toFixed(8),
+    price: await normalizeKrakenPrice(rawPair, price),
+    volume: await normalizeKrakenVolume(rawPair, volume),
     timeinforce: "IOC",
     oflags: "fciq",
   }, creds);

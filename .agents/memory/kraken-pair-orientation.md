@@ -22,3 +22,7 @@ symbol names like the Python versions do.
 - MKR has NO Kraken pairs anymore (Maker→SKY migration) — excluded from OB_ASSETS.
 - RNDR renamed: USD pair altname is RENDERUSD (asset symbol kept as RNDR in our code).
 - New-gen listings (PEPE, WIF, BONK, INJ, SEI, APT, LDO, FET, TAO, GALA, BEAM, JUP) have USD pairs only — no BTC/ETH crosses, so they cannot form triangular routes; they only widen ticker/volatility coverage.
+
+## Pair precision (price/volume decimals)
+- Kraken rejects orders exceeding pair_decimals ("EOrder:Invalid price: ETH/USD up to 2 decimals" — ETH/USD 2, BTC/USD 1). Normalize price AND volume inside the shared AddOrder wrappers (covers reprices, retries, fallbacks, unwinds) via cached AssetPairs metadata; never hardcode decimals or use toFixed(8).
+- Refuse to submit when metadata is missing rather than guess; enforce ordermin at submission AND pre-check every planned leg's volume ≥ ordermin BEFORE leg 1 — a rejection on leg 2/3 strands inventory, and a residual below ordermin can't be unwound at all (surface as unresolved exposure, never claim recovery).

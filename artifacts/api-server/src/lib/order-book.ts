@@ -220,6 +220,13 @@ export async function discoverCrossPairs(forceRefresh = false): Promise<Discover
       const result: DiscoveredCrossPairs = { lookup, crossMap, cachedAt: Date.now() };
       crossPairsCache = result;
       console.log(`[OB] AssetPairs discovery: ${crossMap.length} crypto cross pairs among OB_ASSETS`);
+      // Validate precision metadata for every newly-discovered tradable pair —
+      // orders on a pair without metadata are refused at submission time.
+      void import("./exchange").then(({ validateKrakenPrecision }) =>
+        validateKrakenPrecision([...new Set([...lookup.values()].map(c => c.pair))]).then(missing => {
+          if (missing.length) console.error(`[OB] ⚠️ Kraken precision metadata MISSING for discovered cross pairs: ${missing.join(", ")} — live orders on these will be refused`);
+        }),
+      ).catch(err => console.warn("[OB] cross-pair precision validation failed:", err));
       return result;
     }
     throw new Error("discovery returned 0 cross pairs");

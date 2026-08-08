@@ -24,6 +24,7 @@ import {
   getKrakenBalances,
   krakenCancelAllOrders,
   setPrivateCallHeartbeat,
+  krakenPairMeta,
   krakenMarketOrder,
   krakenLimitOrder,
   krakenRawMarketOrder,
@@ -898,6 +899,22 @@ async function runKrakenTriangle(input: TriangleExecInput, reqLog: ReqLog): Prom
     const cross = activeLookup.get(`${assetA}-${assetB}`)!; // validated by pre-flight
     const pairA = OB_USD_PAIRS[assetA as ObAsset];
     const pairB = OB_USD_PAIRS[assetB as ObAsset];
+
+    // Route-level precision preflight (BEFORE any order): every planned leg —
+    // and therefore every full-size unwind, which uses the same USD pairs —
+    // must have Kraken precision metadata AND clear the pair's minimum volume.
+    // Rejecting here costs nothing; a KrakenPrecisionError on leg 2/3 would
+    // strand inventory mid-cycle.
+    try {
+      for (const leg of pf.legs) {
+        const meta = await krakenPairMeta(leg.pair);
+        if (meta.ordermin > 0 && leg.volume < meta.ordermin) {
+          return { body: { success: false, isDryRun, executed: false, route, preflightProfitUsd: pf.profitUsd, error: `Pre-flight failed — planned ${leg.pair} volume ${leg.volume.toFixed(8)} is below Kraken's minimum ${meta.ordermin}; increase trade size or skip this route.` } };
+        }
+      }
+    } catch (e) {
+      return { body: { success: false, isDryRun, executed: false, route, preflightProfitUsd: pf.profitUsd, error: `Pre-flight failed — ${(e as Error).message}` } };
+    }
     // Trader-tuned: a leg counts as complete once its confirmed fill reaches
     // this fraction of ordered volume. Clamped to 50–100%: below 50% a
     // "successful" cycle would be mostly unwind and its P&L meaningless.
@@ -2781,13 +2798,18 @@ async function tryUnwindMarket(
   pair: string,
   label: string,
   log: { info: (msg: string) => void; error: (msg: string) => void },
-): Promise<void> {
-  if (volume <= 0) return;
+): Promise<boolean> {
+  if (volume <= 0) return true;
   try {
     const r = await krakenRawMarketOrder(creds, side, volume, pair);
     log.info(`[TRI·UNWIND] Market ${side} ${volume.toFixed(6)} ${pair} — ${label} (${r.txid[0] ?? "?"})`);
+    return true;
   } catch (e) {
-    log.error(`[TRI·UNWIND] Market ${side} ${pair} failed: ${(e as Error).message}`);
+    // NEVER silently claim recovery: a failed unwind means live inventory is
+    // still held. Most likely cause: residual below the pair's Kraken minimum
+    // (KrakenPrecisionError) — needs manual reconciliation.
+    log.error(`[TRI·UNWIND] ⚠️ UNRESOLVED EXPOSURE — could not unwind ${side} ${volume.toFixed(8)} ${pair} (${label}): ${(e as Error).message}. Position still held; reconcile manually on Kraken.`);
+    return false;
   }
 }
 

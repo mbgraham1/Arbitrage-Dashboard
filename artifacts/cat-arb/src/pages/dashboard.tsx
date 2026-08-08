@@ -1782,7 +1782,10 @@ function GraphEngineCard() {
         // Feedback-loop gate rejections AND exhausted leg-1 maker reprices fall
         // through to the next-best route — pre-flight failures mean the market
         // moved; a fresh scan handles that.
-        const fallsThrough = err.startsWith("Feedback-loop gate") || err.startsWith("Leg 1 unfilled");
+        // A failed FRESH pre-flight (edge gone / taker gate) also falls through
+        // — the next-best route from the same scan may still be executable.
+        const fallsThrough = err.startsWith("Feedback-loop gate") || err.startsWith("Leg 1 unfilled")
+          || err.startsWith("Pre-flight failed") || err.startsWith("Leg 1 taker fire aborted");
         const isLastCandidate = ci === candidates.length - 1 || !fallsThrough;
         if (isLastCandidate) {
           // Clear the AUTO cooldown ONLY when the whole fire ended with no
@@ -1993,7 +1996,7 @@ function GraphEngineCard() {
           <span title={`Total taker fees, 3 legs at ${preview.takerFeePct?.toFixed(2) ?? "?"}%/leg (your real tier when keys are set)`}>fees <span className="text-foreground">−${(preview.takerFeesUsd ?? 0).toFixed(4)}</span></span>
           <span title="Depth-walk cost at your size: top-of-book edge minus executable VWAP edge">slip <span className="text-foreground">−${(preview.slippageUsd ?? 0).toFixed(4)}</span></span>
           <span title="Safety buffer for movement between pre-flight and fills">buffer <span className="text-foreground">−${(preview.safetyBufferUsd ?? 0).toFixed(4)}</span></span>
-          <span title="Final executable net edge = raw − fees − slippage − buffer; a taker fire only happens when this clears your floor" className={cn("font-bold", (preview.netEdgeUsd ?? 0) > minProfit ? "text-success" : "text-destructive")}>net ${(preview.netEdgeUsd ?? 0).toFixed(4)}</span>
+          <span title="Final executable net edge = raw − fees − slippage − buffer; a taker fire only happens when this clears your floor" className={cn("font-bold", (preview.netEdgeUsd ?? 0) > minProfit ? "text-success" : "text-destructive")}>net ${(preview.netEdgeUsd ?? 0).toFixed(4)} ({((preview.netEdgeUsd ?? 0) / tradeSize * 100).toFixed(3)}%)</span>
           <span title="Expected dollar profit if fired as taker right now (net of fees + slippage, before buffer)">exp <span className={cn((preview.expectedProfitUsd ?? 0) > 0 ? "text-success" : "text-destructive")}>${(preview.expectedProfitUsd ?? 0).toFixed(4)}</span></span>
           {style === "adaptive" && (
             <span title={`Adaptive decision right now — maker EV ${preview.makerEvUsd != null ? `$${preview.makerEvUsd.toFixed(4)}` : "n/a"} vs buffered taker net`} className="font-bold text-primary">→ {(preview.adaptiveChoice ?? "—").toUpperCase()}</span>

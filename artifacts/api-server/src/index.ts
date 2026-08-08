@@ -1,7 +1,8 @@
 import app from "./app";
 import { logger } from "./lib/logger";
 import { initPriceFeeds } from "./lib/price-cache";
-import { startCrossPairsAutoRefresh } from "./lib/order-book";
+import { startCrossPairsAutoRefresh, OB_USD_PAIRS, CROSS_LOOKUP } from "./lib/order-book";
+import { validateKrakenPrecision } from "./lib/exchange";
 
 const rawPort = process.env["PORT"];
 
@@ -49,4 +50,18 @@ app.listen(port, (err) => {
   initPriceFeeds();
   startKeepAlive(port);
   startCrossPairsAutoRefresh();
+
+  // Startup validation: confirm Kraken price/volume precision metadata loads
+  // for every pair the engine can trade. Orders for a pair without metadata
+  // are REFUSED at submission time — surface any gaps immediately.
+  const tradablePairs = [
+    ...Object.values(OB_USD_PAIRS),
+    ...[...CROSS_LOOKUP.values()].map(c => c.pair),
+  ];
+  validateKrakenPrecision([...new Set(tradablePairs)])
+    .then(missing => {
+      if (missing.length) logger.error({ missing }, "⚠️ Kraken precision metadata MISSING for pairs — live orders on these will be refused");
+      else logger.info({ pairs: tradablePairs.length }, "Kraken pair precision metadata validated for all tradable pairs");
+    })
+    .catch(err => logger.error({ err }, "Kraken precision validation failed"));
 });
