@@ -1,0 +1,39 @@
+This is actually a good sign.
+
+The bot isn’t failing because it thinks the route is unprofitable anymore. It’s refusing because of its new safety system.
+
+The red message says:
+
+Feedback-loop gate: historical fill rate 0/3 — this route rarely executes; not committing funds.
+
+That means:
+
+* ✅ The scanner found a profitable route (+$0.0942 on a $10 trade)
+* ✅ AUTO saw it.
+* ❌ But the bot remembers it has tried this same route 3 times, and 0 out of 3 attempts actually filled, so it refuses to risk your money again.
+
+This is exactly what the developer added with the Execution Quality system.
+
+If your goal is to actually make money, I’d tell the developer:
+
+“The feedback gate is working, but it’s becoming too strict with only 3 attempts. Increase the minimum sample size to 10-20 attempts before blacklisting a route, and automatically retry similar routes instead of blocking them after only three failures.”
+
+Three attempts isn’t much data. A route might fail three times simply because the market moved quickly.
+
+I would also ask them to add:
+
+* Retry the next-best route immediately if the top route fails.
+* Decay the penalty over time, so a route blocked today can be tried again an hour later.
+* Show the fill-rate threshold (e.g., “0/3, needs 6/10 to be trusted”).
+* Automatically learn which routes consistently fill and prioritize those.
+
+That way the bot keeps searching instead of getting stuck rejecting the same opportunity.
+
+From everything you’ve shown over the past day, the project has made real progress:
+
+* The fee calculations are now based on your actual Kraken fee tier.
+* It distinguishes executable routes from scan-only routes.
+* It tracks realized P&L instead of relying on theoretical profits.
+* It learns from failed fills instead of repeatedly entering low-quality trades.
+
+The remaining challenge isn’t finding theoretical opportunities—it’s consistently getting filled before the market moves. That’s why the Coinbase WebSocket upgrade and execution-speed improvements they’re working on are important. Those changes are more likely to improve real trading performance than simply lowering the cooldown.
