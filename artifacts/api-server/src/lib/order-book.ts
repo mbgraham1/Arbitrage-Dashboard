@@ -640,6 +640,64 @@ export async function freshJoinPrice(pair: string, side: "buy" | "sell"): Promis
   return (side === "buy" ? ob.bids[0]?.[0] : ob.asks[0]?.[0]) ?? null;
 }
 
+// ── Aggressive maker pricing (tick-improved post-only) ───────────────────────
+
+const TICK_CACHE_TTL_MS = 60 * 60 * 1000;
+let tickCache: { ticks: Map<string, number>; fetchedAt: number } | null = null;
+
+/** Kraken tick sizes (min price increments) keyed by pair altname, cached 1h. */
+async function pairTickSizes(): Promise<Map<string, number>> {
+  if (tickCache && Date.now() - tickCache.fetchedAt < TICK_CACHE_TTL_MS) return tickCache.ticks;
+  const ticks = new Map<string, number>();
+  try {
+    const r = await fetch("https://api.kraken.com/0/public/AssetPairs", { signal: AbortSignal.timeout(5_000) });
+    if (r.ok) {
+      const data = await r.json() as { result?: Record<string, { altname?: string; tick_size?: string; pair_decimals?: number }> };
+      for (const info of Object.values(data.result ?? {})) {
+        if (!info.altname) continue;
+        const t = info.tick_size != null ? parseFloat(info.tick_size)
+          : info.pair_decimals != null ? Math.pow(10, -info.pair_decimals) : NaN;
+        if (Number.isFinite(t) && t > 0) ticks.set(info.altname, t);
+      }
+      if (ticks.size > 0) tickCache = { ticks, fetchedAt: Date.now() };
+    }
+  } catch { /* fall through — caller degrades to join price */ }
+  return tickCache?.ticks ?? ticks;
+}
+
+export interface MakerQuote {
+  /** Most aggressive VALID post-only price: one tick inside the spread when it
+   * is wider than one tick (front of the queue, alone), else the join price. */
+  price: number;
+  bestBid: number;
+  bestAsk: number;
+  tick: number | null;
+  /** Book volume resting AHEAD of us at our price level (0 when we improve). */
+  queueAheadVol: number;
+}
+
+/** Fresh (cache-bypassed) aggressive maker quote for one pair+side. */
+export async function makerQuote(pair: string, side: "buy" | "sell"): Promise<MakerQuote | null> {
+  obCache.delete(pair);
+  const [ob, ticks] = await Promise.all([fetchOrderBook(pair, 10), pairTickSizes()]);
+  const bestBid = ob?.bids[0]?.[0];
+  const bestAsk = ob?.asks[0]?.[0];
+  if (!ob || bestBid == null || bestAsk == null) return null;
+  const tick = ticks.get(pair) ?? null;
+  // Round to the tick grid AND quantize decimals — raw float math produces
+  // dust (0.30000000000000004) that Kraken rejects outright.
+  const tickDecimals = tick ? Math.max(0, Math.min(10, (tick.toString().split(".")[1] ?? "").length)) : 0;
+  const snap = (p: number) => tick ? parseFloat((Math.round(p / tick) * tick).toFixed(tickDecimals)) : p;
+  if (side === "buy") {
+    const improved = tick != null && bestAsk - bestBid > tick * 1.0001;
+    const price = improved ? snap(bestBid + tick!) : bestBid;
+    return { price, bestBid, bestAsk, tick, queueAheadVol: improved ? 0 : (ob.bids[0]?.[1] ?? 0) };
+  }
+  const improved = tick != null && bestAsk - bestBid > tick * 1.0001;
+  const price = improved ? snap(bestAsk - tick!) : bestAsk;
+  return { price, bestBid, bestAsk, tick, queueAheadVol: improved ? 0 : (ob.asks[0]?.[1] ?? 0) };
+}
+
 // ── Full scan ─────────────────────────────────────────────────────────────────
 
 const VOLATILITY_THRESHOLD_PCT = 1.5; // v17: |24h change| must exceed this

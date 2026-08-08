@@ -419,6 +419,11 @@ export const GetExecutionStatusResponse = zod.object({
   "timeoutMs": zod.number().nullable(),
   "filledPct": zod.number().nullable(),
   "phase": zod.string().nullable(),
+  "orderPrice": zod.number().nullish(),
+  "bestBid": zod.number().nullish(),
+  "bestAsk": zod.number().nullish(),
+  "queueAheadVol": zod.number().nullish(),
+  "reprices": zod.number().nullish(),
   "elapsedMs": zod.number().nullable(),
   "updatedAtMs": zod.number()
 })
@@ -537,6 +542,7 @@ export const graphExecuteBodyMinProfitUsdDefault = 0.02;
 export const graphExecuteBodyIsDryRunDefault = true;
 export const graphExecuteBodyExecutionStyleDefault = `taker`;
 export const graphExecuteBodyForceModeDefault = false;
+export const graphExecuteBodyMaxRepricesDefault = 4;
 
 export const GraphExecuteBody = zod.object({
   "krakenKey": zod.string(),
@@ -550,7 +556,8 @@ export const GraphExecuteBody = zod.object({
   "minProfitUsd": zod.number().default(graphExecuteBodyMinProfitUsdDefault),
   "isDryRun": zod.boolean().default(graphExecuteBodyIsDryRunDefault),
   "executionStyle": zod.enum(['taker', 'maker']).default(graphExecuteBodyExecutionStyleDefault),
-  "forceMode": zod.boolean().default(graphExecuteBodyForceModeDefault).describe('FORCE MODE — skip the fill-rate feedback gate, historical-shortfall penalty, and consecutive-failure blacklist entirely. Fresh pre-flight profit gates (net profit minus slippage buffer > minProfitUsd) still apply; this never authorizes a trade the live re-quote says is unprofitable.\n')
+  "forceMode": zod.boolean().default(graphExecuteBodyForceModeDefault).describe('FORCE MODE — skip the fill-rate feedback gate, historical-shortfall penalty, and consecutive-failure blacklist entirely. Fresh pre-flight profit gates (net profit minus slippage buffer > minProfitUsd) still apply; this never authorizes a trade the live re-quote says is unprofitable.\n'),
+  "maxReprices": zod.number().default(graphExecuteBodyMaxRepricesDefault).describe('Max leg-1 maker reprices (cancel + re-place at the freshest aggressive maker price, pre-flight re-run each time) before the route is abandoned so execution falls through to the next-best one.\n')
 })
 
 export const GraphExecuteResponse = zod.object({

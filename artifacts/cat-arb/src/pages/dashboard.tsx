@@ -1687,9 +1687,11 @@ function GraphEngineCard() {
         addLog("warning", `[GRAPH·EXEC] ❌ ${err || "Pre-flight failed."}`);
         setExecResult(`❌ ${err || "Pre-flight failed — edge disappeared."}`);
         const noOrdersPlaced = !r.executed && (err.startsWith("Pre-flight failed") || err.startsWith("Feedback-loop gate") || err.startsWith("Could not fetch"));
-        // Only a feedback-loop gate rejection falls through to the next route —
-        // pre-flight failures mean the market moved; a fresh scan handles that.
-        const isLastCandidate = ci === candidates.length - 1 || !err.startsWith("Feedback-loop gate");
+        // Feedback-loop gate rejections AND exhausted leg-1 maker reprices fall
+        // through to the next-best route — pre-flight failures mean the market
+        // moved; a fresh scan handles that.
+        const fallsThrough = err.startsWith("Feedback-loop gate") || err.startsWith("Leg 1 unfilled");
+        const isLastCandidate = ci === candidates.length - 1 || !fallsThrough;
         if (isLastCandidate) {
           // Clear the AUTO cooldown ONLY when the whole fire ended with no
           // orders placed — a successful fallback keeps the full cooldown.
@@ -1878,6 +1880,19 @@ function GraphEngineCard() {
             filled {(legStatus.filledPct ?? 0).toFixed(1)}%
           </span>
           <span className="text-muted-foreground">attempt {legStatus.attempt}/{legStatus.maxAttempts}</span>
+          {legStatus.orderPrice != null && (
+            <span data-testid="text-maker-quote">
+              our {legStatus.orderPrice} | bid {legStatus.bestBid ?? "—"} / ask {legStatus.bestAsk ?? "—"}
+            </span>
+          )}
+          {legStatus.queueAheadVol != null && (
+            <span className={cn("font-bold", legStatus.queueAheadVol === 0 ? "text-success" : "text-amber-500")} data-testid="text-queue-position">
+              {legStatus.queueAheadVol === 0 ? "front of queue" : `queue ahead ${legStatus.queueAheadVol.toFixed(4)}`}
+            </span>
+          )}
+          {legStatus.reprices != null && legStatus.reprices > 0 && (
+            <span className="text-muted-foreground">reprices {legStatus.reprices}</span>
+          )}
           <span className="text-muted-foreground italic">{legStatus.phase}</span>
         </div>
       )}

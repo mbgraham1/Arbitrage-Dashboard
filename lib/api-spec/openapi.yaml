@@ -1274,6 +1274,11 @@ components:
         timeoutMs: { type: number, nullable: true }
         filledPct: { type: number, nullable: true }
         phase: { type: string, nullable: true }
+        orderPrice: { type: number, nullable: true }
+        bestBid: { type: number, nullable: true }
+        bestAsk: { type: number, nullable: true }
+        queueAheadVol: { type: number, nullable: true }
+        reprices: { type: integer, nullable: true }
         elapsedMs: { type: number, nullable: true }
         updatedAtMs: { type: number }
     FeeTierResult:
@@ -1449,6 +1454,13 @@ components:
             penalty, and consecutive-failure blacklist entirely. Fresh pre-flight
             profit gates (net profit minus slippage buffer > minProfitUsd) still
             apply; this never authorizes a trade the live re-quote says is unprofitable.
+        maxReprices:
+          type: number
+          default: 4
+          description: >
+            Max leg-1 maker reprices (cancel + re-place at the freshest
+            aggressive maker price, pre-flight re-run each time) before the
+            route is abandoned so execution falls through to the next-best one.
 
     RouteHistoryClearResult:
       type: object

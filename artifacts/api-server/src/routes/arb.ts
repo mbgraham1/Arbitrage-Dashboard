@@ -52,7 +52,7 @@ import {
   type Pair,
 } from "../lib/exchange";
 import { getBestPairPrices, getTriPrices, getBtcTriPrices, scanAllPairs, getPairPrices, getAllPairSnapshots } from "../lib/price-cache";
-import { scanOrderBookCycles, preflightObCycle, discoverCrossPairs, freshJoinPrice, OB_ASSETS, OB_USD_PAIRS, CROSS_LOOKUP, type ObAsset } from "../lib/order-book";
+import { scanOrderBookCycles, preflightObCycle, discoverCrossPairs, freshJoinPrice, makerQuote, OB_ASSETS, OB_USD_PAIRS, CROSS_LOOKUP, type ObAsset } from "../lib/order-book";
 import { scanGraphOpportunities } from "../lib/graph-engine";
 import { createPairHistory, updatePairHistory, type PairHistory } from "../lib/kalman";
 import { waitForTriLimitFill } from "../lib/tri-fill.js";
@@ -377,12 +377,19 @@ interface ExecStatus {
   timeoutMs: number | null;    // per-leg fill timer
   filledPct: number | null;    // 0..100 of the leg's target volume
   phase: string | null;        // "waiting fill" | "retrying — fresh book + pre-flight" | ...
+  // Maker-quality telemetry (leg 1 aggressive pricing)
+  orderPrice: number | null;   // our resting post-only price
+  bestBid: number | null;
+  bestAsk: number | null;
+  queueAheadVol: number | null; // book volume ahead of us at our level (0 = front)
+  reprices: number | null;      // reprices consumed this leg
   updatedAtMs: number;
 }
 const idleExecStatus = (): ExecStatus => ({
   active: false, route: null, leg: null, legLabel: null, pair: null, orderId: null,
   attempt: null, maxAttempts: null, startedAtMs: null, timeoutMs: null,
-  filledPct: null, phase: null, updatedAtMs: Date.now(),
+  filledPct: null, phase: null, orderPrice: null, bestBid: null, bestAsk: null,
+  queueAheadVol: null, reprices: null, updatedAtMs: Date.now(),
 });
 let execStatus: ExecStatus = idleExecStatus();
 function setExecStatus(patch: Partial<ExecStatus>): void {
@@ -698,6 +705,8 @@ interface TriangleExecInput {
   tradeSizeUsd: number; feesPct: number; minProfitUsd: number; isDryRun: boolean;
   /** Override the per-leg maker fill window (e.g. 2s probe attempts). */
   makerTimeoutMs?: number;
+  /** Max leg-1 maker reprices before abandoning the route (default 4). */
+  maxReprices?: number;
   /** Caller ALREADY holds the live execution lock with this generation token.
    *  Skip the internal acquire (which would see the caller's own lock and
    *  self-block) — the caller releases it. */
@@ -844,7 +853,13 @@ async function runKrakenTriangle(input: TriangleExecInput, reqLog: ReqLog): Prom
     // passive order a real chance to be hit — while the edge-recheck cancels
     // it early if the opportunity decays. Legs 2/3 keep the short window (we
     // hold inventory there; completing at market beats waiting).
-    const LEG1_MAX_REST_MS = input.makerTimeoutMs ?? 3_000; // trader-tuned: fast fill-or-move, no long resting
+    // Leg 1 reprice loop (trader-tuned): re-run pre-flight + re-place at the
+    // most aggressive valid maker price every LEG1_REPRICE_MS; after
+    // LEG1_MAX_REPRICES the leg is abandoned so the caller can fall through to
+    // the next-best route. Total window derives from the two.
+    const LEG1_REPRICE_MS = 2_500;
+    const LEG1_MAX_REPRICES = input.maxReprices ?? 4;
+    const LEG1_MAX_REST_MS = input.makerTimeoutMs ?? (LEG1_MAX_REPRICES + 1) * LEG1_REPRICE_MS;
     const MAX_LEG_ATTEMPTS = 1;
     interface AggFill { volExec: number; cost: number; fee: number; txid: string }
     const isFinal = (s: string) => s === "closed" || s === "canceled" || s === "expired";
@@ -866,11 +881,11 @@ async function runKrakenTriangle(input: TriangleExecInput, reqLog: ReqLog): Prom
       //   price → if the join price moved, cancel and RE-JOIN at the fresh
       //           price (still post-only/maker) — a stale resting order behind
       //           a drifted book never fills; chasing keeps us at the front.
-      opts?: { restMs?: number; freshLimit?: () => Promise<number | null> },
+      opts?: { restMs?: number; repriceMs?: number; maxReprices?: number; freshLimit?: () => Promise<{ price: number; bestBid?: number; bestAsk?: number; queueAheadVol?: number } | null> },
     ): Promise<AggFill> => {
       const restMs = opts?.restMs ?? MAKER_LEG_TIMEOUT_MS;
-      const EDGE_CHECK_EVERY_MS = 4_000;
-      const MAX_CHASES = 6; // re-joins within the SAME restMs window
+      const EDGE_CHECK_EVERY_MS = opts?.repriceMs ?? 2_500;
+      const MAX_CHASES = opts?.maxReprices ?? 6; // re-joins within the SAME restMs window
       const legDeadline = Date.now() + restMs; // wall-clock cap across chases
       let chases = 0;
       let remaining = spec.volume;
@@ -921,15 +936,16 @@ async function runKrakenTriangle(input: TriangleExecInput, reqLog: ReqLog): Prom
           if (opts?.freshLimit && Date.now() >= nextEdgeCheck && !isFinal(info.status)) {
             nextEdgeCheck = Date.now() + EDGE_CHECK_EVERY_MS;
             setExecStatus({ phase: "resting — re-checking edge" });
-            const px = await opts.freshLimit();
-            if (px == null) {
+            const q = await opts.freshLimit();
+            if (q == null) {
               log.info(`${label}: edge no longer clears the floor while resting — cancelling early`);
               edgeGone = true;
               break;
             }
-            if (px !== limit && chases < MAX_CHASES && Date.now() < deadline - 2_000) {
-              log.info(`${label}: book moved (${limit} → ${px}) — chasing: cancel and re-join at the fresh price`);
-              repriceTo = px;
+            setExecStatus({ bestBid: q.bestBid ?? null, bestAsk: q.bestAsk ?? null, queueAheadVol: q.queueAheadVol ?? null, orderPrice: limit, reprices: chases });
+            if (q.price !== limit && chases < MAX_CHASES && Date.now() < deadline - 2_000) {
+              log.info(`${label}: repricing (${limit} → ${q.price}) — cancel and re-place at the most aggressive maker price`);
+              repriceTo = q.price;
               break;
             }
             setExecStatus({ phase: "waiting for fill" });
@@ -1010,20 +1026,43 @@ async function runKrakenTriangle(input: TriangleExecInput, reqLog: ReqLog): Prom
     {
       let f1: AggFill = { volExec: 0, cost: 0, fee: 0, txid: "" };
       try {
+        // Aggressive maker pricing: place at the most aggressive VALID
+        // post-only price (one tick inside the spread when possible) — front
+        // of the queue instead of the back of the join-price level.
+        // Tick-premium guard: improving one tick above the join price costs
+        // (q.price − join) × volume. Only improve when the pre-flight profit
+        // still clears the floor AFTER paying that premium; otherwise join.
+        const tickPremiumUsd = (q: { price: number }) => Math.max(0, (q.price - l1.limitPrice) * l1.volume);
+        const q0 = await makerQuote(l1.pair, l1.side);
+        if (q0 && pf.profitUsd - tickPremiumUsd(q0) > threshold) {
+          l1.limitPrice = q0.price;
+          setExecStatus({ orderPrice: q0.price, bestBid: q0.bestBid, bestAsk: q0.bestAsk, queueAheadVol: q0.queueAheadVol, reprices: 0 });
+        }
         f1 = await fillLeg(1, "leg1", l1, async () => {
           const fresh = await preflightObCycle(assetA as ObAsset, assetB as ObAsset, tradeSizeUsd, effectiveFeesPct, "maker");
           if (!fresh || fresh.profitUsd <= threshold) return null; // edge gone — stop retrying
-          return fresh.legs[0].limitPrice;
+          const q = await makerQuote(l1.pair, l1.side);
+          return q?.price ?? fresh.legs[0].limitPrice;
         }, {
           // Leg 1 holds no inventory, so patience is free: rest the post-only
           // order up to LEG1_MAX_REST_MS, abort the MOMENT fresh books say the
           // cycle no longer clears the floor, and CHASE the join price when
           // the book drifts (a stale resting order never fills).
           restMs: LEG1_MAX_REST_MS,
+          repriceMs: LEG1_REPRICE_MS,
+          maxReprices: LEG1_MAX_REPRICES,
+          // Full pre-flight before every reprice: null aborts (edge gone);
+          // otherwise re-place at the freshest aggressive maker price.
           freshLimit: async () => {
             const fresh = await preflightObCycle(assetA as ObAsset, assetB as ObAsset, tradeSizeUsd, effectiveFeesPct, "maker");
             if (!fresh || fresh.profitUsd <= threshold) return null; // edge gone
-            return fresh.legs[0].limitPrice;
+            const q = await makerQuote(l1.pair, l1.side);
+            if (!q) return { price: fresh.legs[0].limitPrice };
+            // Tick-premium guard on repricing too: improve only when profit
+            // still clears the floor at the improved price; else join.
+            const premium = Math.max(0, (q.price - fresh.legs[0].limitPrice) * fresh.legs[0].volume);
+            if (fresh.profitUsd - premium <= threshold) return { price: fresh.legs[0].limitPrice, bestBid: q.bestBid, bestAsk: q.bestAsk, queueAheadVol: q.queueAheadVol };
+            return q;
           },
         });
       } catch (e) {
@@ -1042,11 +1081,10 @@ async function runKrakenTriangle(input: TriangleExecInput, reqLog: ReqLog): Prom
       usdSpent = f1.cost + f1.fee;
       totalFees += f1.fee;
       if (aHeld < l1.volume * FILL_TOLERANCE) {
-        // Taker fallback gate (trader-tuned): fire whenever the FRESH
-        // taker-priced pre-flight (depth-walked, taker fee tier) is POSITIVE —
-        // any net profit after taker fees, however small, beats no trade.
-        // Never fire on a NEGATIVE fresh number: that is a certain loss (fees
-        // exceed the edge), not a partial profit.
+        // Taker fallback gate (trader-directed): fire ONLY when the FRESH
+        // taker-priced pre-flight (depth-walked, actual taker fee tier) still
+        // clears the trader's profit floor. Otherwise abandon the route so the
+        // caller can fall through to the next-best one.
         // A revoked run must not place NEW orders — re-verify lock ownership
         // immediately before the fallback order.
         if (lockGen != null && !liveLockOwned(lockGen)) {
@@ -1054,18 +1092,18 @@ async function runKrakenTriangle(input: TriangleExecInput, reqLog: ReqLog): Prom
         }
         const takerFeePct = tiers?.takerFeePct ?? effectiveFeesPct;
         const freshTaker = await preflightObCycle(assetA as ObAsset, assetB as ObAsset, tradeSizeUsd, takerFeePct, "taker");
-        if (freshTaker && freshTaker.profitUsd > 0) {
-          log.info(`leg1 taker fallback firing — taker-priced net $${freshTaker.profitUsd.toFixed(4)} > $0`);
+        if (freshTaker && freshTaker.profitUsd > threshold) {
+          log.info(`leg1 taker fallback firing — taker-priced net $${freshTaker.profitUsd.toFixed(4)} > floor $${threshold.toFixed(4)}`);
           const m = await marketFill(1, "leg1", l1.side, l1.volume - aHeld, l1.pair);
           aHeld += m.volExec; usdSpent += m.cost + m.fee; totalFees += m.fee;
           leg1Id = [leg1Id, m.txid].filter(Boolean).join(",");
         } else {
-          log.info(`leg1 taker fallback declined — taker-priced net ${freshTaker ? `$${freshTaker.profitUsd.toFixed(4)}` : "unavailable"} ≤ $0 (fees exceed the edge — certain loss)`);
+          log.info(`leg1 taker fallback declined — taker-priced net ${freshTaker ? `$${freshTaker.profitUsd.toFixed(4)}` : "unavailable"} ≤ floor $${threshold.toFixed(4)}`);
         }
       }
       if (aHeld < l1.volume * FILL_TOLERANCE) {
         if (aHeld > 0) await tryUnwindMarket(creds, "sell", aHeld, pairA, `sell ${assetA} (unwind partial leg1)`, log);
-        throw new Error(`Leg 1 unfilled: rested up to ${LEG1_MAX_REST_MS / 1000}s (cancelled early if the edge decayed) and taker fallback ${aHeld > 0 ? "left a shortfall" : "was declined (taker-priced net ≤ $0 — fees exceed the edge)"} (${aHeld.toFixed(8)}/${l1.volume.toFixed(8)} ${assetA}); order canceled, lock released.`);
+        throw new Error(`Leg 1 unfilled after ${LEG1_MAX_REPRICES} maker reprices (aggressive pricing, pre-flight each time) and taker fallback ${aHeld > 0 ? "left a shortfall" : "declined (taker-priced net ≤ your floor)"} (${aHeld.toFixed(8)}/${l1.volume.toFixed(8)} ${assetA}); order canceled — trying the next-best route.`);
       }
       legsCompleted = 1;
     }
@@ -1735,6 +1773,8 @@ router.post("/arb/graph-execute", async (req, res): Promise<void> => {
         assetB: asset(route.hops[1]!.to),
         tradeSizeUsd, feesPct: krakenFeesPct, minProfitUsd, isDryRun,
         makerTimeoutMs: probeAttempt ? PROBE_MAKER_TIMEOUT_MS : undefined,
+        // Clamp: 1..10 reprices — never trust client numbers for live orders.
+        maxReprices: Math.min(10, Math.max(1, Math.round(parsed.data.maxReprices ?? 4))),
         heldLockGen: lockGen ?? undefined, // graph-execute already holds the live lock
       }, req.log);
       if (out.badRequest) { res.status(400).json({ error: out.badRequest }); return; }

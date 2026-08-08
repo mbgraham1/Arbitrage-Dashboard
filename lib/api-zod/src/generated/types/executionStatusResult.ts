@@ -19,6 +19,11 @@ export interface ExecutionStatusResult {
   timeoutMs: number | null;
   filledPct: number | null;
   phase: string | null;
+  orderPrice?: number | null;
+  bestBid?: number | null;
+  bestAsk?: number | null;
+  queueAheadVol?: number | null;
+  reprices?: number | null;
   elapsedMs: number | null;
   updatedAtMs: number;
 }

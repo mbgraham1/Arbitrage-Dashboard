@@ -22,4 +22,6 @@ export interface GraphExecuteRequest {
   executionStyle?: GraphExecuteRequestExecutionStyle;
   /** FORCE MODE — skip the fill-rate feedback gate, historical-shortfall penalty, and consecutive-failure blacklist entirely. Fresh pre-flight profit gates (net profit minus slippage buffer > minProfitUsd) still apply; this never authorizes a trade the live re-quote says is unprofitable. */
   forceMode?: boolean;
+  /** Max leg-1 maker reprices (cancel + re-place at the freshest aggressive maker price, pre-flight re-run each time) before the route is abandoned so execution falls through to the next-best one. */
+  maxReprices?: number;
 }

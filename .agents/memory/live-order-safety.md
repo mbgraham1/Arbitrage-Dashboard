@@ -48,3 +48,7 @@ Any 'current edge beats history' bypass of fill-rate gates/blacklists must be li
 - A single-flight execution lock checked both by an outer route handler AND inside the executor it calls will SELF-BLOCK (executor sees its caller's lock). Pass the held generation token down (`heldLockGen`); only the acquirer releases.
 - A run whose lock was revoked (KILL/eviction) may cancel its own resting order and unwind ACTUAL confirmed fills, but must NEVER place new orders (taker fallbacks, retries). Enforce with a typed LockRevokedError carrying the confirmed fill so catch blocks can unwind without guessing volumes; re-check ownership immediately before every fallback order.
 - Leg 1 (no inventory at risk) can rest a post-only order long (30s) IF paired with a periodic fresh-edge re-check that cancels early — time patience, edge discipline. Inventory-holding legs keep short windows.
+
+## Maker fill quality
+- Joining the best bid puts a small order at the BACK of the queue — it ~never fills. Improve one tick inside the spread (post-only still holds) with a tick-premium guard: only improve when profit still clears the floor at the improved price. Quantize tick-snapped prices to the tick's decimals (float dust gets rejected by Kraken).
+- Reprice loop: cancel + re-place at the freshest aggressive price every ~2.5s with a FULL pre-flight each time; bounded by max-reprices + wall-clock deadline; exhaustion falls through to the next-best route client-side (error-prefix contract with the dashboard).
