@@ -332,8 +332,10 @@ router.get("/arb/ob-scan", async (req, res): Promise<void> => {
   const minProfitUsd   = Math.max(0, parseFloat(String(req.query["minProfitUsd"]   ?? "0.02")) || 0.02);
   const maxSlippagePct = Math.max(0, parseFloat(String(req.query["maxSlippagePct"] ?? "0.4"))  || 0.4);
   const volatilityFilter = String(req.query["volatilityFilter"] ?? "true") !== "false";
+  // v20: 3 = triangles only; 4 (default) adds USD→A→BTC→ETH→USD / USD→A→ETH→BTC→USD
+  const maxLegs = String(req.query["maxLegs"] ?? "4") === "3" ? 3 as const : 4 as const;
   try {
-    const result = await scanOrderBookCycles(tradeSizeUsd, feesPct, minProfitUsd, maxSlippagePct, volatilityFilter);
+    const result = await scanOrderBookCycles(tradeSizeUsd, feesPct, minProfitUsd, maxSlippagePct, volatilityFilter, maxLegs);
     res.json(result);
   } catch (err) {
     req.log.error({ err }, "OB scan error");

@@ -311,13 +311,15 @@ export const getObScanQueryFeesPctDefault = 0.5;
 export const getObScanQueryMinProfitUsdDefault = 0.02;
 export const getObScanQueryMaxSlippagePctDefault = 0.5;
 export const getObScanQueryVolatilityFilterDefault = true;
+export const getObScanQueryMaxLegsDefault = 4;
 
 export const GetObScanQueryParams = zod.object({
   "tradeSizeUsd": zod.coerce.number().default(getObScanQueryTradeSizeUsdDefault).describe('Simulated trade size in USD (default 10)'),
   "feesPct": zod.coerce.number().default(getObScanQueryFeesPctDefault).describe('Estimated total fees % (default 0.5 — 3 legs × 0.16% maker)'),
   "minProfitUsd": zod.coerce.number().default(getObScanQueryMinProfitUsdDefault).describe('Minimum net profit ($) required for READY status at $10 (default 0.02 — v18; scaled by size\/10 in the scaling table)'),
   "maxSlippagePct": zod.coerce.number().default(getObScanQueryMaxSlippagePctDefault).describe('Maximum tolerated total slippage (%) for READY status (default 0.5)'),
-  "volatilityFilter": zod.coerce.boolean().default(getObScanQueryVolatilityFilterDefault).describe('v17 — scan only assets with |24h change| > 1.5% (default true; falls back to all assets when fewer than 3 qualify)')
+  "volatilityFilter": zod.coerce.boolean().default(getObScanQueryVolatilityFilterDefault).describe('v17 — scan only assets with |24h change| > 1.5% (default true; falls back to all assets when fewer than 3 qualify)'),
+  "maxLegs": zod.union([zod.literal(3),zod.literal(4)]).default(getObScanQueryMaxLegsDefault).describe('v20 — 3 scans triangles only; 4 (default) also simulates 4-leg routes through the BTC\/ETH cross (USD→A→BTC→ETH→USD and USD→A→ETH→BTC→USD)')
 })
 
 export const GetObScanResponse = zod.object({
@@ -335,7 +337,8 @@ export const GetObScanResponse = zod.object({
   "volumeA": zod.number().describe('amount of A acquired in leg 1'),
   "slippagePct": zod.number().describe('total execution slippage across 3 legs (%)'),
   "status": zod.enum(['READY', 'HIGH_SLIPPAGE', 'LOW_PROFIT']).describe('v15 conservative classification'),
-  "confidencePct": zod.number().describe('v17 liquidity confidence 0-100 — avg top-of-book coverage across the 3 legs')
+  "confidencePct": zod.number().describe('v17 liquidity confidence 0-100 — avg top-of-book coverage across all legs'),
+  "legs": zod.number().describe('v20 — number of legs in the route: 3 (USD→A→B→USD) or 4 (USD→A→M→B→USD via the BTC\/ETH cross)')
 })),
   "tradeSizeUsd": zod.number(),
   "feesPct": zod.number(),

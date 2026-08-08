@@ -280,8 +280,10 @@ export interface ObCycleEntry {
   slippagePct: number;
   /** v15 conservative classification */
   status: ObCycleEntryStatus;
-  /** v17 liquidity confidence 0-100 — avg top-of-book coverage across the 3 legs */
+  /** v17 liquidity confidence 0-100 — avg top-of-book coverage across all legs */
   confidencePct: number;
+  /** v20 — number of legs in the route: 3 (USD→A→B→USD) or 4 (USD→A→M→B→USD via the BTC/ETH cross) */
+  legs: number;
 }
 
 /**
@@ -889,7 +891,19 @@ maxSlippagePct?: number;
  * v17 — scan only assets with |24h change| > 1.5% (default true; falls back to all assets when fewer than 3 qualify)
  */
 volatilityFilter?: boolean;
+/**
+ * v20 — 3 scans triangles only; 4 (default) also simulates 4-leg routes through the BTC/ETH cross (USD→A→BTC→ETH→USD and USD→A→ETH→BTC→USD)
+ */
+maxLegs?: GetObScanMaxLegs;
 };
+
+export type GetObScanMaxLegs = typeof GetObScanMaxLegs[keyof typeof GetObScanMaxLegs];
+
+
+export const GetObScanMaxLegs = {
+  NUMBER_3: 3,
+  NUMBER_4: 4,
+} as const;
 
 export type ObPairsRefresh200 = {
   /** True when a real discovered set is active (fresh or previous good cache) */

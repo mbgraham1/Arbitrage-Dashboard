@@ -31,6 +31,7 @@ export * from './getAllPairSnapshotsParams';
 export * from './getGraphScanExecutionStyle';
 export * from './getGraphScanParams';
 export * from './getInventoryScanParams';
+export * from './getObScanMaxLegs';
 export * from './getObScanParams';
 export * from './graphExecuteRequest';
 export * from './graphExecuteRequestExecutionStyle';

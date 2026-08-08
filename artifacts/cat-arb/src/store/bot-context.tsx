@@ -424,8 +424,10 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
     // Pick the best READY cycle above the profit floor. cycles[] is sorted by
     // estimatedProfitUsd descending, but the #1 entry may be HIGH_SLIPPAGE or
     // LOW_PROFIT — filter first, then take the highest-profit READY one.
+    // Only 3-leg routes are executable — the OB executor places exactly three
+    // orders from (assetA, assetB); a 4-leg route would skip the middle hop.
     const top = cycles
-      .filter(c => c.status === "READY" && c.estimatedProfitUsd > s.minProfitUsd)
+      .filter(c => (c.legs ?? 3) === 3 && c.status === "READY" && c.estimatedProfitUsd > s.minProfitUsd)
       .sort((a, b) => b.estimatedProfitUsd - a.estimatedProfitUsd)[0];
     if (!top) return;
 

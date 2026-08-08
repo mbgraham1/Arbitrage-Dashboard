@@ -5,6 +5,7 @@
  * CAT Arbitrage Dashboard API
  * OpenAPI spec version: 0.1.0
  */
+import type { GetObScanMaxLegs } from './getObScanMaxLegs';
 
 export type GetObScanParams = {
 /**
@@ -27,4 +28,8 @@ maxSlippagePct?: number;
  * v17 — scan only assets with |24h change| > 1.5% (default true; falls back to all assets when fewer than 3 qualify)
  */
 volatilityFilter?: boolean;
+/**
+ * v20 — 3 scans triangles only; 4 (default) also simulates 4-leg routes through the BTC/ETH cross (USD→A→BTC→ETH→USD and USD→A→ETH→BTC→USD)
+ */
+maxLegs?: GetObScanMaxLegs;
 };

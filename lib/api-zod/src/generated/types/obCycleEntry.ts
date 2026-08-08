@@ -31,6 +31,8 @@ export interface ObCycleEntry {
   slippagePct: number;
   /** v15 conservative classification */
   status: ObCycleEntryStatus;
-  /** v17 liquidity confidence 0-100 — avg top-of-book coverage across the 3 legs */
+  /** v17 liquidity confidence 0-100 — avg top-of-book coverage across all legs */
   confidencePct: number;
+  /** v20 — number of legs in the route: 3 (USD→A→B→USD) or 4 (USD→A→M→B→USD via the BTC/ETH cross) */
+  legs: number;
 }

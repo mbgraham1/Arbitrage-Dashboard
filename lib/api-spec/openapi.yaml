@@ -364,6 +364,10 @@ paths:
           in: query
           description: v17 — scan only assets with |24h change| > 1.5% (default true; falls back to all assets when fewer than 3 qualify)
           schema: {type: boolean, default: true}
+        - name: maxLegs
+          in: query
+          description: v20 — 3 scans triangles only; 4 (default) also simulates 4-leg routes through the BTC/ETH cross (USD→A→BTC→ETH→USD and USD→A→ETH→BTC→USD)
+          schema: {type: number, enum: [3, 4], default: 4}
       responses:
         "200":
           description: Ranked cycle list
@@ -1109,7 +1113,7 @@ components:
 
     ObCycleEntry:
       type: object
-      required: [route, assetA, assetB, estimatedProfitUsd, profitPct, grossProfitUsd, feeUsd, avgPriceA, avgCrossRate, avgPriceB, volumeA, slippagePct, status, confidencePct]
+      required: [route, assetA, assetB, estimatedProfitUsd, profitPct, grossProfitUsd, feeUsd, avgPriceA, avgCrossRate, avgPriceB, volumeA, slippagePct, status, confidencePct, legs]
       properties:
         route: {type: string, description: "e.g. USD→SOL→ETH→USD"}
         assetA: {type: string}
@@ -1127,7 +1131,8 @@ components:
           type: string
           enum: [READY, HIGH_SLIPPAGE, LOW_PROFIT]
           description: "v15 conservative classification"
-        confidencePct: {type: number, description: "v17 liquidity confidence 0-100 — avg top-of-book coverage across the 3 legs"}
+        confidencePct: {type: number, description: "v17 liquidity confidence 0-100 — avg top-of-book coverage across all legs"}
+        legs: {type: number, description: "v20 — number of legs in the route: 3 (USD→A→B→USD) or 4 (USD→A→M→B→USD via the BTC/ETH cross)"}
 
     ObScalingRow:
       type: object

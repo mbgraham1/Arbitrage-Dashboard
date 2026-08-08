@@ -402,6 +402,8 @@ export interface ObCycleEntry {
    * intent); we port the intent.
    */
   confidencePct: number;
+  /** v20: number of legs in the route — 3 (USD→A→B→USD) or 4 (USD→A→M→B→USD) */
+  legs: number;
 }
 
 /** v18: scaling analysis status at a given trade size. */
@@ -444,38 +446,57 @@ export interface ObScanResult {
   scannedAt: string;
 }
 
+interface CycleSimResult {
+  profitUsd: number;
+  grossProfitUsd: number;
+  feeUsd: number;
+  avg1: number;
+  avg2: number;
+  avg3: number;
+  volA: number;
+  slippagePct: number;
+  confidencePct: number;
+  legs: number;
+}
+
+/** Per-leg |avg − best| / best in %. */
+const slip = (avg: number, best: number) => best > 0 ? Math.abs(avg - best) / best * 100 : 0;
+
+/** Top-of-book coverage: available/needed capped at 1 (0 when unknown). */
+const coverage = (topVol: number | undefined, needed: number) =>
+  topVol && needed > 0 ? Math.min(1, topVol / needed) : 0;
+
 /**
- * Port of Python v14 simulate_triangular_cycle().
+ * v20 generic USD-anchored cycle simulator (superset of Python v14
+ * simulate_triangular_cycle()). `path` is the chain of crypto assets between
+ * the two USD legs — [A, B] for a 3-leg triangle, [A, M1, M2] for a 4-leg run.
  * Walks the order book for each leg:
- *   Leg 1 — buy A with USD  → walks ASKS of A/USD
- *   Leg 2 — sell A for B    → walks BIDS of A/B cross pair
- *   Leg 3 — sell B for USD  → walks BIDS of B/USD
+ *   Leg 1        — buy path[0] with USD          → walks ASKS of path[0]/USD
+ *   Cross leg(s) — convert path[i] → path[i+1]   → walks ASKS or BIDS of the
+ *                  cross pair depending on orientation
+ *   Final leg    — sell path[last] for USD       → walks BIDS of path[last]/USD
  *
- * Returns null when any book is missing or has insufficient depth.
+ * Returns null when any book/cross pair is missing or has insufficient depth.
  */
-function simulateCycle(
-  assetA: ObAsset,
-  assetB: ObAsset,
+function simulatePath(
+  path: ObAsset[],
   startUsd: number,
   orderbooks: Map<string, OrderBook>,
   feesPct: number,
   crossLookup: Map<string, CrossRoute> = CROSS_LOOKUP,
-): { profitUsd: number; grossProfitUsd: number; feeUsd: number; avg1: number; avg2: number; avg3: number; volA: number; slippagePct: number; confidencePct: number } | null {
-  const usdPairA = OB_USD_PAIRS[assetA];
-  const usdPairB = OB_USD_PAIRS[assetB];
-  const cross    = crossLookup.get(`${assetA}-${assetB}`);
-  if (!cross) return null;
+): CycleSimResult | null {
+  if (path.length < 2) return null;
+  const first = path[0]!;
+  const last  = path[path.length - 1]!;
+  const obFirst = orderbooks.get(OB_USD_PAIRS[first]);
+  const obLast  = orderbooks.get(OB_USD_PAIRS[last]);
+  if (!obFirst || !obLast) return null;
 
-  const obAUsd  = orderbooks.get(usdPairA);
-  const obCross = orderbooks.get(cross.pair);
-  const obBUsd  = orderbooks.get(usdPairB);
-  if (!obAUsd || !obCross || !obBUsd) return null;
-
-  // ── Leg 1: Buy A with USD (walk asks of A/USD) ────────────────────────────
+  // ── Leg 1: Buy path[0] with USD (walk asks) ───────────────────────────────
   let remainingUsd = startUsd;
   let aAmt = 0;
   let totalSpent = 0;
-  for (const [price, vol] of obAUsd.asks) {
+  for (const [price, vol] of obFirst.asks) {
     const cost = price * vol;
     if (remainingUsd <= cost) {
       aAmt   += remainingUsd / price;
@@ -490,49 +511,68 @@ function simulateCycle(
   // Require a FULL fill — a partial fill is not an executable cycle.
   if (aAmt === 0 || remainingUsd > 0) return null;
   const avg1  = totalSpent / aAmt; // USD per A
-  const best1 = obAUsd.asks[0]![0];
+  let slippagePct = slip(avg1, obFirst.asks[0]![0]);
+  let covSum = coverage(obFirst.asks[0]?.[1], aAmt); // leg 1: A units
 
-  // ── Leg 2: Convert A → B on the cross pair, respecting orientation ───────
-  let remainingA = aAmt;
-  let bAmt = 0;
-  // Best achievable cross rate (B per A) at the top of the relevant side.
-  // When buying base with A, ask price is A-per-B → best B-per-A = 1/askTop.
-  const crossTop = cross.aIsQuote ? obCross.asks[0] : obCross.bids[0];
-  if (!crossTop) return null;
-  const best2 = cross.aIsQuote ? 1 / crossTop[0] : crossTop[0];
-  if (cross.aIsQuote) {
-    // A is the QUOTE asset, B is the BASE: we buy base with A → walk ASKS.
-    // Ask price = A per B; vol is in B.
-    for (const [price, vol] of obCross.asks) {
-      const cost = price * vol; // cost in A
-      if (remainingA <= cost) {
-        bAmt      += remainingA / price;
-        remainingA = 0;
-        break;
+  // ── Cross legs: convert path[i] → path[i+1], respecting orientation ──────
+  let holding = aAmt;          // amount of path[i] currently held
+  let firstCrossRate = 0;      // avg rate of the FIRST cross leg (B per A)
+  for (let i = 0; i < path.length - 1; i++) {
+    const from = path[i]!;
+    const to   = path[i + 1]!;
+    const cross = crossLookup.get(`${from}-${to}`);
+    if (!cross) return null;
+    const obCross = orderbooks.get(cross.pair);
+    if (!obCross) return null;
+
+    // Best achievable cross rate (to-per-from) at the top of the relevant side.
+    // When buying base with `from`, ask price is from-per-to → best = 1/askTop.
+    const crossTop = cross.aIsQuote ? obCross.asks[0] : obCross.bids[0];
+    if (!crossTop) return null;
+    const best = cross.aIsQuote ? 1 / crossTop[0] : crossTop[0];
+
+    let remaining = holding;
+    let outAmt = 0;
+    if (cross.aIsQuote) {
+      // `from` is the QUOTE asset, `to` is the BASE: buy base → walk ASKS.
+      // Ask price = from per to; vol is in `to`.
+      for (const [price, vol] of obCross.asks) {
+        const cost = price * vol; // cost in `from`
+        if (remaining <= cost) {
+          outAmt   += remaining / price;
+          remaining = 0;
+          break;
+        }
+        outAmt   += vol;
+        remaining -= cost;
       }
-      bAmt      += vol;
-      remainingA -= cost;
-    }
-  } else {
-    // A is the BASE asset, B is the QUOTE: we sell base → walk BIDS.
-    // Bid price = B per A; vol is in A.
-    for (const [price, vol] of obCross.bids) {
-      if (remainingA <= vol) {
-        bAmt      += remainingA * price;
-        remainingA = 0;
-        break;
+    } else {
+      // `from` is the BASE asset, `to` is the QUOTE: sell base → walk BIDS.
+      // Bid price = to per from; vol is in `from`.
+      for (const [price, vol] of obCross.bids) {
+        if (remaining <= vol) {
+          outAmt   += remaining * price;
+          remaining = 0;
+          break;
+        }
+        outAmt   += vol * price;
+        remaining -= vol;
       }
-      bAmt      += vol * price;
-      remainingA -= vol;
     }
+    if (outAmt === 0 || remaining > 0) return null;
+    const avg = outAmt / holding; // `to` per `from`
+    slippagePct += slip(avg, best);
+    covSum += cross.aIsQuote
+      ? coverage(obCross.asks[0]?.[1], outAmt)   // buying base `to`: `to` units
+      : coverage(obCross.bids[0]?.[1], holding); // selling base `from`: `from` units
+    if (i === 0) firstCrossRate = avg;
+    holding = outAmt;
   }
-  if (bAmt === 0 || remainingA > 0) return null;
-  const avg2 = bAmt / aAmt; // B per A (cross rate)
 
-  // ── Leg 3: Sell B for USD (walk bids of B/USD) ───────────────────────────
-  let remainingB = bAmt;
+  // ── Final leg: Sell path[last] for USD (walk bids) ────────────────────────
+  let remainingB = holding;
   let usdFinal = 0;
-  for (const [price, vol] of obBUsd.bids) {
+  for (const [price, vol] of obLast.bids) {
     if (remainingB <= vol) {
       usdFinal  += remainingB * price;
       remainingB = 0;
@@ -542,35 +582,36 @@ function simulateCycle(
     remainingB -= vol;
   }
   if (usdFinal === 0 || remainingB > 0) return null;
-  const avg3  = usdFinal / bAmt; // USD per B
-  const best3 = obBUsd.bids[0]![0];
+  const avg3 = usdFinal / holding; // USD per final asset
+  slippagePct += slip(avg3, obLast.bids[0]![0]);
+  covSum += coverage(obLast.bids[0]?.[1], holding); // final leg: last-asset units
+
+  const legs = path.length + 1; // USD legs on both ends + crosses
 
   // Fees apply PER LEG on the traded notional, not on the profit. (The Python
   // formula `profit * (1 - fee%)` deducted fees from the few-cent profit —
   // fractions of a cent — while Kraken actually charges fee% of each leg's
-  // notional, ~3 × size × fee%. That bug made losing cycles look green.)
+  // notional, ~legs × size × fee%. That bug made losing cycles look green.)
   // feesPct is the per-leg taker fee in percent (Kraken base tier: 0.40%).
   const grossProfit = usdFinal - startUsd;
-  const feeUsd      = (feesPct / 100) * (startUsd + startUsd + usdFinal); // leg1 + leg2 (≈ startUsd notional) + leg3
+  const feeUsd      = (feesPct / 100) * (startUsd * (legs - 1) + usdFinal); // each leg ≈ startUsd notional; last leg = usdFinal
   const netProfit   = grossProfit - feeUsd;
 
-  // v15: total slippage = per-leg |avg − best| / best, summed across 3 legs.
-  const slip = (avg: number, best: number) => best > 0 ? Math.abs(avg - best) / best * 100 : 0;
-  const slippagePct = slip(avg1, best1) + slip(avg2, best2) + slip(avg3, best3);
+  const confidencePct = Math.round((covSum / legs) * 100);
 
-  // v17: liquidity confidence — top-of-book coverage per leg (available/needed,
-  // capped at 1), averaged. Needed amounts are denominated in each book's BASE
-  // asset units to match the level volumes.
-  const coverage = (topVol: number | undefined, needed: number) =>
-    topVol && needed > 0 ? Math.min(1, topVol / needed) : 0;
-  const cov1 = coverage(obAUsd.asks[0]?.[1], aAmt);                       // leg 1: A units
-  const cov2 = cross.aIsQuote
-    ? coverage(obCross.asks[0]?.[1], bAmt)                                // buying base B: B units
-    : coverage(obCross.bids[0]?.[1], aAmt);                               // selling base A: A units
-  const cov3 = coverage(obBUsd.bids[0]?.[1], bAmt);                       // leg 3: B units
-  const confidencePct = Math.round(((cov1 + cov2 + cov3) / 3) * 100);
+  return { profitUsd: netProfit, grossProfitUsd: grossProfit, feeUsd, avg1, avg2: firstCrossRate, avg3, volA: aAmt, slippagePct, confidencePct, legs };
+}
 
-  return { profitUsd: netProfit, grossProfitUsd: grossProfit, feeUsd, avg1, avg2, avg3, volA: aAmt, slippagePct, confidencePct };
+/** 3-leg triangle: USD→A→B→USD. Thin wrapper over the generic path simulator. */
+function simulateCycle(
+  assetA: ObAsset,
+  assetB: ObAsset,
+  startUsd: number,
+  orderbooks: Map<string, OrderBook>,
+  feesPct: number,
+  crossLookup: Map<string, CrossRoute> = CROSS_LOOKUP,
+): CycleSimResult | null {
+  return simulatePath([assetA, assetB], startUsd, orderbooks, feesPct, crossLookup);
 }
 
 // ── v18: manual execution pre-flight ─────────────────────────────────────────
@@ -759,12 +800,16 @@ const SCALING_SIZES_USD = [10, 50, 100, 500, 1000];
 /** v19: max ranked cycles to return — raised from 15 to expose more routes. */
 const MAX_RANKED_CYCLES = 50;
 
+/** v20: fixed mid-asset chains for 4-leg routes (the BTC/ETH cross as middle step). */
+const FOUR_LEG_MIDS: Array<[ObAsset, ObAsset]> = [["BTC", "ETH"], ["ETH", "BTC"]];
+
 export async function scanOrderBookCycles(
   tradeSizeUsd   = 10,
   feesPct        = 0.26, // per-leg fee %, Kraken standard taker (0.26%); use 0.16% for post-only maker
   minProfitUsd   = 0.02, // v18: min profit ($) at $10, scaled by size/10 for larger sizes
   maxSlippagePct = 0.50,
   volatilityFilter = true, // v17
+  maxLegs: 3 | 4 = 4,      // v20: 4 adds USD→A→BTC→ETH→USD and USD→A→ETH→BTC→USD routes
 ): Promise<ObScanResult> {
   // v19: discover cross pairs dynamically (falls back to hardcoded on error)
   const { lookup: activeLookup, crossMap: activeCrossMap } = await discoverCrossPairs();
@@ -787,11 +832,29 @@ export async function scanOrderBookCycles(
   }
   const activeSet = new Set<ObAsset>(activeAssets);
 
+  // v20: pairs needed for 4-leg routes — BTC/ETH USD legs, the BTC↔ETH cross,
+  // and A↔BTC / A↔ETH crosses for every active A (even when the volatility
+  // filter excluded BTC/ETH themselves from the 3-leg permutations).
+  const fourLegPairs: string[] = [];
+  if (maxLegs >= 4) {
+    fourLegPairs.push(OB_USD_PAIRS["BTC"], OB_USD_PAIRS["ETH"]);
+    const btcEth = activeLookup.get("BTC-ETH");
+    if (btcEth) fourLegPairs.push(btcEth.pair);
+    for (const a of activeAssets) {
+      if (a === "BTC" || a === "ETH") continue;
+      const toBtc = activeLookup.get(`${a}-BTC`);
+      const toEth = activeLookup.get(`${a}-ETH`);
+      if (toBtc) fourLegPairs.push(toBtc.pair);
+      if (toEth) fourLegPairs.push(toEth.pair);
+    }
+  }
+
   // Deduplicated list of pairs needed for the active asset set
   const allPairs = [...new Set([
     ...activeAssets.map(a => OB_USD_PAIRS[a]),
     ...activeCrossMap.filter(([a, b]) => activeSet.has(a) && activeSet.has(b))
                      .map(([,, pair]) => pair),
+    ...fourLegPairs,
   ])];
 
   // Fetch all order books in parallel (v18: depth 10 for scaling analysis)
@@ -802,38 +865,60 @@ export async function scanOrderBookCycles(
     if (fetched[i]) { orderbooks.set(allPairs[i], fetched[i]!); pairsScanned++; }
   }
 
-  // All A≠B permutations among active assets
   const cycles: ObCycleEntry[] = [];
+  // v20: remember each ranked route's asset path so the scaling table can
+  // re-simulate 4-leg routes correctly.
+  const pathByRoute = new Map<string, ObAsset[]>();
+
+  const pushCycle = (path: ObAsset[], r: CycleSimResult): void => {
+    // v15 status classification
+    let status: ObCycleStatus;
+    if (r.profitUsd > minProfitUsd && r.slippagePct <= maxSlippagePct) {
+      status = "READY";
+    } else if (r.profitUsd > minProfitUsd) {
+      status = "HIGH_SLIPPAGE";
+    } else {
+      status = "LOW_PROFIT";
+    }
+    const route = `USD→${path.join("→")}→USD`;
+    pathByRoute.set(route, path);
+    cycles.push({
+      route,
+      assetA:              path[0]!,
+      assetB:              path[path.length - 1]!,
+      estimatedProfitUsd:  r.profitUsd,
+      grossProfitUsd:      r.grossProfitUsd,
+      feeUsd:              r.feeUsd,
+      profitPct:           (r.profitUsd / tradeSizeUsd) * 100,
+      avgPriceA:           r.avg1,
+      avgCrossRate:        r.avg2,
+      avgPriceB:           r.avg3,
+      volumeA:             r.volA,
+      slippagePct:         r.slippagePct,
+      status,
+      confidencePct:       r.confidencePct,
+      legs:                r.legs,
+    });
+  };
+
+  // All A≠B permutations among active assets (3-leg triangles)
   for (const assetA of activeAssets) {
     for (const assetB of activeAssets) {
       if (assetA === assetB) continue;
       const r = simulateCycle(assetA, assetB, tradeSizeUsd, orderbooks, feesPct, activeLookup);
-      if (r) {
-        // v15 status classification
-        let status: ObCycleStatus;
-        if (r.profitUsd > minProfitUsd && r.slippagePct <= maxSlippagePct) {
-          status = "READY";
-        } else if (r.profitUsd > minProfitUsd) {
-          status = "HIGH_SLIPPAGE";
-        } else {
-          status = "LOW_PROFIT";
-        }
-        cycles.push({
-          route:               `USD→${assetA}→${assetB}→USD`,
-          assetA,
-          assetB,
-          estimatedProfitUsd:  r.profitUsd,
-          grossProfitUsd:      r.grossProfitUsd,
-          feeUsd:              r.feeUsd,
-          profitPct:           (r.profitUsd / tradeSizeUsd) * 100,
-          avgPriceA:           r.avg1,
-          avgCrossRate:        r.avg2,
-          avgPriceB:           r.avg3,
-          volumeA:             r.volA,
-          slippagePct:         r.slippagePct,
-          status,
-          confidencePct:       r.confidencePct,
-        });
+      if (r) pushCycle([assetA, assetB], r);
+    }
+  }
+
+  // v20: 4-leg routes through the BTC/ETH cross — USD→A→BTC→ETH→USD and
+  // USD→A→ETH→BTC→USD for every active A (A itself must not be BTC or ETH).
+  if (maxLegs >= 4) {
+    for (const assetA of activeAssets) {
+      if (assetA === "BTC" || assetA === "ETH") continue;
+      for (const [m1, m2] of FOUR_LEG_MIDS) {
+        const path = [assetA, m1, m2];
+        const r = simulatePath(path, tradeSizeUsd, orderbooks, feesPct, activeLookup);
+        if (r) pushCycle(path, r);
       }
     }
   }
@@ -848,8 +933,9 @@ export async function scanOrderBookCycles(
   const scaling: ObScalingRow[] = [];
   const topCycle = cycles[0];
   if (topCycle) {
+    const topPath = pathByRoute.get(topCycle.route) ?? [topCycle.assetA as ObAsset, topCycle.assetB as ObAsset];
     for (const sizeUsd of SCALING_SIZES_USD) {
-      const r = simulateCycle(topCycle.assetA as ObAsset, topCycle.assetB as ObAsset, sizeUsd, orderbooks, feesPct, activeLookup);
+      const r = simulatePath(topPath, sizeUsd, orderbooks, feesPct, activeLookup);
       if (!r) continue;
       const threshold = minProfitUsd * (sizeUsd / 10); // v18: scale min profit with size
       let status: ObScalingStatus;

@@ -1098,7 +1098,10 @@ function OrderBookHunterCard() {
   });
 
   const cycles: ObCycleEntry[] = data?.cycles ?? [];
-  const topCycle = cycles[0];
+  // Execute targets the top 3-LEG route only — the live OB executor places
+  // exactly three orders from (assetA, assetB); firing it on a 4-leg route
+  // would silently skip the middle hop. 4-leg routes are display/ranking only.
+  const topCycle = cycles.find(c => (c.legs ?? 3) === 3);
   // Execution gate: fresh profit after real fees must clear the min-profit
   // floor. The button stays clickable whenever a route exists — the server
   // pre-flight is the real guard.
@@ -1347,7 +1350,17 @@ function OrderBookHunterCard() {
                       c.status === "READY" ? "bg-success/10" : i % 2 === 0 ? "" : "bg-muted/20",
                     )}>
                       <td className="px-3 py-1.5 text-muted-foreground">{i + 1}</td>
-                      <td className="px-3 py-1.5 font-bold text-foreground whitespace-nowrap">{c.route}</td>
+                      <td className="px-3 py-1.5 font-bold text-foreground whitespace-nowrap">
+                        <span className="flex items-center gap-1.5">
+                          {c.route}
+                          <span className={cn(
+                            "text-[9px] font-mono font-bold px-1 border",
+                            (c.legs ?? 3) === 4
+                              ? "border-purple-500/70 text-purple-500"
+                              : "border-muted-foreground/50 text-muted-foreground",
+                          )}>{c.legs ?? 3}-leg</span>
+                        </span>
+                      </td>
                       <td className={cn("px-3 py-1.5", c.grossProfitUsd > 0 ? "text-success" : "text-destructive")}>
                         ${c.grossProfitUsd.toFixed(4)}
                       </td>
@@ -2281,8 +2294,11 @@ function TradeHistoryTable() {
                 const failed = t.status === "failed";
                 // Failed attempts must never display the scanner estimate as
                 // profit: show realized (0 for zero-fill failures) or nothing.
-                const profit = t.realizedProfitUsd != null ? t.realizedProfitUsd
+                // Number(): legacy ledger rows can deliver profit as a string —
+                // .toFixed on it crashes the whole dashboard.
+                const rawProfit = t.realizedProfitUsd != null ? t.realizedProfitUsd
                   : failed ? null : t.estimatedProfitUsd;
+                const profit = rawProfit != null ? Number(rawProfit) : null;
                 const buyPrice = t.buyExchange === "Kraken" ? t.krakenPrice : t.coinbasePrice;
                 const sellPrice = t.sellExchange === "Kraken" ? t.krakenPrice : t.coinbasePrice;
                 return (
