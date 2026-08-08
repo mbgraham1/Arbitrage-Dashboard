@@ -32,6 +32,8 @@ import type {
   CrossMmExecuteRequest,
   CrossMmExecuteResult,
   CrossMmStats,
+  DiscoveryRequest,
+  DiscoveryResult,
   ErrorResponse,
   ExchangeCredentials,
   ExecLockClearRequest,
@@ -52,11 +54,21 @@ import type {
   GraphExecuteResult,
   GraphScanResult,
   HealthStatus,
+  HunterReport,
+  HunterReset200,
+  HunterStart200,
+  HunterStop200,
   InventoryExecuteRequest,
   InventoryExecuteResult,
   InventoryScanResult,
   KrakenCredentials,
   ListTradesParams,
+  MmAutoStart200,
+  MmAutoStartRequest,
+  MmAutoStatus,
+  MmAutoStop200,
+  MmScanRequest,
+  MmScanResult,
   ObExecuteRequest,
   ObExecuteResult,
   ObPairsRefresh200,
@@ -2112,7 +2124,7 @@ export const getExecuteCbMmUrl = () => {
 }
 
 /**
- * The inverted maker-hedge strategy. Posts a POST-ONLY maker limit on Coinbase (cheap maker fee, earns spread); while it rests, the Kraken hedge is re-projected continuously and the order is cancelled before fill if the projection drops below the floor + buffer. Only a CONFIRMED maker fill triggers the hedge: a bounded IOC on Kraken for exactly the filled quantity. Real detected fees only; maker-floor safeguard enforced; realized P&L recorded only when fully hedged.
+ * The inverted maker-hedge strategy. Posts a POST-ONLY maker limit on Coinbase (cheap maker fee, earns spread); while it rests, the Kraken hedge is re-projected continuously and the order is cancelled before fill if the projection drops below the floor + buffer. Only a CONFIRMED maker fill triggers the hedge: a bounded IOC on Kraken for exactly the filled quantity. Real detected fees only; configurable positive profit floor (default $0.01 net after all costs, never ≤ 0) plus a safety buffer enforced; realized P&L recorded only when fully hedged.
  * @summary Coinbase-maker / Kraken-taker-hedge cycle (post-only, $10 cap)
  */
 export const executeCbMm = async (cbMmExecuteRequest: CbMmExecuteRequest, options?: RequestInit): Promise<CbMmExecuteResult> => {
@@ -2240,6 +2252,660 @@ export function useGetCbMmStats<TData = Awaited<ReturnType<typeof getCbMmStats>>
  ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
 
   const queryOptions = getGetCbMmStatsQueryOptions(options)
+
+  const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+
+export const getMmScanUrl = () => {
+
+
+
+
+  return `/api/arb/mm-scan`
+}
+
+/**
+ * Projects the maker-hedge net for every liquid asset available on both venues, in both directions and BOTH structures (Coinbase-maker/Kraken- hedge and the reverse), using REAL detected fee tiers and the account's actual balances. A row reads RUN only when projected net clears the configurable floor + safety buffer, books are fresh, AND the hedge inventory exists. Read-only.
+ * @summary Inventory-aware maker-hedge scan across all liquid assets (never trades)
+ */
+export const mmScan = async (mmScanRequest: MmScanRequest, options?: RequestInit): Promise<MmScanResult> => {
+
+  return customFetch<MmScanResult>(getMmScanUrl(),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(mmScanRequest)
+  }
+);}
+
+
+
+
+
+export const getMmScanMutationOptions = <TError = ErrorType<ErrorResponse>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof mmScan>>, TError,{data: BodyType<MmScanRequest>}, TContext>, request?: SecondParameter<typeof customFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof mmScan>>, TError,{data: BodyType<MmScanRequest>}, TContext> => {
+
+const mutationKey = ['mmScan'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof mmScan>>, {data: BodyType<MmScanRequest>}> = (props) => {
+          const {data} = props ?? {};
+
+          return  mmScan(data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type MmScanMutationResult = NonNullable<Awaited<ReturnType<typeof mmScan>>>
+    export type MmScanMutationBody = BodyType<MmScanRequest>
+    export type MmScanMutationError = ErrorType<ErrorResponse>
+
+    /**
+ * @summary Inventory-aware maker-hedge scan across all liquid assets (never trades)
+ */
+export const useMmScan = <TError = ErrorType<ErrorResponse>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof mmScan>>, TError,{data: BodyType<MmScanRequest>}, TContext>, request?: SecondParameter<typeof customFetch>}
+ ): UseMutationResult<
+        Awaited<ReturnType<typeof mmScan>>,
+        TError,
+        {data: BodyType<MmScanRequest>},
+        TContext
+      > => {
+      return useMutation(getMmScanMutationOptions(options));
+    }
+
+export const getMmAutoStartUrl = () => {
+
+
+
+
+  return `/api/arb/mm-auto/start`
+}
+
+/**
+ * Server-side watcher that scans every few seconds and fires ONE $10 Coinbase-maker cycle at a time, only when a route clears the full gate (floor + buffer + freshness + inventory). Stops itself on any unhedged/indeterminate outcome. Trade size is never auto-scaled.
+ * @summary Start AUTO mode for the maker-hedge engine
+ */
+export const mmAutoStart = async (mmAutoStartRequest: MmAutoStartRequest, options?: RequestInit): Promise<MmAutoStart200> => {
+
+  return customFetch<MmAutoStart200>(getMmAutoStartUrl(),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(mmAutoStartRequest)
+  }
+);}
+
+
+
+
+
+export const getMmAutoStartMutationOptions = <TError = ErrorType<ErrorResponse>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof mmAutoStart>>, TError,{data: BodyType<MmAutoStartRequest>}, TContext>, request?: SecondParameter<typeof customFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof mmAutoStart>>, TError,{data: BodyType<MmAutoStartRequest>}, TContext> => {
+
+const mutationKey = ['mmAutoStart'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof mmAutoStart>>, {data: BodyType<MmAutoStartRequest>}> = (props) => {
+          const {data} = props ?? {};
+
+          return  mmAutoStart(data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type MmAutoStartMutationResult = NonNullable<Awaited<ReturnType<typeof mmAutoStart>>>
+    export type MmAutoStartMutationBody = BodyType<MmAutoStartRequest>
+    export type MmAutoStartMutationError = ErrorType<ErrorResponse>
+
+    /**
+ * @summary Start AUTO mode for the maker-hedge engine
+ */
+export const useMmAutoStart = <TError = ErrorType<ErrorResponse>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof mmAutoStart>>, TError,{data: BodyType<MmAutoStartRequest>}, TContext>, request?: SecondParameter<typeof customFetch>}
+ ): UseMutationResult<
+        Awaited<ReturnType<typeof mmAutoStart>>,
+        TError,
+        {data: BodyType<MmAutoStartRequest>},
+        TContext
+      > => {
+      return useMutation(getMmAutoStartMutationOptions(options));
+    }
+
+export const getMmAutoStopUrl = () => {
+
+
+
+
+  return `/api/arb/mm-auto/stop`
+}
+
+/**
+ * @summary Stop AUTO mode
+ */
+export const mmAutoStop = async ( options?: RequestInit): Promise<MmAutoStop200> => {
+
+  return customFetch<MmAutoStop200>(getMmAutoStopUrl(),
+  {
+    ...options,
+    method: 'POST'
+
+
+  }
+);}
+
+
+
+
+
+export const getMmAutoStopMutationOptions = <TError = ErrorType<unknown>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof mmAutoStop>>, TError,void, TContext>, request?: SecondParameter<typeof customFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof mmAutoStop>>, TError,void, TContext> => {
+
+const mutationKey = ['mmAutoStop'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof mmAutoStop>>, void> = () => {
+
+
+          return  mmAutoStop(requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type MmAutoStopMutationResult = NonNullable<Awaited<ReturnType<typeof mmAutoStop>>>
+
+    export type MmAutoStopMutationError = ErrorType<unknown>
+
+    /**
+ * @summary Stop AUTO mode
+ */
+export const useMmAutoStop = <TError = ErrorType<unknown>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof mmAutoStop>>, TError,void, TContext>, request?: SecondParameter<typeof customFetch>}
+ ): UseMutationResult<
+        Awaited<ReturnType<typeof mmAutoStop>>,
+        TError,
+        void,
+        TContext
+      > => {
+      return useMutation(getMmAutoStopMutationOptions(options));
+    }
+
+export const getMmAutoStatusUrl = () => {
+
+
+
+
+  return `/api/arb/mm-auto/status`
+}
+
+/**
+ * @summary AUTO mode status, recent events, and last outcome
+ */
+export const mmAutoStatus = async ( options?: RequestInit): Promise<MmAutoStatus> => {
+
+  return customFetch<MmAutoStatus>(getMmAutoStatusUrl(),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getMmAutoStatusQueryKey = () => {
+    return [
+    `/api/arb/mm-auto/status`
+    ] as const;
+    }
+
+
+export const getMmAutoStatusQueryOptions = <TData = Awaited<ReturnType<typeof mmAutoStatus>>, TError = ErrorType<unknown>>( options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof mmAutoStatus>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getMmAutoStatusQueryKey();
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof mmAutoStatus>>> = ({ signal }) => mmAutoStatus({ signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof mmAutoStatus>>, TError, TData> & { queryKey: QueryKey }
+}
+
+export type MmAutoStatusQueryResult = NonNullable<Awaited<ReturnType<typeof mmAutoStatus>>>
+export type MmAutoStatusQueryError = ErrorType<unknown>
+
+
+/**
+ * @summary AUTO mode status, recent events, and last outcome
+ */
+
+export function useMmAutoStatus<TData = Awaited<ReturnType<typeof mmAutoStatus>>, TError = ErrorType<unknown>>(
+  options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof mmAutoStatus>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+
+ ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+
+  const queryOptions = getMmAutoStatusQueryOptions(options)
+
+  const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+
+export const getDiscoveryScanUrl = () => {
+
+
+
+
+  return `/api/arb/discovery`
+}
+
+/**
+ * Scans public order books on major liquid exchanges without trading credentials, plus the live Kraken/Coinbase books, and projects the executable net for every venue pair × asset at $10/$50/$100 after each venue's fees (real detected tiers when keys are provided; labeled entry-tier assumptions elsewhere), depth-walked slippage, a USDT basis haircut, and a safety buffer. Categorizes routes into executable_now / requires_setup / not_profitable. NEVER trades; the $10 live cap is unchanged.
+ * @summary Read-only cross-venue arbitrage discovery scan (8 public exchanges + live venues)
+ */
+export const discoveryScan = async (discoveryRequest?: DiscoveryRequest, options?: RequestInit): Promise<DiscoveryResult> => {
+
+  return customFetch<DiscoveryResult>(getDiscoveryScanUrl(),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(discoveryRequest)
+  }
+);}
+
+
+
+
+
+export const getDiscoveryScanMutationOptions = <TError = ErrorType<unknown>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof discoveryScan>>, TError,{data?: BodyType<DiscoveryRequest>}, TContext>, request?: SecondParameter<typeof customFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof discoveryScan>>, TError,{data?: BodyType<DiscoveryRequest>}, TContext> => {
+
+const mutationKey = ['discoveryScan'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof discoveryScan>>, {data?: BodyType<DiscoveryRequest>}> = (props) => {
+          const {data} = props ?? {};
+
+          return  discoveryScan(data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type DiscoveryScanMutationResult = NonNullable<Awaited<ReturnType<typeof discoveryScan>>>
+    export type DiscoveryScanMutationBody = BodyType<DiscoveryRequest> | undefined
+    export type DiscoveryScanMutationError = ErrorType<unknown>
+
+    /**
+ * @summary Read-only cross-venue arbitrage discovery scan (8 public exchanges + live venues)
+ */
+export const useDiscoveryScan = <TError = ErrorType<unknown>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof discoveryScan>>, TError,{data?: BodyType<DiscoveryRequest>}, TContext>, request?: SecondParameter<typeof customFetch>}
+ ): UseMutationResult<
+        Awaited<ReturnType<typeof discoveryScan>>,
+        TError,
+        {data?: BodyType<DiscoveryRequest>},
+        TContext
+      > => {
+      return useMutation(getDiscoveryScanMutationOptions(options));
+    }
+
+export const getHunterStartUrl = () => {
+
+
+
+
+  return `/api/arb/hunter/start`
+}
+
+/**
+ * @summary Start the 24-hour Profit Hunter evidence collector (read-only, never trades)
+ */
+export const hunterStart = async (discoveryRequest?: DiscoveryRequest, options?: RequestInit): Promise<HunterStart200> => {
+
+  return customFetch<HunterStart200>(getHunterStartUrl(),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(discoveryRequest)
+  }
+);}
+
+
+
+
+
+export const getHunterStartMutationOptions = <TError = ErrorType<ErrorResponse>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof hunterStart>>, TError,{data?: BodyType<DiscoveryRequest>}, TContext>, request?: SecondParameter<typeof customFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof hunterStart>>, TError,{data?: BodyType<DiscoveryRequest>}, TContext> => {
+
+const mutationKey = ['hunterStart'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof hunterStart>>, {data?: BodyType<DiscoveryRequest>}> = (props) => {
+          const {data} = props ?? {};
+
+          return  hunterStart(data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type HunterStartMutationResult = NonNullable<Awaited<ReturnType<typeof hunterStart>>>
+    export type HunterStartMutationBody = BodyType<DiscoveryRequest> | undefined
+    export type HunterStartMutationError = ErrorType<ErrorResponse>
+
+    /**
+ * @summary Start the 24-hour Profit Hunter evidence collector (read-only, never trades)
+ */
+export const useHunterStart = <TError = ErrorType<ErrorResponse>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof hunterStart>>, TError,{data?: BodyType<DiscoveryRequest>}, TContext>, request?: SecondParameter<typeof customFetch>}
+ ): UseMutationResult<
+        Awaited<ReturnType<typeof hunterStart>>,
+        TError,
+        {data?: BodyType<DiscoveryRequest>},
+        TContext
+      > => {
+      return useMutation(getHunterStartMutationOptions(options));
+    }
+
+export const getHunterStopUrl = () => {
+
+
+
+
+  return `/api/arb/hunter/stop`
+}
+
+/**
+ * @summary Stop Profit Hunter (evidence is kept)
+ */
+export const hunterStop = async ( options?: RequestInit): Promise<HunterStop200> => {
+
+  return customFetch<HunterStop200>(getHunterStopUrl(),
+  {
+    ...options,
+    method: 'POST'
+
+
+  }
+);}
+
+
+
+
+
+export const getHunterStopMutationOptions = <TError = ErrorType<unknown>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof hunterStop>>, TError,void, TContext>, request?: SecondParameter<typeof customFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof hunterStop>>, TError,void, TContext> => {
+
+const mutationKey = ['hunterStop'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof hunterStop>>, void> = () => {
+
+
+          return  hunterStop(requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type HunterStopMutationResult = NonNullable<Awaited<ReturnType<typeof hunterStop>>>
+
+    export type HunterStopMutationError = ErrorType<unknown>
+
+    /**
+ * @summary Stop Profit Hunter (evidence is kept)
+ */
+export const useHunterStop = <TError = ErrorType<unknown>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof hunterStop>>, TError,void, TContext>, request?: SecondParameter<typeof customFetch>}
+ ): UseMutationResult<
+        Awaited<ReturnType<typeof hunterStop>>,
+        TError,
+        void,
+        TContext
+      > => {
+      return useMutation(getHunterStopMutationOptions(options));
+    }
+
+export const getHunterResetUrl = () => {
+
+
+
+
+  return `/api/arb/hunter/reset`
+}
+
+/**
+ * @summary Clear collected Profit Hunter evidence
+ */
+export const hunterReset = async ( options?: RequestInit): Promise<HunterReset200> => {
+
+  return customFetch<HunterReset200>(getHunterResetUrl(),
+  {
+    ...options,
+    method: 'POST'
+
+
+  }
+);}
+
+
+
+
+
+export const getHunterResetMutationOptions = <TError = ErrorType<unknown>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof hunterReset>>, TError,void, TContext>, request?: SecondParameter<typeof customFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof hunterReset>>, TError,void, TContext> => {
+
+const mutationKey = ['hunterReset'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof hunterReset>>, void> = () => {
+
+
+          return  hunterReset(requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type HunterResetMutationResult = NonNullable<Awaited<ReturnType<typeof hunterReset>>>
+
+    export type HunterResetMutationError = ErrorType<unknown>
+
+    /**
+ * @summary Clear collected Profit Hunter evidence
+ */
+export const useHunterReset = <TError = ErrorType<unknown>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof hunterReset>>, TError,void, TContext>, request?: SecondParameter<typeof customFetch>}
+ ): UseMutationResult<
+        Awaited<ReturnType<typeof hunterReset>>,
+        TError,
+        void,
+        TContext
+      > => {
+      return useMutation(getHunterResetMutationOptions(options));
+    }
+
+export const getHunterReportUrl = () => {
+
+
+
+
+  return `/api/arb/hunter/report`
+}
+
+/**
+ * @summary Profit Hunter ranked evidence report
+ */
+export const hunterReport = async ( options?: RequestInit): Promise<HunterReport> => {
+
+  return customFetch<HunterReport>(getHunterReportUrl(),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getHunterReportQueryKey = () => {
+    return [
+    `/api/arb/hunter/report`
+    ] as const;
+    }
+
+
+export const getHunterReportQueryOptions = <TData = Awaited<ReturnType<typeof hunterReport>>, TError = ErrorType<unknown>>( options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof hunterReport>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getHunterReportQueryKey();
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof hunterReport>>> = ({ signal }) => hunterReport({ signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof hunterReport>>, TError, TData> & { queryKey: QueryKey }
+}
+
+export type HunterReportQueryResult = NonNullable<Awaited<ReturnType<typeof hunterReport>>>
+export type HunterReportQueryError = ErrorType<unknown>
+
+
+/**
+ * @summary Profit Hunter ranked evidence report
+ */
+
+export function useHunterReport<TData = Awaited<ReturnType<typeof hunterReport>>, TError = ErrorType<unknown>>(
+  options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof hunterReport>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+
+ ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+
+  const queryOptions = getHunterReportQueryOptions(options)
 
   const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
 

@@ -4,6 +4,8 @@ import arbRouter from "./arb";
 import twoExchangeTestRouter from "./two-exchange-test";
 import twoExchangeScannerRouter from "./two-exchange-scanner";
 import cbMakerHedgeRouter from "./cb-maker-hedge";
+import discoveryRouter from "./discovery";
+import profitHunterRouter from "./profit-hunter";
 
 const router: IRouter = Router();
 
@@ -12,5 +14,7 @@ router.use(arbRouter);
 router.use(twoExchangeTestRouter);
 router.use(twoExchangeScannerRouter);
 router.use(cbMakerHedgeRouter);
+router.use(discoveryRouter);
+router.use(profitHunterRouter);
 
 export default router;

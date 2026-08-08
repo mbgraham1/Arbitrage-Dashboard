@@ -18,7 +18,7 @@ export interface CbMmExecuteRequest {
   direction?: CbMmExecuteRequestDirection;
   /** @maximum 10 */
   sizeUsd?: number;
-  /** Can only RAISE the maker-floor safeguard, never lower it */
+  /** Configurable positive profit floor; default $0.01 net after all costs; never accepted below $0.01 */
   minNetUsd?: number;
   bufferUsd?: number;
   maxQuoteAgeMs?: number;

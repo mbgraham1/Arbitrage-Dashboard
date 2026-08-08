@@ -736,7 +736,7 @@ export interface CbMmExecuteRequest {
   direction?: CbMmExecuteRequestDirection;
   /** @maximum 10 */
   sizeUsd?: number;
-  /** Can only RAISE the maker-floor safeguard, never lower it */
+  /** Configurable positive profit floor; default $0.01 net after all costs; never accepted below $0.01 */
   minNetUsd?: number;
   bufferUsd?: number;
   maxQuoteAgeMs?: number;
@@ -768,6 +768,219 @@ export interface CbMmExecuteResult {
   hedgeLeg?: CbMmLeg | null;
   realizedProfitUsd?: number | null;
   projection?: CbMmExecuteResultProjection;
+}
+
+export interface MmScanRequest {
+  krakenKey: string;
+  krakenSecret: string;
+  coinbaseKey: string;
+  coinbaseSecret: string;
+  /** Configurable positive profit floor; default $0.01 net after all costs; never accepted below $0.01 */
+  minNetUsd?: number | null;
+  bufferUsd?: number | null;
+}
+
+export interface MmScanRow {
+  asset?: string;
+  /** cbMaker (Coinbase maker + Kraken hedge) | kMaker (reverse) | takerKtoC (buy Kraken, sell Coinbase, taker both) | takerCtoK */
+  structure?: string;
+  direction?: string;
+  available?: boolean;
+  makerVenue?: string;
+  hedgeVenue?: string;
+  makerFeePct?: number | null;
+  hedgeFeePct?: number | null;
+  makerPrice?: number;
+  makerQty?: number;
+  hedgeVwapPx?: number;
+  makerFeeUsd?: number;
+  hedgeFeeUsd?: number;
+  hedgeSlippageUsd?: number;
+  /** Top-of-book edge before any fees/slippage */
+  grossEdgeUsd?: number | null;
+  projectedNetUsd?: number | null;
+  quoteAgeMs?: number;
+  inventoryReady?: boolean;
+  inventoryReason?: string;
+  /** Exact balances both legs need (with 2% headroom) */
+  requiredBalances?: string;
+  /** RUN | WAIT — mirrors the executor gate exactly */
+  verdict?: string;
+  /** FIRE = full gate cleared | WATCH = positive net but blocked | SKIP = net ≤ 0 or unavailable */
+  fire?: string;
+  reason?: string;
+  autoExecutable?: boolean;
+}
+
+export type MmScanResultFees = {
+  coinbaseMakerPct?: number;
+  coinbaseTakerPct?: number;
+  krakenTakerPct?: number;
+  krakenMakerPct?: number | null;
+  detectedAt?: string;
+};
+
+export type MmScanResultBalances = {
+  krakenUsd?: number;
+  coinbaseUsd?: number;
+  fetchedAt?: string;
+};
+
+export interface MmScanResult {
+  sizeUsd?: number;
+  floorUsd?: number;
+  bufferUsd?: number;
+  requiredNetUsd?: number;
+  fees?: MmScanResultFees;
+  balances?: MmScanResultBalances;
+  at?: string;
+  best?: MmScanRow | null;
+  rows?: MmScanRow[];
+  runnable?: number;
+}
+
+export interface MmAutoStartRequest {
+  krakenKey: string;
+  krakenSecret: string;
+  coinbaseKey: string;
+  coinbaseSecret: string;
+  minNetUsd?: number | null;
+  bufferUsd?: number | null;
+  restWindowSec?: number | null;
+}
+
+export type MmAutoStatusConfig = {
+  minNetUsd?: number;
+  bufferUsd?: number;
+  restWindowSec?: number;
+};
+
+export type MmAutoStatusLastOutcome = { [key: string]: unknown } | null;
+
+export type MmAutoStatusEventsItem = {
+  at?: string;
+  kind?: string;
+  detail?: string;
+};
+
+export interface MmAutoStatus {
+  running?: boolean;
+  startedAt?: string | null;
+  lastTickAt?: string | null;
+  ticks?: number;
+  fires?: number;
+  completed?: number;
+  realizedUsd?: number;
+  stopReason?: string | null;
+  config?: MmAutoStatusConfig;
+  sizeUsd?: number;
+  reconcileLatch?: string | null;
+  lastBest?: MmScanRow | null;
+  lastOutcome?: MmAutoStatusLastOutcome;
+  events?: MmAutoStatusEventsItem[];
+}
+
+/**
+ * Optional Kraken/Coinbase credentials for real fees + inventory
+ */
+export interface DiscoveryRequest {
+  krakenKey?: string;
+  krakenSecret?: string;
+  coinbaseKey?: string;
+  coinbaseSecret?: string;
+}
+
+export interface DiscoverySizeNet {
+  sizeUsd?: number;
+  grossEdgeUsd?: number | null;
+  feesUsd?: number | null;
+  slippageUsd?: number | null;
+  basisHaircutUsd?: number | null;
+  netUsd?: number | null;
+}
+
+export interface DiscoveryRow {
+  asset?: string;
+  buyVenue?: string;
+  sellVenue?: string;
+  quoteNote?: string;
+  buyTakerPct?: number;
+  sellTakerPct?: number;
+  /** detected | assumed | mixed */
+  feeSource?: string;
+  nets?: DiscoverySizeNet[];
+  net10?: number | null;
+  /** executable_now | requires_setup | not_profitable */
+  category?: string;
+  requirement?: string;
+  coinbaseFeeIsBlocker?: boolean;
+  seenPositiveScans?: number;
+}
+
+export type DiscoveryResultVenuesItem = {
+  id?: string;
+  name?: string;
+  quote?: string;
+  assumedTakerPct?: number;
+  status?: string;
+  assetsCovered?: number;
+};
+
+export interface DiscoveryResult {
+  at?: string;
+  sizes?: number[];
+  executionCapUsd?: number;
+  feesNote?: string;
+  credNote?: string | null;
+  venues?: DiscoveryResultVenuesItem[];
+  coinbaseFeeDrag?: number;
+  summary?: string;
+  executableNow?: DiscoveryRow[];
+  requiresSetup?: DiscoveryRow[];
+  notProfitable?: DiscoveryRow[];
+}
+
+export interface HunterOpp {
+  key?: string;
+  /** spot-cross | maker-hedge | stablecoin | perp-funding */
+  strategy?: string;
+  asset?: string;
+  venues?: string;
+  description?: string;
+  requirement?: string;
+  /** EXECUTABLE_NOW | NEEDS_ACCOUNT_OR_INVENTORY | NOT_PROFITABLE */
+  category?: string;
+  executableKnown?: boolean;
+  appearances?: number;
+  sampledTicks?: number;
+  frequencyPct?: number;
+  longestSurvivalSec?: number;
+  best10?: number | null;
+  worst10?: number | null;
+  avg10?: number | null;
+  last10?: number | null;
+  last50?: number | null;
+  last100?: number | null;
+  executableNowTicks?: number;
+  firstSeenAt?: string;
+  lastSeenAt?: string;
+  score?: number;
+}
+
+export interface HunterReport {
+  running?: boolean;
+  startedAt?: string | null;
+  endsAt?: string | null;
+  lastTickAt?: string | null;
+  ticks?: number;
+  lastTickMs?: number;
+  feeSource?: string;
+  stopReason?: string | null;
+  tracked?: number;
+  errors?: string[];
+  verdict?: string;
+  strategyBest?: HunterOpp[];
+  top?: HunterOpp[];
 }
 
 export interface FeeTierRequest {
@@ -1424,6 +1637,16 @@ minNetUsd?: number;
 bufferUsd?: number;
 maxQuoteAgeMs?: number;
 };
+
+export type MmAutoStart200 = { [key: string]: unknown };
+
+export type MmAutoStop200 = { [key: string]: unknown };
+
+export type HunterStart200 = { [key: string]: unknown };
+
+export type HunterStop200 = { [key: string]: unknown };
+
+export type HunterReset200 = { [key: string]: unknown };
 
 export type GetGraphScanParams = {
 tradeSizeUsd?: number;

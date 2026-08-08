@@ -722,8 +722,9 @@ paths:
         hedge is re-projected continuously and the order is cancelled before
         fill if the projection drops below the floor + buffer. Only a CONFIRMED
         maker fill triggers the hedge: a bounded IOC on Kraken for exactly the
-        filled quantity. Real detected fees only; maker-floor safeguard
-        enforced; realized P&L recorded only when fully hedged.
+        filled quantity. Real detected fees only; configurable positive
+        profit floor (default $0.01 net after all costs, never ≤ 0) plus a
+        safety buffer enforced; realized P&L recorded only when fully hedged.
       requestBody:
         required: true
         content:
@@ -749,6 +750,178 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/TwoXStats"
+  /arb/mm-scan:
+    post:
+      operationId: mmScan
+      tags: [trades]
+      summary: Inventory-aware maker-hedge scan across all liquid assets (never trades)
+      description: >
+        Projects the maker-hedge net for every liquid asset available on both
+        venues, in both directions and BOTH structures (Coinbase-maker/Kraken-
+        hedge and the reverse), using REAL detected fee tiers and the account's
+        actual balances. A row reads RUN only when projected net clears the
+        configurable floor + safety buffer, books are fresh, AND the hedge
+        inventory exists. Read-only.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MmScanRequest"
+      responses:
+        "200":
+          description: Ranked projections with fee stack, inventory readiness, verdicts
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MmScanResult"
+        "502":
+          description: Real fees or balances unavailable — refuses to guess
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /arb/mm-auto/start:
+    post:
+      operationId: mmAutoStart
+      tags: [trades]
+      summary: Start AUTO mode for the maker-hedge engine
+      description: >
+        Server-side watcher that scans every few seconds and fires ONE $10
+        Coinbase-maker cycle at a time, only when a route clears the full gate
+        (floor + buffer + freshness + inventory). Stops itself on any
+        unhedged/indeterminate outcome. Trade size is never auto-scaled.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MmAutoStartRequest"
+      responses:
+        "200":
+          description: AUTO started
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "409":
+          description: Already running or live runs latched
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "502":
+          description: Real fee tiers unavailable
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /arb/mm-auto/stop:
+    post:
+      operationId: mmAutoStop
+      tags: [trades]
+      summary: Stop AUTO mode
+      responses:
+        "200":
+          description: Stopped
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+  /arb/mm-auto/status:
+    get:
+      operationId: mmAutoStatus
+      tags: [trades]
+      summary: AUTO mode status, recent events, and last outcome
+      responses:
+        "200":
+          description: Current AUTO state (never includes credentials)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MmAutoStatus"
+  /arb/discovery:
+    post:
+      operationId: discoveryScan
+      tags: [trades]
+      summary: Read-only cross-venue arbitrage discovery scan (8 public exchanges + live venues)
+      description: >
+        Scans public order books on major liquid exchanges without trading
+        credentials, plus the live Kraken/Coinbase books, and projects the
+        executable net for every venue pair × asset at $10/$50/$100 after each
+        venue's fees (real detected tiers when keys are provided; labeled
+        entry-tier assumptions elsewhere), depth-walked slippage, a USDT basis
+        haircut, and a safety buffer. Categorizes routes into executable_now /
+        requires_setup / not_profitable. NEVER trades; the $10 live cap is
+        unchanged.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DiscoveryRequest"
+      responses:
+        "200":
+          description: Categorized, ranked cross-venue opportunities
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DiscoveryResult"
+  /arb/hunter/start:
+    post:
+      operationId: hunterStart
+      tags: [trades]
+      summary: Start the 24-hour Profit Hunter evidence collector (read-only, never trades)
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DiscoveryRequest"
+      responses:
+        "200":
+          description: Hunter started
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+        "409":
+          description: Already running
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /arb/hunter/stop:
+    post:
+      operationId: hunterStop
+      tags: [trades]
+      summary: Stop Profit Hunter (evidence is kept)
+      responses:
+        "200":
+          description: Stopped
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+  /arb/hunter/reset:
+    post:
+      operationId: hunterReset
+      tags: [trades]
+      summary: Clear collected Profit Hunter evidence
+      responses:
+        "200":
+          description: Cleared
+          content:
+            application/json:
+              schema: { type: object, additionalProperties: true }
+  /arb/hunter/report:
+    get:
+      operationId: hunterReport
+      tags: [trades]
+      summary: Profit Hunter ranked evidence report
+      responses:
+        "200":
+          description: Ranked opportunities with frequency, survivability, and executability evidence
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HunterReport"
   /arb/fee-tier:
     post:
       operationId: getFeeTier
@@ -1865,7 +2038,7 @@ components:
         asset: { type: string, description: "ETH | BTC | SOL" }
         direction: { type: string, enum: [buy, sell], description: "Side of the Coinbase maker order; omit to auto-pick the better projection" }
         sizeUsd: { type: number, maximum: 10 }
-        minNetUsd: { type: number, description: "Can only RAISE the maker-floor safeguard, never lower it" }
+        minNetUsd: { type: number, description: "Configurable positive profit floor; default $0.01 net after all costs; never accepted below $0.01" }
         bufferUsd: { type: number }
         maxQuoteAgeMs: { type: number }
         restWindowSec: { type: number }
@@ -1900,6 +2073,231 @@ components:
           type: object
           nullable: true
           additionalProperties: true
+    MmScanRequest:
+      type: object
+      required: [krakenKey, krakenSecret, coinbaseKey, coinbaseSecret]
+      properties:
+        krakenKey: { type: string }
+        krakenSecret: { type: string }
+        coinbaseKey: { type: string }
+        coinbaseSecret: { type: string }
+        minNetUsd: { type: number, nullable: true, description: "Configurable positive profit floor; default $0.01 net after all costs; never accepted below $0.01" }
+        bufferUsd: { type: number, nullable: true }
+    MmScanRow:
+      type: object
+      properties:
+        asset: { type: string }
+        structure: { type: string, description: "cbMaker (Coinbase maker + Kraken hedge) | kMaker (reverse) | takerKtoC (buy Kraken, sell Coinbase, taker both) | takerCtoK" }
+        direction: { type: string }
+        available: { type: boolean }
+        makerVenue: { type: string }
+        hedgeVenue: { type: string }
+        makerFeePct: { type: number, nullable: true }
+        hedgeFeePct: { type: number, nullable: true }
+        makerPrice: { type: number }
+        makerQty: { type: number }
+        hedgeVwapPx: { type: number }
+        makerFeeUsd: { type: number }
+        hedgeFeeUsd: { type: number }
+        hedgeSlippageUsd: { type: number }
+        grossEdgeUsd: { type: number, nullable: true, description: "Top-of-book edge before any fees/slippage" }
+        projectedNetUsd: { type: number, nullable: true }
+        quoteAgeMs: { type: number }
+        inventoryReady: { type: boolean }
+        inventoryReason: { type: string }
+        requiredBalances: { type: string, description: "Exact balances both legs need (with 2% headroom)" }
+        verdict: { type: string, description: "RUN | WAIT — mirrors the executor gate exactly" }
+        fire: { type: string, description: "FIRE = full gate cleared | WATCH = positive net but blocked | SKIP = net ≤ 0 or unavailable" }
+        reason: { type: string }
+        autoExecutable: { type: boolean }
+    MmScanResult:
+      type: object
+      properties:
+        sizeUsd: { type: number }
+        floorUsd: { type: number }
+        bufferUsd: { type: number }
+        requiredNetUsd: { type: number }
+        fees:
+          type: object
+          properties:
+            coinbaseMakerPct: { type: number }
+            coinbaseTakerPct: { type: number }
+            krakenTakerPct: { type: number }
+            krakenMakerPct: { type: number, nullable: true }
+            detectedAt: { type: string }
+        balances:
+          type: object
+          properties:
+            krakenUsd: { type: number }
+            coinbaseUsd: { type: number }
+            fetchedAt: { type: string }
+        at: { type: string }
+        best:
+          allOf: [{ $ref: "#/components/schemas/MmScanRow" }]
+          nullable: true
+        rows:
+          type: array
+          items: { $ref: "#/components/schemas/MmScanRow" }
+        runnable: { type: integer }
+    MmAutoStartRequest:
+      type: object
+      required: [krakenKey, krakenSecret, coinbaseKey, coinbaseSecret]
+      properties:
+        krakenKey: { type: string }
+        krakenSecret: { type: string }
+        coinbaseKey: { type: string }
+        coinbaseSecret: { type: string }
+        minNetUsd: { type: number, nullable: true }
+        bufferUsd: { type: number, nullable: true }
+        restWindowSec: { type: number, nullable: true }
+    MmAutoStatus:
+      type: object
+      properties:
+        running: { type: boolean }
+        startedAt: { type: string, nullable: true }
+        lastTickAt: { type: string, nullable: true }
+        ticks: { type: integer }
+        fires: { type: integer }
+        completed: { type: integer }
+        realizedUsd: { type: number }
+        stopReason: { type: string, nullable: true }
+        config:
+          type: object
+          properties:
+            minNetUsd: { type: number }
+            bufferUsd: { type: number }
+            restWindowSec: { type: number }
+        sizeUsd: { type: number }
+        reconcileLatch: { type: string, nullable: true }
+        lastBest:
+          allOf: [{ $ref: "#/components/schemas/MmScanRow" }]
+          nullable: true
+        lastOutcome:
+          type: object
+          nullable: true
+          additionalProperties: true
+        events:
+          type: array
+          items:
+            type: object
+            properties:
+              at: { type: string }
+              kind: { type: string }
+              detail: { type: string }
+    DiscoveryRequest:
+      type: object
+      description: Optional Kraken/Coinbase credentials for real fees + inventory
+      properties:
+        krakenKey: { type: string }
+        krakenSecret: { type: string }
+        coinbaseKey: { type: string }
+        coinbaseSecret: { type: string }
+    DiscoverySizeNet:
+      type: object
+      properties:
+        sizeUsd: { type: number }
+        grossEdgeUsd: { type: number, nullable: true }
+        feesUsd: { type: number, nullable: true }
+        slippageUsd: { type: number, nullable: true }
+        basisHaircutUsd: { type: number, nullable: true }
+        netUsd: { type: number, nullable: true }
+    DiscoveryRow:
+      type: object
+      properties:
+        asset: { type: string }
+        buyVenue: { type: string }
+        sellVenue: { type: string }
+        quoteNote: { type: string }
+        buyTakerPct: { type: number }
+        sellTakerPct: { type: number }
+        feeSource: { type: string, description: "detected | assumed | mixed" }
+        nets:
+          type: array
+          items: { $ref: "#/components/schemas/DiscoverySizeNet" }
+        net10: { type: number, nullable: true }
+        category: { type: string, description: "executable_now | requires_setup | not_profitable" }
+        requirement: { type: string }
+        coinbaseFeeIsBlocker: { type: boolean }
+        seenPositiveScans: { type: integer }
+    DiscoveryResult:
+      type: object
+      properties:
+        at: { type: string }
+        sizes:
+          type: array
+          items: { type: number }
+        executionCapUsd: { type: number }
+        feesNote: { type: string }
+        credNote: { type: string, nullable: true }
+        venues:
+          type: array
+          items:
+            type: object
+            properties:
+              id: { type: string }
+              name: { type: string }
+              quote: { type: string }
+              assumedTakerPct: { type: number }
+              status: { type: string }
+              assetsCovered: { type: integer }
+        coinbaseFeeDrag: { type: integer }
+        summary: { type: string }
+        executableNow:
+          type: array
+          items: { $ref: "#/components/schemas/DiscoveryRow" }
+        requiresSetup:
+          type: array
+          items: { $ref: "#/components/schemas/DiscoveryRow" }
+        notProfitable:
+          type: array
+          items: { $ref: "#/components/schemas/DiscoveryRow" }
+    HunterOpp:
+      type: object
+      properties:
+        key: { type: string }
+        strategy: { type: string, description: "spot-cross | maker-hedge | stablecoin | perp-funding" }
+        asset: { type: string }
+        venues: { type: string }
+        description: { type: string }
+        requirement: { type: string }
+        category: { type: string, description: "EXECUTABLE_NOW | NEEDS_ACCOUNT_OR_INVENTORY | NOT_PROFITABLE" }
+        executableKnown: { type: boolean }
+        appearances: { type: integer }
+        sampledTicks: { type: integer }
+        frequencyPct: { type: number }
+        longestSurvivalSec: { type: number }
+        best10: { type: number, nullable: true }
+        worst10: { type: number, nullable: true }
+        avg10: { type: number, nullable: true }
+        last10: { type: number, nullable: true }
+        last50: { type: number, nullable: true }
+        last100: { type: number, nullable: true }
+        executableNowTicks: { type: integer }
+        firstSeenAt: { type: string }
+        lastSeenAt: { type: string }
+        score: { type: number }
+    HunterReport:
+      type: object
+      properties:
+        running: { type: boolean }
+        startedAt: { type: string, nullable: true }
+        endsAt: { type: string, nullable: true }
+        lastTickAt: { type: string, nullable: true }
+        ticks: { type: integer }
+        lastTickMs: { type: integer }
+        feeSource: { type: string }
+        stopReason: { type: string, nullable: true }
+        tracked: { type: integer }
+        errors:
+          type: array
+          items: { type: string }
+        verdict: { type: string }
+        strategyBest:
+          type: array
+          items: { $ref: "#/components/schemas/HunterOpp" }
+        top:
+          type: array
+          items: { $ref: "#/components/schemas/HunterOpp" }
     FeeTierRequest:
       type: object
       required: [krakenKey, krakenSecret]

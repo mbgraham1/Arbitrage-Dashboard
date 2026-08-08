@@ -13,6 +13,8 @@ import { CrossMmCard } from "@/components/cross-mm-card";
 import { TwoExchangeTestCard } from "@/components/two-exchange-test-card";
 import { TwoXScannerCard } from "@/components/two-x-scanner-card";
 import { CbMmCard } from "@/components/cb-mm-card";
+import { DiscoveryCard } from "@/components/discovery-card";
+import { ProfitHunterCard } from "@/components/profit-hunter-card";
 import { cn } from "@/lib/utils";
 import { useToast } from "@/hooks/use-toast";
 import { useLocalStorage } from "@/hooks/use-local-storage";
@@ -679,21 +681,35 @@ export default function Dashboard() {
       {/* Inventory Mode Opportunities — shown only when the feature is toggled on in Config */}
       {settings.inventoryModeEnabled && <InventoryCard />}
 
-      {/* Maker-post + taker-hedge cross-exchange strategy (separate scoreboard) */}
-      <CrossMmCard />
-
-      {/* One-shot two-exchange diagnostic (fully separate from all strategies) */}
-      <TwoXScannerCard />
+      {/* PRIMARY profit-seeking strategy: maker-hedge engine */}
       <CbMmCard />
-      <TwoExchangeTestCard />
 
-      <TriangularCard
-        opportunities={triOpportunities}
-        isRunning={isRunning}
-        isExecutingTri={isExecutingTriangular}
-        priceSource={triPriceSource}
-        blockedBy={isAutoExecutingOb ? "OB" : isExecutingCross ? "CROSS" : null}
-      />
+      {/* Read-only cross-venue discovery scan (never trades) */}
+      <DiscoveryCard />
+
+      {/* 24h Profit Hunter evidence collector (never trades) */}
+      <ProfitHunterCard />
+      <TwoXScannerCard />
+
+      {/* Diagnostics & plumbing tests — collapsed, never auto-run, NOT profit strategies */}
+      <details className="rounded-lg border border-border" data-testid="section-diagnostics">
+        <summary className="cursor-pointer px-4 py-3 text-sm font-medium text-muted-foreground select-none">
+          Diagnostics &amp; plumbing tests <span className="text-red-500/80">(manual only — NOT profit strategies; the taker-taker test loses ~$0.16 per $10 run)</span>
+        </summary>
+        <div className="p-4 space-y-4">
+          {/* Legacy Kraken-maker strategy (superseded by the maker-hedge engine above) */}
+          <CrossMmCard />
+          {/* One-shot two-exchange taker-taker diagnostic */}
+          <TwoExchangeTestCard />
+          <TriangularCard
+            opportunities={triOpportunities}
+            isRunning={isRunning}
+            isExecutingTri={isExecutingTriangular}
+            priceSource={triPriceSource}
+            blockedBy={isAutoExecutingOb ? "OB" : isExecutingCross ? "CROSS" : null}
+          />
+        </div>
+      </details>
       <OrderBookHunterCard />
       <GraphEngineCard />
       <RealizedPnlCard />

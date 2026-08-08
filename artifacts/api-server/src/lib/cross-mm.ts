@@ -209,3 +209,57 @@ export function projectCbMakerHedge(
     marketUpdateMs: Math.max(kBook.updatedAtMs, cBook.updatedAtMs),
   };
 }
+
+// ── Taker-taker cross projection (evaluation-grade, same book standard) ─────
+export interface TakerProjection {
+  /** Venue we BUY on ("kraken" | "coinbase"); sell on the other. */
+  buyVenue: "kraken" | "coinbase";
+  qty: number;
+  buyVwapPx: number; sellVwapPx: number;
+  buyTopPx: number; sellTopPx: number;
+  /** Top-of-book edge before any costs: (sellTop − buyTop) × qty. */
+  grossEdgeUsd: number;
+  buyFeeUsd: number; sellFeeUsd: number;
+  slippageUsd: number;
+  projectedNetUsd: number;
+  quoteAgeMs: number;
+}
+
+/**
+ * Project a $-sized taker-taker cross: buy qty at the buy venue's ask depth,
+ * sell the same qty into the other venue's bid depth, taker fees both legs,
+ * depth-walked VWAPs. Returns null when books are missing or depth is
+ * insufficient (never misprices).
+ */
+export function projectTakerTaker(
+  asset: ObAsset,
+  buyVenue: "kraken" | "coinbase",
+  sizeUsd: number,
+  buyTakerFeePct: number,
+  sellTakerFeePct: number,
+): TakerProjection | null {
+  const kBook = getStreamBook(OB_USD_PAIRS[asset]);
+  const cBook = getCoinbaseStreamBook(`${asset}-USD`);
+  if (!kBook || !cBook) return null;
+  const buyBook = buyVenue === "kraken" ? kBook : cBook;
+  const sellBook = buyVenue === "kraken" ? cBook : kBook;
+  const buyTop = buyBook.asks[0]?.[0] ?? 0;
+  const sellTop = sellBook.bids[0]?.[0] ?? 0;
+  if (buyTop <= 0 || sellTop <= 0) return null;
+  const qty = sizeUsd / buyTop;
+  const b = walkBuyQtyFromAsks(buyBook.asks, qty);
+  const s = walkSellIntoBids(sellBook.bids, qty);
+  if (!b || !s) return null;
+  const buyFeeUsd = b.usd * (buyTakerFeePct / 100);
+  const sellFeeUsd = s.usd * (sellTakerFeePct / 100);
+  const slippageUsd = Math.max(0, b.usd - buyTop * qty) + Math.max(0, sellTop * qty - s.usd);
+  return {
+    buyVenue, qty,
+    buyVwapPx: b.usd / qty, sellVwapPx: s.usd / qty,
+    buyTopPx: buyTop, sellTopPx: sellTop,
+    grossEdgeUsd: (sellTop - buyTop) * qty,
+    buyFeeUsd, sellFeeUsd, slippageUsd,
+    projectedNetUsd: s.usd - b.usd - buyFeeUsd - sellFeeUsd,
+    quoteAgeMs: Math.max(kBook.ageMs, cBook.ageMs),
+  };
+}

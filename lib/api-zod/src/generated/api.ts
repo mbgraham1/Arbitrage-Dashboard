@@ -863,7 +863,7 @@ export const Detect2xFeesResponse = zod.object({
 
 
 /**
- * The inverted maker-hedge strategy. Posts a POST-ONLY maker limit on Coinbase (cheap maker fee, earns spread); while it rests, the Kraken hedge is re-projected continuously and the order is cancelled before fill if the projection drops below the floor + buffer. Only a CONFIRMED maker fill triggers the hedge: a bounded IOC on Kraken for exactly the filled quantity. Real detected fees only; maker-floor safeguard enforced; realized P&L recorded only when fully hedged.
+ * The inverted maker-hedge strategy. Posts a POST-ONLY maker limit on Coinbase (cheap maker fee, earns spread); while it rests, the Kraken hedge is re-projected continuously and the order is cancelled before fill if the projection drops below the floor + buffer. Only a CONFIRMED maker fill triggers the hedge: a bounded IOC on Kraken for exactly the filled quantity. Real detected fees only; configurable positive profit floor (default $0.01 net after all costs, never ≤ 0) plus a safety buffer enforced; realized P&L recorded only when fully hedged.
  * @summary Coinbase-maker / Kraken-taker-hedge cycle (post-only, $10 cap)
  */
 export const executeCbMmBodySizeUsdMax = 10;
@@ -878,7 +878,7 @@ export const ExecuteCbMmBody = zod.object({
   "asset": zod.string().describe('ETH | BTC | SOL'),
   "direction": zod.enum(['buy', 'sell']).optional().describe('Side of the Coinbase maker order; omit to auto-pick the better projection'),
   "sizeUsd": zod.number().max(executeCbMmBodySizeUsdMax).optional(),
-  "minNetUsd": zod.number().optional().describe('Can only RAISE the maker-floor safeguard, never lower it'),
+  "minNetUsd": zod.number().optional().describe('Configurable positive profit floor; default $0.01 net after all costs; never accepted below $0.01'),
   "bufferUsd": zod.number().optional(),
   "maxQuoteAgeMs": zod.number().optional(),
   "restWindowSec": zod.number().optional()
@@ -930,6 +930,357 @@ export const GetCbMmStatsResponse = zod.object({
   "realizedUsd": zod.number().nullish(),
   "status": zod.string().nullish(),
   "at": zod.string().nullish()
+})).optional()
+})
+
+
+/**
+ * Projects the maker-hedge net for every liquid asset available on both venues, in both directions and BOTH structures (Coinbase-maker/Kraken- hedge and the reverse), using REAL detected fee tiers and the account's actual balances. A row reads RUN only when projected net clears the configurable floor + safety buffer, books are fresh, AND the hedge inventory exists. Read-only.
+ * @summary Inventory-aware maker-hedge scan across all liquid assets (never trades)
+ */
+export const MmScanBody = zod.object({
+  "krakenKey": zod.string(),
+  "krakenSecret": zod.string(),
+  "coinbaseKey": zod.string(),
+  "coinbaseSecret": zod.string(),
+  "minNetUsd": zod.number().nullish().describe('Configurable positive profit floor; default $0.01 net after all costs; never accepted below $0.01'),
+  "bufferUsd": zod.number().nullish()
+})
+
+export const MmScanResponse = zod.object({
+  "sizeUsd": zod.number().optional(),
+  "floorUsd": zod.number().optional(),
+  "bufferUsd": zod.number().optional(),
+  "requiredNetUsd": zod.number().optional(),
+  "fees": zod.object({
+  "coinbaseMakerPct": zod.number().optional(),
+  "coinbaseTakerPct": zod.number().optional(),
+  "krakenTakerPct": zod.number().optional(),
+  "krakenMakerPct": zod.number().nullish(),
+  "detectedAt": zod.string().optional()
+}).optional(),
+  "balances": zod.object({
+  "krakenUsd": zod.number().optional(),
+  "coinbaseUsd": zod.number().optional(),
+  "fetchedAt": zod.string().optional()
+}).optional(),
+  "at": zod.string().optional(),
+  "best": zod.object({
+  "asset": zod.string().optional(),
+  "structure": zod.string().optional().describe('cbMaker (Coinbase maker + Kraken hedge) | kMaker (reverse) | takerKtoC (buy Kraken, sell Coinbase, taker both) | takerCtoK'),
+  "direction": zod.string().optional(),
+  "available": zod.boolean().optional(),
+  "makerVenue": zod.string().optional(),
+  "hedgeVenue": zod.string().optional(),
+  "makerFeePct": zod.number().nullish(),
+  "hedgeFeePct": zod.number().nullish(),
+  "makerPrice": zod.number().optional(),
+  "makerQty": zod.number().optional(),
+  "hedgeVwapPx": zod.number().optional(),
+  "makerFeeUsd": zod.number().optional(),
+  "hedgeFeeUsd": zod.number().optional(),
+  "hedgeSlippageUsd": zod.number().optional(),
+  "grossEdgeUsd": zod.number().nullish().describe('Top-of-book edge before any fees\/slippage'),
+  "projectedNetUsd": zod.number().nullish(),
+  "quoteAgeMs": zod.number().optional(),
+  "inventoryReady": zod.boolean().optional(),
+  "inventoryReason": zod.string().optional(),
+  "requiredBalances": zod.string().optional().describe('Exact balances both legs need (with 2% headroom)'),
+  "verdict": zod.string().optional().describe('RUN | WAIT — mirrors the executor gate exactly'),
+  "fire": zod.string().optional().describe('FIRE = full gate cleared | WATCH = positive net but blocked | SKIP = net ≤ 0 or unavailable'),
+  "reason": zod.string().optional(),
+  "autoExecutable": zod.boolean().optional()
+}).nullish(),
+  "rows": zod.array(zod.object({
+  "asset": zod.string().optional(),
+  "structure": zod.string().optional().describe('cbMaker (Coinbase maker + Kraken hedge) | kMaker (reverse) | takerKtoC (buy Kraken, sell Coinbase, taker both) | takerCtoK'),
+  "direction": zod.string().optional(),
+  "available": zod.boolean().optional(),
+  "makerVenue": zod.string().optional(),
+  "hedgeVenue": zod.string().optional(),
+  "makerFeePct": zod.number().nullish(),
+  "hedgeFeePct": zod.number().nullish(),
+  "makerPrice": zod.number().optional(),
+  "makerQty": zod.number().optional(),
+  "hedgeVwapPx": zod.number().optional(),
+  "makerFeeUsd": zod.number().optional(),
+  "hedgeFeeUsd": zod.number().optional(),
+  "hedgeSlippageUsd": zod.number().optional(),
+  "grossEdgeUsd": zod.number().nullish().describe('Top-of-book edge before any fees\/slippage'),
+  "projectedNetUsd": zod.number().nullish(),
+  "quoteAgeMs": zod.number().optional(),
+  "inventoryReady": zod.boolean().optional(),
+  "inventoryReason": zod.string().optional(),
+  "requiredBalances": zod.string().optional().describe('Exact balances both legs need (with 2% headroom)'),
+  "verdict": zod.string().optional().describe('RUN | WAIT — mirrors the executor gate exactly'),
+  "fire": zod.string().optional().describe('FIRE = full gate cleared | WATCH = positive net but blocked | SKIP = net ≤ 0 or unavailable'),
+  "reason": zod.string().optional(),
+  "autoExecutable": zod.boolean().optional()
+})).optional(),
+  "runnable": zod.number().optional()
+})
+
+
+/**
+ * Server-side watcher that scans every few seconds and fires ONE $10 Coinbase-maker cycle at a time, only when a route clears the full gate (floor + buffer + freshness + inventory). Stops itself on any unhedged/indeterminate outcome. Trade size is never auto-scaled.
+ * @summary Start AUTO mode for the maker-hedge engine
+ */
+export const MmAutoStartBody = zod.object({
+  "krakenKey": zod.string(),
+  "krakenSecret": zod.string(),
+  "coinbaseKey": zod.string(),
+  "coinbaseSecret": zod.string(),
+  "minNetUsd": zod.number().nullish(),
+  "bufferUsd": zod.number().nullish(),
+  "restWindowSec": zod.number().nullish()
+})
+
+export const MmAutoStartResponse = zod.record(zod.string(), zod.unknown())
+
+
+/**
+ * @summary Stop AUTO mode
+ */
+export const MmAutoStopResponse = zod.record(zod.string(), zod.unknown())
+
+
+/**
+ * @summary AUTO mode status, recent events, and last outcome
+ */
+export const MmAutoStatusResponse = zod.object({
+  "running": zod.boolean().optional(),
+  "startedAt": zod.string().nullish(),
+  "lastTickAt": zod.string().nullish(),
+  "ticks": zod.number().optional(),
+  "fires": zod.number().optional(),
+  "completed": zod.number().optional(),
+  "realizedUsd": zod.number().optional(),
+  "stopReason": zod.string().nullish(),
+  "config": zod.object({
+  "minNetUsd": zod.number().optional(),
+  "bufferUsd": zod.number().optional(),
+  "restWindowSec": zod.number().optional()
+}).optional(),
+  "sizeUsd": zod.number().optional(),
+  "reconcileLatch": zod.string().nullish(),
+  "lastBest": zod.object({
+  "asset": zod.string().optional(),
+  "structure": zod.string().optional().describe('cbMaker (Coinbase maker + Kraken hedge) | kMaker (reverse) | takerKtoC (buy Kraken, sell Coinbase, taker both) | takerCtoK'),
+  "direction": zod.string().optional(),
+  "available": zod.boolean().optional(),
+  "makerVenue": zod.string().optional(),
+  "hedgeVenue": zod.string().optional(),
+  "makerFeePct": zod.number().nullish(),
+  "hedgeFeePct": zod.number().nullish(),
+  "makerPrice": zod.number().optional(),
+  "makerQty": zod.number().optional(),
+  "hedgeVwapPx": zod.number().optional(),
+  "makerFeeUsd": zod.number().optional(),
+  "hedgeFeeUsd": zod.number().optional(),
+  "hedgeSlippageUsd": zod.number().optional(),
+  "grossEdgeUsd": zod.number().nullish().describe('Top-of-book edge before any fees\/slippage'),
+  "projectedNetUsd": zod.number().nullish(),
+  "quoteAgeMs": zod.number().optional(),
+  "inventoryReady": zod.boolean().optional(),
+  "inventoryReason": zod.string().optional(),
+  "requiredBalances": zod.string().optional().describe('Exact balances both legs need (with 2% headroom)'),
+  "verdict": zod.string().optional().describe('RUN | WAIT — mirrors the executor gate exactly'),
+  "fire": zod.string().optional().describe('FIRE = full gate cleared | WATCH = positive net but blocked | SKIP = net ≤ 0 or unavailable'),
+  "reason": zod.string().optional(),
+  "autoExecutable": zod.boolean().optional()
+}).nullish(),
+  "lastOutcome": zod.record(zod.string(), zod.unknown()).nullish(),
+  "events": zod.array(zod.object({
+  "at": zod.string().optional(),
+  "kind": zod.string().optional(),
+  "detail": zod.string().optional()
+})).optional()
+})
+
+
+/**
+ * Scans public order books on major liquid exchanges without trading credentials, plus the live Kraken/Coinbase books, and projects the executable net for every venue pair × asset at $10/$50/$100 after each venue's fees (real detected tiers when keys are provided; labeled entry-tier assumptions elsewhere), depth-walked slippage, a USDT basis haircut, and a safety buffer. Categorizes routes into executable_now / requires_setup / not_profitable. NEVER trades; the $10 live cap is unchanged.
+ * @summary Read-only cross-venue arbitrage discovery scan (8 public exchanges + live venues)
+ */
+export const DiscoveryScanBody = zod.object({
+  "krakenKey": zod.string().optional(),
+  "krakenSecret": zod.string().optional(),
+  "coinbaseKey": zod.string().optional(),
+  "coinbaseSecret": zod.string().optional()
+}).describe('Optional Kraken\/Coinbase credentials for real fees + inventory')
+
+export const DiscoveryScanResponse = zod.object({
+  "at": zod.string().optional(),
+  "sizes": zod.array(zod.number()).optional(),
+  "executionCapUsd": zod.number().optional(),
+  "feesNote": zod.string().optional(),
+  "credNote": zod.string().nullish(),
+  "venues": zod.array(zod.object({
+  "id": zod.string().optional(),
+  "name": zod.string().optional(),
+  "quote": zod.string().optional(),
+  "assumedTakerPct": zod.number().optional(),
+  "status": zod.string().optional(),
+  "assetsCovered": zod.number().optional()
+})).optional(),
+  "coinbaseFeeDrag": zod.number().optional(),
+  "summary": zod.string().optional(),
+  "executableNow": zod.array(zod.object({
+  "asset": zod.string().optional(),
+  "buyVenue": zod.string().optional(),
+  "sellVenue": zod.string().optional(),
+  "quoteNote": zod.string().optional(),
+  "buyTakerPct": zod.number().optional(),
+  "sellTakerPct": zod.number().optional(),
+  "feeSource": zod.string().optional().describe('detected | assumed | mixed'),
+  "nets": zod.array(zod.object({
+  "sizeUsd": zod.number().optional(),
+  "grossEdgeUsd": zod.number().nullish(),
+  "feesUsd": zod.number().nullish(),
+  "slippageUsd": zod.number().nullish(),
+  "basisHaircutUsd": zod.number().nullish(),
+  "netUsd": zod.number().nullish()
+})).optional(),
+  "net10": zod.number().nullish(),
+  "category": zod.string().optional().describe('executable_now | requires_setup | not_profitable'),
+  "requirement": zod.string().optional(),
+  "coinbaseFeeIsBlocker": zod.boolean().optional(),
+  "seenPositiveScans": zod.number().optional()
+})).optional(),
+  "requiresSetup": zod.array(zod.object({
+  "asset": zod.string().optional(),
+  "buyVenue": zod.string().optional(),
+  "sellVenue": zod.string().optional(),
+  "quoteNote": zod.string().optional(),
+  "buyTakerPct": zod.number().optional(),
+  "sellTakerPct": zod.number().optional(),
+  "feeSource": zod.string().optional().describe('detected | assumed | mixed'),
+  "nets": zod.array(zod.object({
+  "sizeUsd": zod.number().optional(),
+  "grossEdgeUsd": zod.number().nullish(),
+  "feesUsd": zod.number().nullish(),
+  "slippageUsd": zod.number().nullish(),
+  "basisHaircutUsd": zod.number().nullish(),
+  "netUsd": zod.number().nullish()
+})).optional(),
+  "net10": zod.number().nullish(),
+  "category": zod.string().optional().describe('executable_now | requires_setup | not_profitable'),
+  "requirement": zod.string().optional(),
+  "coinbaseFeeIsBlocker": zod.boolean().optional(),
+  "seenPositiveScans": zod.number().optional()
+})).optional(),
+  "notProfitable": zod.array(zod.object({
+  "asset": zod.string().optional(),
+  "buyVenue": zod.string().optional(),
+  "sellVenue": zod.string().optional(),
+  "quoteNote": zod.string().optional(),
+  "buyTakerPct": zod.number().optional(),
+  "sellTakerPct": zod.number().optional(),
+  "feeSource": zod.string().optional().describe('detected | assumed | mixed'),
+  "nets": zod.array(zod.object({
+  "sizeUsd": zod.number().optional(),
+  "grossEdgeUsd": zod.number().nullish(),
+  "feesUsd": zod.number().nullish(),
+  "slippageUsd": zod.number().nullish(),
+  "basisHaircutUsd": zod.number().nullish(),
+  "netUsd": zod.number().nullish()
+})).optional(),
+  "net10": zod.number().nullish(),
+  "category": zod.string().optional().describe('executable_now | requires_setup | not_profitable'),
+  "requirement": zod.string().optional(),
+  "coinbaseFeeIsBlocker": zod.boolean().optional(),
+  "seenPositiveScans": zod.number().optional()
+})).optional()
+})
+
+
+/**
+ * @summary Start the 24-hour Profit Hunter evidence collector (read-only, never trades)
+ */
+export const HunterStartBody = zod.object({
+  "krakenKey": zod.string().optional(),
+  "krakenSecret": zod.string().optional(),
+  "coinbaseKey": zod.string().optional(),
+  "coinbaseSecret": zod.string().optional()
+}).describe('Optional Kraken\/Coinbase credentials for real fees + inventory')
+
+export const HunterStartResponse = zod.record(zod.string(), zod.unknown())
+
+
+/**
+ * @summary Stop Profit Hunter (evidence is kept)
+ */
+export const HunterStopResponse = zod.record(zod.string(), zod.unknown())
+
+
+/**
+ * @summary Clear collected Profit Hunter evidence
+ */
+export const HunterResetResponse = zod.record(zod.string(), zod.unknown())
+
+
+/**
+ * @summary Profit Hunter ranked evidence report
+ */
+export const HunterReportResponse = zod.object({
+  "running": zod.boolean().optional(),
+  "startedAt": zod.string().nullish(),
+  "endsAt": zod.string().nullish(),
+  "lastTickAt": zod.string().nullish(),
+  "ticks": zod.number().optional(),
+  "lastTickMs": zod.number().optional(),
+  "feeSource": zod.string().optional(),
+  "stopReason": zod.string().nullish(),
+  "tracked": zod.number().optional(),
+  "errors": zod.array(zod.string()).optional(),
+  "verdict": zod.string().optional(),
+  "strategyBest": zod.array(zod.object({
+  "key": zod.string().optional(),
+  "strategy": zod.string().optional().describe('spot-cross | maker-hedge | stablecoin | perp-funding'),
+  "asset": zod.string().optional(),
+  "venues": zod.string().optional(),
+  "description": zod.string().optional(),
+  "requirement": zod.string().optional(),
+  "category": zod.string().optional().describe('EXECUTABLE_NOW | NEEDS_ACCOUNT_OR_INVENTORY | NOT_PROFITABLE'),
+  "executableKnown": zod.boolean().optional(),
+  "appearances": zod.number().optional(),
+  "sampledTicks": zod.number().optional(),
+  "frequencyPct": zod.number().optional(),
+  "longestSurvivalSec": zod.number().optional(),
+  "best10": zod.number().nullish(),
+  "worst10": zod.number().nullish(),
+  "avg10": zod.number().nullish(),
+  "last10": zod.number().nullish(),
+  "last50": zod.number().nullish(),
+  "last100": zod.number().nullish(),
+  "executableNowTicks": zod.number().optional(),
+  "firstSeenAt": zod.string().optional(),
+  "lastSeenAt": zod.string().optional(),
+  "score": zod.number().optional()
+})).optional(),
+  "top": zod.array(zod.object({
+  "key": zod.string().optional(),
+  "strategy": zod.string().optional().describe('spot-cross | maker-hedge | stablecoin | perp-funding'),
+  "asset": zod.string().optional(),
+  "venues": zod.string().optional(),
+  "description": zod.string().optional(),
+  "requirement": zod.string().optional(),
+  "category": zod.string().optional().describe('EXECUTABLE_NOW | NEEDS_ACCOUNT_OR_INVENTORY | NOT_PROFITABLE'),
+  "executableKnown": zod.boolean().optional(),
+  "appearances": zod.number().optional(),
+  "sampledTicks": zod.number().optional(),
+  "frequencyPct": zod.number().optional(),
+  "longestSurvivalSec": zod.number().optional(),
+  "best10": zod.number().nullish(),
+  "worst10": zod.number().nullish(),
+  "avg10": zod.number().nullish(),
+  "last10": zod.number().nullish(),
+  "last50": zod.number().nullish(),
+  "last100": zod.number().nullish(),
+  "executableNowTicks": zod.number().optional(),
+  "firstSeenAt": zod.string().optional(),
+  "lastSeenAt": zod.string().optional(),
+  "score": zod.number().optional()
 })).optional()
 })
 

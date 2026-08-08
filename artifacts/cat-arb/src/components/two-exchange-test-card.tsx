@@ -36,6 +36,7 @@ export function TwoExchangeTestCard() {
   const [last, setLast] = useState<TwoExchangeTestResult | null>(null);
   const [running, setRunning] = useState(false);
   const [direction, setDirection] = useState<"coinbase_to_kraken" | "kraken_to_coinbase">("coinbase_to_kraken");
+  const [armed, setArmed] = useState(false); // live use is DISABLED by default — this is a plumbing diagnostic, not a strategy
   const exec = useRunTwoExchangeTest();
 
   const hasCreds = !!credentials.krakenKey && !!credentials.krakenSecret && !!credentials.coinbaseKey && !!credentials.coinbaseSecret;
@@ -65,13 +66,20 @@ export function TwoExchangeTestCard() {
     <Card data-testid="card-two-exchange-test">
       <CardHeader className="pb-2">
         <CardTitle className="text-sm">
-          Two-Exchange Test{" "}
+          Plumbing Diagnostic — Two-Exchange Test{" "}
+          <span className="text-red-500 font-normal">(NOT a profit strategy — proven loss)</span>{" "}
           <span className="text-muted-foreground font-normal">
-            (one-shot $10 diagnostic — {direction === "coinbase_to_kraken" ? "buy on Coinbase → sell confirmed fill on Kraken (works with staked Coinbase ETH)" : "buy on Kraken → sell confirmed fill on Coinbase (needs tradable Coinbase ETH)"})
+            (one-shot $10 · {direction === "coinbase_to_kraken" ? "buy on Coinbase → sell confirmed fill on Kraken (works with staked Coinbase ETH)" : "buy on Kraken → sell confirmed fill on Coinbase (needs tradable Coinbase ETH)"})
           </span>
         </CardTitle>
       </CardHeader>
       <CardContent className="space-y-2 text-xs">
+        <div className="border border-red-500/40 rounded p-2 text-red-500" data-testid="text-2xtest-warning">
+          ⚠ This crosses the spread at market on BOTH venues and pays full taker fees (~1.6% total at your
+          real tiers). With no large spread, each $10 live run loses about $0.16 — the last five cycles lost
+          about $0.79 total. Use it only to verify API keys, balances, and order plumbing. For profit, use the
+          CB-Maker / Kraken-Hedge strategy above.
+        </div>
         <div className="flex items-center gap-2 flex-wrap">
           <label className="flex items-center gap-1">Direction
             <select className="border rounded bg-background px-2 py-1" value={direction} onChange={e => setDirection(e.target.value as typeof direction)} data-testid="select-2xtest-direction">
@@ -82,8 +90,12 @@ export function TwoExchangeTestCard() {
           <Button size="sm" variant="secondary" disabled={running || !hasCreds} onClick={() => run(true)} data-testid="button-2xtest-dry">
             {running ? "Running…" : "Check balances (dry)"}
           </Button>
-          <Button size="sm" variant="destructive" disabled={running || !hasCreds || !liveMode} onClick={() => run(false)} data-testid="button-2xtest-live">
-            {running ? "Running…" : "Run LIVE test once"}
+          <label className="flex items-center gap-1 text-red-500" data-testid="checkbox-2xtest-arm">
+            <input type="checkbox" checked={armed} onChange={e => setArmed(e.target.checked)} />
+            I understand a live run loses ~$0.16 — diagnostic only
+          </label>
+          <Button size="sm" variant="destructive" disabled={running || !hasCreds || !liveMode || !armed} onClick={() => run(false)} data-testid="button-2xtest-live">
+            {running ? "Running…" : armed ? "Run LIVE diagnostic once (expected ~−$0.16)" : "LIVE run disabled"}
           </Button>
           {!liveMode && <span className="text-muted-foreground">enable LIVE mode to run for real</span>}
         </div>
