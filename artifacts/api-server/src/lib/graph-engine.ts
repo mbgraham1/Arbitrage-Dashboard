@@ -14,6 +14,7 @@
 
 import {
   fetchOrderBook,
+  discoverCrossPairs,
   OB_ASSETS,
   OB_USD_PAIRS,
   CROSS_LOOKUP,
@@ -114,6 +115,8 @@ export interface GraphScanResult {
   executionStyle: ExecutionStyle;
   assetsScanned: number;
   routesEvaluated: number;
+  /** Number of crypto cross pairs discovered dynamically via Kraken AssetPairs (0 = hardcoded fallback) */
+  crossPairsDiscovered: number;
   scannedAt: string;
 }
 
@@ -168,7 +171,7 @@ async function buildGraph(
   coinbaseFeesPct: number,
   tradeSizeUsd: number,
   executionStyle: ExecutionStyle,
-): Promise<Map<GraphNode, GraphEdge[]>> {
+): Promise<{ graph: Map<GraphNode, GraphEdge[]>; crossPairsDiscovered: number }> {
   const maker = executionStyle === "maker";
   const graph = new Map<GraphNode, GraphEdge[]>();
 
@@ -176,6 +179,11 @@ async function buildGraph(
     if (!graph.has(from)) graph.set(from, []);
     graph.get(from)!.push(edge);
   };
+
+  // ── Discover cross pairs dynamically (same as OB scanner) ────────────────
+  // Falls back to the hardcoded CROSS_LOOKUP if AssetPairs is unreachable.
+  const { lookup: activeCrossLookup, crossMap } = await discoverCrossPairs();
+  const crossPairsDiscovered = crossMap.length; // 0 when using hardcoded fallback
 
   // ── Fetch all data in parallel ────────────────────────────────────────────
 
@@ -189,8 +197,8 @@ async function buildGraph(
       const book = await fetchOrderBook(OB_USD_PAIRS[asset], 20);
       if (book) krakenBooks.set(asset, book as { asks: [number,number][]; bids: [number,number][] });
     }),
-    // Kraken cross-pair books (cached so cheap after USD books warm up)
-    ...Array.from(new Set(Array.from(CROSS_LOOKUP.values()).map(c => c.pair))).map(async (pair) => {
+    // Kraken cross-pair books — use dynamically discovered set
+    ...Array.from(new Set(Array.from(activeCrossLookup.values()).map(c => c.pair))).map(async (pair) => {
       const book = await fetchOrderBook(pair, 10);
       if (book) crossBooks.set(pair, book as { asks: [number,number][]; bids: [number,number][] });
     }),
@@ -261,7 +269,7 @@ async function buildGraph(
 
   // ── Kraken cross-pair edges ───────────────────────────────────────────────
 
-  for (const [key, cross] of CROSS_LOOKUP.entries()) {
+  for (const [key, cross] of activeCrossLookup.entries()) {
     const [fromAsset, toAsset] = key.split("-") as [ObAsset, ObAsset];
     const book = crossBooks.get(cross.pair);
     if (!book) continue;
@@ -350,7 +358,7 @@ async function buildGraph(
   // noisy duplicates of Kraken-start routes.  Cross-exchange routes naturally
   // end at the other venue's USD (e.g. USD[K]→BTC[K]→BTC[CB]→USD[CB]).
 
-  return graph;
+  return { graph, crossPairsDiscovered };
 }
 
 // ── DFS cycle finder ──────────────────────────────────────────────────────────
@@ -453,7 +461,7 @@ export async function scanGraphOpportunities(
   maxHops = 4,
   executionStyle: ExecutionStyle = "taker",
 ): Promise<GraphScanResult> {
-  const graph = await buildGraph(krakenFeesPct, coinbaseFeesPct, tradeSizeUsd, executionStyle);
+  const { graph, crossPairsDiscovered } = await buildGraph(krakenFeesPct, coinbaseFeesPct, tradeSizeUsd, executionStyle);
 
   // Search from both USD nodes so we find cross-exchange cycles that begin on
   // either Kraken or Coinbase (e.g. USD[CB]→BTC[CB]→BTC[K]→USD[K]).
@@ -485,6 +493,7 @@ export async function scanGraphOpportunities(
     coinbaseFeesPct,
     executionStyle,
     assetsScanned,
+    crossPairsDiscovered,
     routesEvaluated: allRoutes.length,
     scannedAt: new Date().toISOString(),
   };
