@@ -676,6 +676,9 @@ export default function Dashboard() {
             </CardContent>
           </Card>
 
+          {/* Kelly vs Cap gauge */}
+          <KellyGaugeCard />
+
           {/* Balances */}
           <Card>
             <CardHeader className="py-3">
@@ -866,6 +869,98 @@ export default function Dashboard() {
 }
 
 // ── All-Pairs Breakdown Card ───────────────────────────────────────────────────
+
+/** Live Kelly-vs-cap gauge — shows what Kelly wants to size in USD versus the
+ *  active maxPositionUsd cap, with a clear indicator when the cap is binding.
+ *  Recomputed on every poll from the latest scan's net edge and the cached
+ *  Coinbase USD bankroll (same math the auto-loop uses at execution time). */
+function KellyGaugeCard() {
+  const { kellyGauge, settings } = useBotContext();
+  const g = kellyGauge;
+  // Bar scale: the larger of Kelly-wanted and cap defines 100% width, so the
+  // cap marker is always visible and the fill overshoots it when binding.
+  const scaleUsd = g ? Math.max(g.kellyUsd, g.capUsd, 1) : 1;
+  const kellyPct = g ? Math.min(100, (g.kellyUsd / scaleUsd) * 100) : 0;
+  const capPct = g ? Math.min(100, (g.capUsd / scaleUsd) * 100) : 100;
+  return (
+    <Card data-testid="card-kelly-gauge">
+      <CardHeader className="py-3">
+        <CardTitle className="text-sm flex items-center gap-2">
+          <TrendingUp className="h-4 w-4" /> Kelly vs Cap
+          {g?.capBinding && (
+            <span
+              className="ml-auto text-[10px] font-mono font-bold px-2 py-0.5 border border-amber-500 text-amber-500"
+              data-testid="badge-cap-binding"
+            >
+              CAP BINDING
+            </span>
+          )}
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="p-4 flex flex-col gap-3">
+        {!g ? (
+          <span className="text-xs font-mono text-muted-foreground italic">
+            Waiting for first scan — start the bot to compute Kelly sizing.
+          </span>
+        ) : (
+          <>
+            <div className="grid grid-cols-3 gap-2 text-xs font-mono">
+              <div className="flex flex-col gap-0.5">
+                <span className="text-muted-foreground uppercase text-[10px]">Kelly Wants</span>
+                <span
+                  className={cn("font-bold", g.capBinding && "text-amber-500")}
+                  data-testid="text-kelly-wanted"
+                >
+                  ${g.kellyUsd.toFixed(2)}
+                </span>
+              </div>
+              <div className="flex flex-col gap-0.5">
+                <span className="text-muted-foreground uppercase text-[10px]">Active Cap</span>
+                <span className="font-bold" data-testid="text-kelly-cap">
+                  ${g.capUsd.toFixed(0)}
+                </span>
+              </div>
+              <div className="flex flex-col gap-0.5">
+                <span className="text-muted-foreground uppercase text-[10px]">Applied Size</span>
+                <span
+                  className={cn("font-bold", g.capBinding ? "text-amber-500" : "text-success")}
+                  data-testid="text-kelly-applied"
+                >
+                  ${g.appliedUsd.toFixed(2)}
+                </span>
+              </div>
+            </div>
+
+            {/* Gauge bar: fill = Kelly-wanted, marker = cap position */}
+            <div className="relative h-3 bg-muted border border-border" data-testid="gauge-kelly-bar">
+              <div
+                className={cn("absolute inset-y-0 left-0", g.capBinding ? "bg-amber-500" : "bg-success")}
+                style={{ width: `${kellyPct}%` }}
+              />
+              <div
+                className="absolute inset-y-0 w-0.5 bg-foreground"
+                style={{ left: `${capPct}%` }}
+                title={`Cap $${g.capUsd.toFixed(0)}`}
+              />
+            </div>
+
+            <span className="text-[10px] font-mono text-muted-foreground leading-tight">
+              {g.capBinding
+                ? `Cap is clamping Kelly by $${(g.kellyUsd - g.capUsd).toFixed(2)} — raise maxPositionUsd in Config to let Kelly size fully.`
+                : g.kellyUsd <= 0
+                ? `Kelly sizes $0 — net edge ${g.netEdgePct.toFixed(3)}% ${g.netEdgePct <= 0 ? "is not positive" : "is too thin for the configured win rate"}${g.bankrollUsd <= 0 ? "; no cached USD bankroll yet (balances load after the bot starts)" : ""}.`
+                : `Cap has ${(100 * g.kellyUsd / g.capUsd).toFixed(0)}% headroom used — Kelly sizes freely.`}
+            </span>
+            <span className="text-[10px] font-mono text-muted-foreground leading-tight">
+              net edge {g.netEdgePct >= 0 ? "+" : ""}{g.netEdgePct.toFixed(3)}% · bankroll ${g.bankrollUsd.toFixed(2)} (Coinbase USD)
+              · {(settings.kellyFraction * 100).toFixed(0)}% fractional Kelly · win rate {(settings.winRate * 100).toFixed(0)}%
+            </span>
+          </>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
 
 function AllPairsCard({ activePair, feesAndSlipPct, enabledPairs }: { activePair: string | null; feesAndSlipPct: number; enabledPairs?: string[] }) {
   const query = useGetAllPairSnapshots({ enabledPairs }, {

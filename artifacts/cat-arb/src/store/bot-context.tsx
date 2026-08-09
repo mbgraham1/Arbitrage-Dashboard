@@ -97,6 +97,26 @@ export interface BotSettings {
   partialFillTolerancePct: number;
 }
 
+/**
+ * Live Kelly-vs-cap gauge — recomputed on every poll from the latest scan's
+ * net edge and the cached USD bankroll, mirroring the auto-loop's sizing
+ * (limit orders → configured maker-based totalFees + slippage).
+ */
+export interface KellyGauge {
+  /** What Kelly wants to size, in USD (before the cap) */
+  kellyUsd: number;
+  /** USD size actually applied after the maxPositionUsd cap */
+  appliedUsd: number;
+  /** Active hard cap (settings.maxPositionUsd) */
+  capUsd: number;
+  /** True when the cap is clamping the Kelly size */
+  capBinding: boolean;
+  /** Net edge % used for the sizing (gross − fees − slippage) */
+  netEdgePct: number;
+  /** Cached USD bankroll (Coinbase USD) used as the Kelly bankroll */
+  bankrollUsd: number;
+}
+
 export interface BotContextType {
   credentials: ExchangeCredentials;
   setCredentials: (creds: ExchangeCredentials) => void;
@@ -172,6 +192,11 @@ export interface BotContextType {
    * Taker-based when the Kraken tier is detected, else configured totalFees.
    */
   forceFeeModel: ForceFeeModel;
+  /**
+   * Live Kelly-vs-cap gauge computed from the latest scan and cached
+   * balances; null until the first poll returns price data.
+   */
+  kellyGauge: KellyGauge | null;
 }
 
 const BotContext = createContext<BotContextType | undefined>(undefined);
@@ -1082,6 +1107,40 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
   const isExecutingTriangular = isForcingTriangular || isAutoExecutingTri || executeTriangularMutation.isPending;
   const isExecutingCross = isForcingTrade || isAutoExecutingCross;
 
+  // ── Live Kelly-vs-cap gauge ─────────────────────────────────────────────────
+  // Mirrors the auto-loop's sizing exactly: net edge = gross − configured
+  // maker-based totalFees − slippage, bankroll = cached Coinbase USD. Updates
+  // whenever a poll refreshes latestPriceData or cachedBalances.
+  const kellyGauge: KellyGauge | null = React.useMemo(() => {
+    if (!latestPriceData) return null;
+    const netEdgePct = latestPriceData.grossSpreadPct - settings.totalFees - settings.slippage;
+    const bankrollUsd = cachedBalances?.usdOnCoinbase ?? 0;
+    const k = kellySize(
+      netEdgePct,
+      bankrollUsd,
+      settings.winRate,
+      settings.kellyFraction,
+      latestPriceData.buyPrice,
+      settings.maxPositionUsd,
+    );
+    return {
+      kellyUsd: k.kellyUsd,
+      appliedUsd: k.appliedUsd,
+      capUsd: settings.maxPositionUsd,
+      capBinding: k.capBinding,
+      netEdgePct,
+      bankrollUsd,
+    };
+  }, [
+    latestPriceData,
+    cachedBalances,
+    settings.totalFees,
+    settings.slippage,
+    settings.winRate,
+    settings.kellyFraction,
+    settings.maxPositionUsd,
+  ]);
+
   const value: BotContextType = {
     credentials,
     setCredentials,
@@ -1123,6 +1182,7 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
     isExecutingCross,
     lastObAutoTrade,
     forceFeeModel,
+    kellyGauge,
   };
 
   return <BotContext.Provider value={value}>{children}</BotContext.Provider>;
