@@ -973,6 +973,11 @@ function AllPairsCard({ activePair, feesAndSlipPct, enabledPairs }: { activePair
 
   const rows: AllPairSnapshot[] = query.data ?? [];
 
+  // Badge reflects the pairs actually shown (enabled filter), not a hardcoded
+  // total. When filtered, show "N/TOTAL PAIRS" matching the status-bar style.
+  const shownCount = rows.length > 0 ? rows.length : (enabledPairs?.length ?? ALL_PAIRS.length);
+  const isFiltered = shownCount < ALL_PAIRS.length;
+
   const bestPair = rows.find(r => r.grossSpreadPct != null)?.pair ?? null;
   const highlightedPair = activePair ?? bestPair;
 
@@ -984,7 +989,13 @@ function AllPairsCard({ activePair, feesAndSlipPct, enabledPairs }: { activePair
       <CardHeader className="py-3 flex flex-row items-center justify-between space-y-0">
         <CardTitle className="text-sm flex items-center gap-2">
           <Radio className="h-4 w-4" /> All Pairs
-          <span className="text-[9px] font-mono font-bold px-1 border border-primary text-primary">10 PAIRS</span>
+          <span
+            className="text-[9px] font-mono font-bold px-1 border border-primary text-primary"
+            title={isFiltered ? `Showing ${shownCount} of ${ALL_PAIRS.length} pairs — some pairs are disabled in Config` : undefined}
+            data-testid="badge-all-pairs-count"
+          >
+            {isFiltered ? `${shownCount}/${ALL_PAIRS.length} PAIRS` : `${shownCount} PAIRS`}
+          </span>
           <span className="text-[10px] font-mono text-muted-foreground">Live bid/ask · sorted by spread</span>
         </CardTitle>
         <div className="flex items-center gap-2 text-[10px] font-mono text-muted-foreground">
