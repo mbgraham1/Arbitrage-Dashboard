@@ -20,4 +20,5 @@
 - [Graph limitPrice contract](graph-limitprice-contract.md) — edges stamp taker-side top-of-book (buy→ask, sell→bid) on every venue; maker executors derive fresh join prices, never rest at limitPrice.
 - [Paged list atomicity](paged-list-atomicity.md) — {items,total} envelopes need ONE SQL statement (CTE+COUNT subquery); Promise.all(select,count) drifts across snapshots and fails review.
 - [Kraken OHLC pricing](kraken-ohlc-pricing.md) — in-progress daily candle is not a close; caches must expire at UTC rollover; since is exclusive.
+- [Coinbase v2 API auth](coinbase-v2-jwt.md) — the Advanced Trade CDP JWT also authenticates /v2 (Coinbase App) endpoints; native_amount = USD spot at tx time; next_uri pagination.
 - [Scratch-schema SQL tests](scratch-schema-sql-tests.md) — never run global retention DELETEs against the shared DB in tests; use a search_path-scoped scratch schema, race concurrency before any serial run.

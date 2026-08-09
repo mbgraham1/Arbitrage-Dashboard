@@ -2878,7 +2878,7 @@ function RealizedPnlCard() {
             </div>
 
             <div className="mt-2 text-[9px] font-mono text-muted-foreground">
-              {data.snapshotCount} balance snapshots recorded · a snapshot is taken on every live trade and every 60s poll · deposits/withdrawals are subtracted via Kraken Ledgers{data.includesCoinbase ? " · Coinbase balances included" : ""}
+              {data.snapshotCount} balance snapshots recorded · a snapshot is taken on every live trade and every 60s poll · deposits/withdrawals are subtracted via Kraken Ledgers{data.includesCoinbase ? " + Coinbase transactions · Coinbase balances included" : ""}
               {data.cashFlowNote && <span className="text-yellow-500"> · {data.cashFlowNote}</span>}
             </div>
           </>

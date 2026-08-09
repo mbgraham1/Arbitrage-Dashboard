@@ -41,6 +41,7 @@ import {
   krakenCancelOrder,
   krakenAccountValueUsd,
   krakenNetCashFlowUsd,
+  coinbaseNetCashFlowUsd,
   coinbaseAccountValueUsd,
   getCoinbaseBalances,
   coinbaseMarketOrder,
@@ -2331,8 +2332,9 @@ router.post("/arb/account-pnl", async (req, res): Promise<void> => {
         dbEq(executionQualityTable.accountId, accountId),
         dbGte(executionQualityTable.createdAt, first.createdAt),
       ));
-    // External cash flows since the baseline (Kraken Ledgers). If the ledger
-    // is unavailable or incomplete, FAIL CLOSED: withhold the decomposition
+    // External cash flows since the baseline (Kraken Ledgers + Coinbase v2
+    // transactions when Coinbase creds are present). If EITHER ledger is
+    // unavailable or incomplete, FAIL CLOSED: withhold the decomposition
     // instead of presenting a wrong attribution.
     let netCashFlowUsd: number | null = 0;
     let netCashFlowTodayUsd: number | null = 0;
@@ -2364,13 +2366,43 @@ router.post("/arb/account-pnl", async (req, res): Promise<void> => {
       netCashFlowTodayUsd = null;
       cashFlowNote = "Kraken ledger fetch failed — cash flows unknown, attribution withheld this refresh.";
     }
-    // Coinbase deposits/withdrawals aren't retrievable yet — a Coinbase cash
-    // movement would be misclassified as trading/drift, so withhold the
-    // residual attribution for combined accounts.
-    if (hasCoinbase) {
-      netCashFlowUsd = null;
-      netCashFlowTodayUsd = null;
-      cashFlowNote = (cashFlowNote ? cashFlowNote + " " : "") + "Coinbase external deposits/withdrawals can't be tracked yet — attribution withheld for combined accounts.";
+    // Coinbase external cash flows (combined accounts): fetched from the v2
+    // transactions ledger and ADDED to Kraken's — a Coinbase deposit must not
+    // be misclassified as trading profit or drift. Any failure or incomplete
+    // fetch fails closed, same as the Kraken path.
+    if (hasCoinbase && (netCashFlowUsd != null || netCashFlowTodayUsd != null)) {
+      const cbCreds = { coinbaseKey: creds.coinbaseKey!, coinbaseSecret: creds.coinbaseSecret! };
+      try {
+        const sinceUnix = Math.floor(first.createdAt.getTime() / 1000);
+        const cbCf = await coinbaseNetCashFlowUsd(cbCreds, sinceUnix);
+        if (!cbCf.complete) {
+          netCashFlowUsd = null;
+          netCashFlowTodayUsd = null;
+          cashFlowNote = (cashFlowNote ? cashFlowNote + " " : "") + "Coinbase transaction history couldn't be fetched fully — attribution withheld this refresh.";
+        } else {
+          if (netCashFlowUsd != null) netCashFlowUsd += cbCf.netUsd;
+          if (cbCf.approximated) cashFlowNote = (cashFlowNote ? cashFlowNote + " " : "") + "Some Coinbase deposits/withdrawals valued at current (not historical) prices.";
+          if (netCashFlowTodayUsd != null) {
+            if (todayBase.id === first.id) {
+              netCashFlowTodayUsd += cbCf.netUsd;
+            } else {
+              const sinceTodayUnix = Math.floor(todayBase.createdAt.getTime() / 1000);
+              const cbCfToday = await coinbaseNetCashFlowUsd(cbCreds, sinceTodayUnix);
+              if (cbCfToday.complete) {
+                netCashFlowTodayUsd += cbCfToday.netUsd;
+              } else {
+                netCashFlowTodayUsd = null;
+                cashFlowNote = (cashFlowNote ? cashFlowNote + " " : "") + "Today's Coinbase transactions couldn't be fetched fully — today's number is unadjusted.";
+              }
+            }
+          }
+        }
+      } catch (err) {
+        req.log.error({ err }, "coinbase cash-flow fetch failed");
+        netCashFlowUsd = null;
+        netCashFlowTodayUsd = null;
+        cashFlowNote = (cashFlowNote ? cashFlowNote + " " : "") + "Coinbase transaction fetch failed — cash flows unknown, attribution withheld this refresh.";
+      }
     }
     const equityChangeUsd = now.totalUsd - parseFloat(first.totalUsd);
     const equityChangeTodayUsd = now.totalUsd - parseFloat(todayBase.totalUsd);

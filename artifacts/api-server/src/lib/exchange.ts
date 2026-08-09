@@ -580,6 +580,120 @@ export async function krakenNetCashFlowUsd(creds: KrakenCreds, sinceUnix: number
 }
 
 /**
+ * Net external cash flow (USD) into the Coinbase account since `sinceUnix` —
+ * sibling of krakenNetCashFlowUsd. Walks every v2 wallet's transaction
+ * history. The same CDP key used for Advanced Trade authenticates the v2
+ * ("Coinbase App") API with an identical Bearer JWT — per Coinbase's docs
+ * (docs.cdp.coinbase.com/coinbase-app/authentication-authorization/
+ * api-key-authentication: `curl -H "Authorization: Bearer $JWT"
+ * https://api.coinbase.com/v2/accounts/...`) — and
+ * sums external deposit/withdrawal/send flows. Valuation prefers Coinbase's
+ * own `native_amount` (USD spot AT transaction time); USD/stables count at
+ * par; anything else falls back to CURRENT ticker prices and sets
+ * `approximated`. Trades/fees/staking rewards excluded. `complete=false`
+ * whenever any pagination cap is hit — callers must fail closed.
+ */
+const CB_EXTERNAL_TX_TYPES = new Set([
+  "send",                                    // on-chain crypto in/out
+  "fiat_deposit", "fiat_withdrawal",         // bank transfers
+  "deposit", "withdrawal",                   // generic fiat moves
+  "exchange_deposit", "exchange_withdrawal", // to/from Coinbase Exchange
+  "pro_deposit", "pro_withdrawal",           // to/from legacy Coinbase Pro
+]);
+const cbCashFlowCache = new Map<string, { at: number; val: { netUsd: number; entries: number; approximated: boolean; complete: boolean } }>();
+const CB_CASHFLOW_CACHE_MS = 5 * 60_000;
+
+export async function coinbaseNetCashFlowUsd(creds: CoinbaseCreds, sinceUnix: number): Promise<{ netUsd: number; entries: number; approximated: boolean; complete: boolean }> {
+  const cacheKey = `${crypto.createHash("sha256").update(creds.coinbaseKey).digest("hex").slice(0, 16)}:${sinceUnix}`;
+  const hit = cbCashFlowCache.get(cacheKey);
+  if (hit && Date.now() - hit.at < CB_CASHFLOW_CACHE_MS) return hit.val;
+
+  // 1. Enumerate every v2 wallet (paginated). Wallets, not brokerage
+  //    accounts — v2 transactions live at the wallet level.
+  type V2Account = { id: string; currency?: { code?: string } | string };
+  const accounts: V2Account[] = [];
+  let nextUri: string | null = "/v2/accounts?limit=100";
+  let complete = true;
+  for (let page = 0; page < 10 && nextUri; page++) {
+    const d: { data?: V2Account[]; pagination?: { next_uri?: string | null } } =
+      await coinbaseRequest(creds, "GET", nextUri);
+    accounts.push(...(d.data ?? []));
+    nextUri = d.pagination?.next_uri ?? null;
+    if (page === 9 && nextUri) complete = false; // account list truncated
+  }
+
+  // 2. Walk each wallet's transactions (newest-first), stopping once entries
+  //    predate the baseline. Concurrency-limited — accounts can number 100+.
+  type V2Tx = {
+    type?: string; status?: string; created_at?: string;
+    amount?: { amount?: string; currency?: string };
+    native_amount?: { amount?: string; currency?: string };
+  };
+  const flows: { asset: string; amount: number; nativeUsd: number | null }[] = [];
+  let entries = 0;
+  const sinceMs = sinceUnix * 1000;
+  const walkAccount = async (acct: V2Account): Promise<void> => {
+    let uri: string | null = `/v2/accounts/${acct.id}/transactions?limit=100`;
+    for (let page = 0; page < 10 && uri; page++) {
+      const d: { data?: V2Tx[]; pagination?: { next_uri?: string | null } } =
+        await coinbaseRequest(creds, "GET", uri);
+      let reachedBaseline = false;
+      for (const tx of d.data ?? []) {
+        const at = tx.created_at ? Date.parse(tx.created_at) : NaN;
+        if (isFinite(at) && at < sinceMs) { reachedBaseline = true; break; }
+        if (!tx.type || !CB_EXTERNAL_TX_TYPES.has(tx.type)) continue;
+        if (tx.status && tx.status !== "completed") continue; // pending/failed flows haven't moved balance-affecting funds
+        const amount = parseFloat(tx.amount?.amount ?? "");
+        if (!isFinite(amount) || Math.abs(amount) < 1e-12) continue;
+        const asset = (typeof acct.currency === "string" ? acct.currency : acct.currency?.code) ?? tx.amount?.currency ?? "";
+        const nativeAmt = parseFloat(tx.native_amount?.amount ?? "");
+        const nativeUsd = tx.native_amount?.currency === "USD" && isFinite(nativeAmt) ? nativeAmt : null;
+        entries++;
+        flows.push({ asset: asset.toUpperCase(), amount, nativeUsd });
+      }
+      if (reachedBaseline) return;
+      uri = d.pagination?.next_uri ?? null;
+      if (page === 9 && uri) complete = false; // transaction history truncated
+    }
+  };
+  const CONCURRENCY = 5;
+  for (let i = 0; i < accounts.length; i += CONCURRENCY) {
+    await Promise.all(accounts.slice(i, i + CONCURRENCY).map(walkAccount));
+  }
+
+  // 3. Value the flows. native_amount is Coinbase's own historical USD spot —
+  //    use it whenever present; else par for USD/stables; else current spot
+  //    (flagged approximated).
+  let netUsd = 0, approximated = false;
+  const spotCache = new Map<string, number | null>();
+  const currentSpot = async (asset: string): Promise<number | null> => {
+    if (spotCache.has(asset)) return spotCache.get(asset)!;
+    let price: number | null = null;
+    try {
+      const resp = await fetch(`https://api.exchange.coinbase.com/products/${asset}-USD/ticker`, { signal: AbortSignal.timeout(8_000) });
+      if (resp.ok) {
+        const j = await resp.json() as { price?: string };
+        const p = parseFloat(j.price ?? "");
+        if (isFinite(p)) price = p;
+      }
+    } catch { /* stays null */ }
+    spotCache.set(asset, price);
+    return price;
+  };
+  for (const f of flows) {
+    if (f.nativeUsd != null) { netUsd += f.nativeUsd; continue; }
+    if (f.asset === "USD" || f.asset === "USDC" || f.asset === "USDT") { netUsd += f.amount; continue; }
+    approximated = true;
+    const p = await currentSpot(f.asset);
+    if (p != null) netUsd += f.amount * p;
+    else complete = false; // an unpriceable external flow makes the total untrustworthy
+  }
+  const val = { netUsd, entries, approximated, complete };
+  cbCashFlowCache.set(cacheKey, { at: Date.now(), val });
+  return val;
+}
+
+/**
  * Value the Coinbase account in USD from actual balances — sibling of
  * krakenAccountValueUsd. USD/stables at par; other assets priced at the
  * public product ticker. Unpriceable assets reported, never guessed.
