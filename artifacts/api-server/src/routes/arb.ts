@@ -71,6 +71,7 @@ import { geminiVerify, type GeminiCreds } from "../lib/gemini";
 import { createPairHistory, updatePairHistory, type PairHistory } from "../lib/kalman";
 import { waitForTriLimitFill } from "../lib/tri-fill.js";
 import { listTradesPage } from "../lib/trades-page.js";
+import { pruneAccountSnapshots } from "../lib/snapshot-prune.js";
 
 // ── Cointegration pairs-trading state (in-process memory) ─────────────────────
 // Pairs: SOL/ETH, BTC/ETH, AVAX/DOT
@@ -2286,59 +2287,8 @@ async function snapshotAccountValue(creds: { krakenKey: string; krakenSecret: st
 }
 
 // ── Snapshot retention (opportunistic, throttled) ────────────────────────────
-// account_snapshots grows on every live trade and every changed 60s poll.
-// Retention policy (P&L-safe by construction):
-//   • post_trade rows: NEVER deleted — they're the audit trail.
-//   • each account's first-ever row: NEVER deleted — it's the lifetime baseline.
-//   • poll rows younger than 7 days: kept in full (today's baseline lives here).
-//   • poll rows 7–30 days old: downsampled to one per hour (earliest in bucket).
-//   • poll rows older than 30 days: downsampled to one per day.
-// P&L math only reads the first-ever row, today's first row, and the latest
-// row — all untouched by this policy, so reported numbers don't change.
-const SNAPSHOT_PRUNE_INTERVAL_MS = 6 * 60 * 60 * 1000; // at most every 6h
-let lastSnapshotPruneMs = 0;
-
-async function pruneAccountSnapshots(log: { error: (o: object, m: string) => void }): Promise<void> {
-  const nowMs = Date.now();
-  if (nowMs - lastSnapshotPruneMs < SNAPSHOT_PRUNE_INTERVAL_MS) return;
-  lastSnapshotPruneMs = nowMs; // set first — a failing prune must not retry every request
-  try {
-    // Hourly downsample: poll rows older than 7 days, keep the earliest row in
-    // each (account, hour) bucket. First-ever rows are excluded explicitly.
-    await db.execute(sql`
-      DELETE FROM account_snapshots s
-      WHERE s.trigger = 'poll'
-        AND s.created_at < now() - interval '7 days'
-        AND s.created_at >= now() - interval '30 days'
-        AND s.id <> (SELECT min(m.id) FROM account_snapshots m WHERE m.account_id = s.account_id)
-        AND s.id NOT IN (
-          SELECT min(b.id)
-          FROM account_snapshots b
-          WHERE b.trigger = 'poll'
-            AND b.created_at < now() - interval '7 days'
-            AND b.created_at >= now() - interval '30 days'
-          GROUP BY b.account_id, date_trunc('hour', b.created_at)
-        )
-    `);
-    // Daily downsample: poll rows older than 30 days, keep the earliest row in
-    // each (account, day) bucket.
-    await db.execute(sql`
-      DELETE FROM account_snapshots s
-      WHERE s.trigger = 'poll'
-        AND s.created_at < now() - interval '30 days'
-        AND s.id <> (SELECT min(m.id) FROM account_snapshots m WHERE m.account_id = s.account_id)
-        AND s.id NOT IN (
-          SELECT min(b.id)
-          FROM account_snapshots b
-          WHERE b.trigger = 'poll'
-            AND b.created_at < now() - interval '30 days'
-          GROUP BY b.account_id, date_trunc('day', b.created_at)
-        )
-    `);
-  } catch (err) {
-    log.error({ err }, "account snapshot prune failed");
-  }
-}
+// Policy + SQL live in ../lib/snapshot-prune.ts (tested directly against the
+// real database in snapshot-prune.test.ts).
 
 // ── POST /arb/account-pnl ─────────────────────────────────────────────────────
 // Ground-truth P&L from ACTUAL exchange balances, never scanner estimates.
