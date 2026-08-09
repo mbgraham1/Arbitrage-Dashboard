@@ -31,6 +31,7 @@ export function CbMmCard() {
   const { toast } = useToast();
   const qc = useQueryClient();
   const [floorUsd, setFloorUsd] = useState("0.01");
+  const [bufferUsd, setBufferUsd] = useState("");
   const [restWindowSec, setRestWindowSec] = useState("30");
   const [scan, setScan] = useState<MmScanResult | null>(null);
   const [scanError, setScanError] = useState<string | null>(null);
@@ -122,9 +123,13 @@ export function CbMmCard() {
         await autoStop.mutateAsync();
         addLog("info", "MM2 AUTO stopped");
       } else {
+        // bufferUsd is optional: blank = server default. The server clamps it
+        // (bufferFor) and it stays ADDITIVE to the floor — never a discount.
+        const bufferNum = parseFloat(bufferUsd);
         await autoStart.mutateAsync({ data: {
           krakenKey, krakenSecret, coinbaseKey, coinbaseSecret,
           minNetUsd: floorNum,
+          ...(Number.isFinite(bufferNum) && bufferNum >= 0 ? { bufferUsd: bufferNum } : {}),
           restWindowSec: Math.min(120, Math.max(5, parseFloat(restWindowSec) || 30)),
         } });
         addLog("success", `MM2 AUTO started (floor $${floorNum.toFixed(2)}, $10 size)`);
@@ -224,7 +229,7 @@ export function CbMmCard() {
     <Card data-testid="card-cb-mm" className="border-primary/50">
       <CardHeader className="pb-2">
         <CardTitle className="text-sm font-medium">
-          <span className="text-primary">MAKER-HEDGE ENGINE</span>{" "}
+          <span className="text-primary">AUTO MAKER STRATEGY — MAKER-HEDGE ENGINE</span>{" "}
           <span className="text-muted-foreground font-normal">
             (post-only maker · confirmed-fill hedge · $10 fixed · real fees · inventory-aware · {scan ? `${scan.rows?.length ?? 0}+ routes scanned` : "15 assets"})
           </span>
@@ -289,6 +294,8 @@ export function CbMmCard() {
         <div className="flex items-center gap-2 flex-wrap">
           <label className="text-muted-foreground">floor $ (min 0.01)</label>
           <input value={floorUsd} onChange={e => setFloorUsd(e.target.value)} className="bg-background border rounded px-2 py-1 w-16" data-testid="input-mm2-floor" />
+          <label className="text-muted-foreground" title="Extra safety margin ADDED to the floor (server-clamped). Blank = default.">buffer $</label>
+          <input value={bufferUsd} onChange={e => setBufferUsd(e.target.value)} placeholder="auto" className="bg-background border rounded px-2 py-1 w-14" data-testid="input-mm2-buffer" />
           <label className="text-muted-foreground">rest (s)</label>
           <input value={restWindowSec} onChange={e => setRestWindowSec(e.target.value)} className="bg-background border rounded px-2 py-1 w-14" data-testid="input-mm2-rest" />
           <Button
@@ -361,6 +368,25 @@ export function CbMmCard() {
           across {stats.data?.completed ?? 0} completed / {stats.data?.trades ?? 0} total cycles
           {(stats.data?.incomplete ?? 0) > 0 && <span className="text-amber-500"> · {stats.data?.incomplete} incomplete (unhedged/indeterminate — no realized P&L)</span>}
         </div>
+
+        {(stats.data?.recent?.length ?? 0) > 0 && (
+          <div className="border rounded p-2" data-testid="text-mm2-recent">
+            <div className="text-muted-foreground mb-1">recent cycles (last {Math.min(10, stats.data!.recent!.length)})</div>
+            <table className="w-full text-left">
+              <thead className="text-muted-foreground"><tr><th>time</th><th>pair</th><th>status</th><th className="text-right">realized</th></tr></thead>
+              <tbody>
+                {stats.data!.recent!.slice(0, 10).map((t, i) => (
+                  <tr key={i} data-testid={`row-mm2-recent-${i}`}>
+                    <td className="pr-2">{t.at ? new Date(t.at).toLocaleTimeString() : "—"}</td>
+                    <td className="pr-2">{t.pair ?? "—"}</td>
+                    <td className={cn("pr-2", t.status === "completed" ? "text-green-500" : "text-amber-500")}>{t.status}</td>
+                    <td className={cn("text-right font-semibold", (t.realizedUsd ?? 0) >= 0 ? "text-green-500" : "text-red-500")}>{fmt(t.realizedUsd)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
       </CardContent>
     </Card>
     </>
