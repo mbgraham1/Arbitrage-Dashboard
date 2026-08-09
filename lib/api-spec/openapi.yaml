@@ -3294,7 +3294,7 @@ components:
         coinbaseSecret: { type: string }
     AccountPnlResult:
       type: object
-      required: [startingValueUsd, startedAt, currentValueUsd, usdBalance, unrealizedHoldingsUsd, realizedTodayUsd, lifetimePnlUsd, cashFlowAdjusted, netCashFlowTodayUsd, equityChangeUsd, netCashFlowUsd, tradingPnlUsd, tradedFillCount, unrealizedPnlUsd, cashFlowNote, includesCoinbase, snapshotCount, unpricedAssets]
+      required: [startingValueUsd, startedAt, currentValueUsd, usdBalance, unrealizedHoldingsUsd, realizedTodayUsd, lifetimePnlUsd, cashFlowAdjusted, netCashFlowTodayUsd, equityChangeUsd, netCashFlowUsd, tradingPnlUsd, tradedFillCount, unrealizedPnlUsd, cashFlowNote, krakenValueUsd, coinbaseValueUsd, includesCoinbase, snapshotCount, unpricedAssets]
       properties:
         startingValueUsd: { type: number }
         startedAt: { type: string }
@@ -3330,6 +3330,13 @@ components:
           nullable: true
           description: "Residual: equityChange − cashFlow − tradingPnl ≈ price drift on held coins; null when cash flows are unknowable"
         cashFlowNote: { type: string, nullable: true }
+        krakenValueUsd:
+          type: number
+          description: "Kraken portion of currentValueUsd (cash + holdings at live tickers)"
+        coinbaseValueUsd:
+          type: number
+          nullable: true
+          description: "Coinbase portion of currentValueUsd; null when Coinbase credentials were not provided"
         includesCoinbase: { type: boolean }
         snapshotCount: { type: integer }
         unpricedAssets:

@@ -549,6 +549,8 @@ export const GetAccountPnlResponse = zod.object({
   "tradedFillCount": zod.number(),
   "unrealizedPnlUsd": zod.number().nullable().describe('Residual: equityChange − cashFlow − tradingPnl ≈ price drift on held coins; null when cash flows are unknowable'),
   "cashFlowNote": zod.string().nullable(),
+  "krakenValueUsd": zod.number().describe('Kraken portion of currentValueUsd (cash + holdings at live tickers)'),
+  "coinbaseValueUsd": zod.number().nullable().describe('Coinbase portion of currentValueUsd; null when Coinbase credentials were not provided'),
   "includesCoinbase": zod.boolean(),
   "snapshotCount": zod.number(),
   "unpricedAssets": zod.array(zod.string())

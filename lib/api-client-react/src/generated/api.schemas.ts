@@ -1690,6 +1690,10 @@ export interface AccountPnlResult {
   /** Residual: equityChange − cashFlow − tradingPnl ≈ price drift on held coins; null when cash flows are unknowable */
   unrealizedPnlUsd: number | null;
   cashFlowNote: string | null;
+  /** Kraken portion of currentValueUsd (cash + holdings at live tickers) */
+  krakenValueUsd: number;
+  /** Coinbase portion of currentValueUsd; null when Coinbase credentials were not provided */
+  coinbaseValueUsd: number | null;
   includesCoinbase: boolean;
   snapshotCount: number;
   unpricedAssets: string[];

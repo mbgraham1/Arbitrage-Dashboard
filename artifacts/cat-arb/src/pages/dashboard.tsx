@@ -2827,6 +2827,11 @@ function RealizedPnlCard() {
                 <div className="text-[10px] uppercase text-muted-foreground">Current Value</div>
                 <div className="text-lg font-bold">{money(data.currentValueUsd)}</div>
                 <div className="text-[9px] text-muted-foreground">cash {money(data.usdBalance)}</div>
+                {data.coinbaseValueUsd != null && (
+                  <div className="text-[9px] text-muted-foreground" data-testid="text-exchange-split">
+                    Kraken {money(data.krakenValueUsd)} · Coinbase {money(data.coinbaseValueUsd)}
+                  </div>
+                )}
               </div>
               <div className="border border-border p-3">
                 <div className="text-[10px] uppercase text-muted-foreground">Realized Today</div>

@@ -2249,11 +2249,11 @@ function accountScope(krakenKey: string, coinbaseKey?: string, coinbaseSecret?: 
   return accountIdFromKey(krakenKey, coinbaseKey && coinbaseSecret ? coinbaseKey : undefined);
 }
 
-async function snapshotAccountValue(creds: { krakenKey: string; krakenSecret: string; coinbaseKey?: string; coinbaseSecret?: string }, trigger: "poll" | "post_trade", log: { error: (o: object, m: string) => void }): Promise<{ totalUsd: number; usdBalance: number; holdingsUsd: number; unpriced: string[] } | null> {
+async function snapshotAccountValue(creds: { krakenKey: string; krakenSecret: string; coinbaseKey?: string; coinbaseSecret?: string }, trigger: "poll" | "post_trade", log: { error: (o: object, m: string) => void }): Promise<{ totalUsd: number; usdBalance: number; holdingsUsd: number; unpriced: string[]; krakenValueUsd: number; coinbaseValueUsd: number | null } | null> {
   try {
     // Post-trade snapshots bypass the 30s balance cache — balances just changed.
     const k = await krakenAccountValueUsd(creds, trigger === "post_trade");
-    let v = { totalUsd: k.totalUsd, usdBalance: k.usdBalance, holdingsUsd: k.holdingsUsd, unpriced: [...k.unpriced] };
+    let v = { totalUsd: k.totalUsd, usdBalance: k.usdBalance, holdingsUsd: k.holdingsUsd, unpriced: [...k.unpriced], krakenValueUsd: k.totalUsd, coinbaseValueUsd: null as number | null };
     if (creds.coinbaseKey && creds.coinbaseSecret) {
       const c = await coinbaseAccountValueUsd({ coinbaseKey: creds.coinbaseKey, coinbaseSecret: creds.coinbaseSecret });
       v = {
@@ -2261,6 +2261,8 @@ async function snapshotAccountValue(creds: { krakenKey: string; krakenSecret: st
         usdBalance: k.usdBalance + c.usdBalance,
         holdingsUsd: k.holdingsUsd + c.holdingsUsd,
         unpriced: [...k.unpriced, ...c.unpriced.map(a => `CB:${a}`)],
+        krakenValueUsd: k.totalUsd,
+        coinbaseValueUsd: c.totalUsd,
       };
     }
     const accountId = accountScope(creds.krakenKey, creds.coinbaseKey, creds.coinbaseSecret);
@@ -2427,6 +2429,8 @@ router.post("/arb/account-pnl", async (req, res): Promise<void> => {
       tradedFillCount: tradingAgg?.trades ?? 0,
       unrealizedPnlUsd: netCashFlowUsd == null ? null : equityChangeUsd - netCashFlowUsd - tradingPnlUsd,
       cashFlowNote,
+      krakenValueUsd: now.krakenValueUsd,
+      coinbaseValueUsd: now.coinbaseValueUsd,
       includesCoinbase: hasCoinbase,
       snapshotCount,
       unpricedAssets: now.unpriced,
