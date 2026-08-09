@@ -2471,8 +2471,8 @@ function GraphEngineCard() {
 
   return (
     <Card className="mt-6">
-      <CardHeader className="py-3 flex flex-row items-center justify-between space-y-0">
-        <CardTitle className="text-sm flex items-center gap-2">
+      <CardHeader className="py-3 flex flex-row flex-wrap items-center justify-between gap-x-4 gap-y-2 space-y-0">
+        <CardTitle className="text-sm flex flex-wrap items-center gap-2">
           <Zap className="h-4 w-4 text-primary" />
           Opportunity Engine
           <span className="text-[10px] font-mono text-muted-foreground font-normal">
@@ -2547,15 +2547,15 @@ function GraphEngineCard() {
             /> s
           </span>
         </CardTitle>
-        <div className="flex items-center gap-2 text-[10px] font-mono text-muted-foreground">
+        <div className="flex flex-wrap items-center gap-2 text-[10px] font-mono text-muted-foreground">
           {isLoading && <RefreshCw className="h-3 w-3 animate-spin" />}
           {data && (
-            <span>{data.assetsScanned} assets · {data.routesEvaluated} routes evaluated · {viable.length} viable</span>
+            <span className="whitespace-nowrap">{data.assetsScanned} assets · {data.routesEvaluated} routes evaluated · {viable.length} viable</span>
           )}
           <Button
             size="sm"
             variant={liveMode ? "destructive" : "outline"}
-            className="h-6 px-2 text-[10px] font-mono font-bold"
+            className="h-6 px-2 text-[10px] font-mono font-bold shrink-0"
             disabled={!canExecute}
             onClick={executeTopRoute}
             title={!topRoute
