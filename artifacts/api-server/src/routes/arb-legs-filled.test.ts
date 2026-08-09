@@ -335,6 +335,10 @@ describe("legsFilled diagnostics — POST /arb/graph-execute (Kraken triangle)",
     expect(q).toHaveLength(1);
     expect(q[0]!["legsFilled"]).toBe(1); // leg 1 CONFIRMED, cycle died at leg 2
     expect(q[0]!["filled"]).toBe(false);
+    // Unwind reconciled: quality row carries the MEASURED net USD (buy $10 +
+    // $0.01 fee, unwind sold for $10) so routeLegRisk's avgUnwindLossUsd uses
+    // the route's true unwind cost instead of the assumed 1.5% of size.
+    expect(q[0]!["realizedProfitUsd"]).toBe("-0.010000");
   });
 
   it("IndeterminateOrderError on leg 1 (never terminal) → legsFilled null, NOT 0", async () => {

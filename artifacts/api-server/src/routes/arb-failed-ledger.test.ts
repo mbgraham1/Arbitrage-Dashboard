@@ -7,10 +7,12 @@
  * (status='verified' AND realized_profit_usd IS NOT NULL) — proven
  * behaviorally in trades-summary-failed.test.ts against a real scratch-schema
  * database; this file proves the WRITE side via POST /arb/graph-execute:
- *   1. Leg-2 failure after a confirmed leg-1 fill → failed row, realized NULL
- *   2. Leg-3 failure after confirmed legs 1+2      → failed row, realized NULL
- *   3. Lock revocation (HARD RESET) while leg 1 rests with a partial fill
- *      → failed row, realized NULL, evidence kept
+ *   1. Leg-2 failure after a confirmed leg-1 fill with a CONFIRMED USD unwind
+ *      → failed row, realized = MEASURED net USD (unwind reconciled)
+ *   2. Leg-3 failure after confirmed legs 1+2 (cross-pair leg-2 fill —
+ *      not USD-reconcilable) → failed row, realized NULL
+ *   3. Lock revocation (HARD RESET) while leg 1 rests with a partial fill,
+ *      fully unwound → failed row, realized = measured net USD, evidence kept
  *   4. Leg-1 accepted but PROVEN zero fill → failed row, realized exactly "0"
  */
 import express from "express";
@@ -312,8 +314,9 @@ function expectSingleFailedRow(opts: { realized: string | null }) {
   expect(row["status"]).toBe("failed");
   expect(row["isDryRun"]).toBe(false);
   expect(String(row["pair"])).toMatch(/\[FAILED: /);
-  // Money gate: with any confirmed fill the net USD effect is unknown → NULL
-  // (never an estimate); with provably ZERO fills it is exactly "0".
+  // Money gate: realized is only ever a MEASURED number — the reconciled net
+  // USD when every fill is confirmed on a USD pair and inventory nets to zero,
+  // exactly "0" for provably zero fills, otherwise NULL (never an estimate).
   if (opts.realized === null) expect(row["realizedProfitUsd"]).toBeNull();
   else expect(row["realizedProfitUsd"]).toBe(opts.realized);
   return row;
@@ -323,7 +326,7 @@ function expectSingleFailedRow(opts: { realized: string | null }) {
 
 describe("FAILED ledger rows — POST /arb/graph-execute (Kraken triangle)", () => {
 
-  it("leg-2 failure after confirmed leg-1 fill → ONE failed row, realized NULL, leg-1 evidence kept", async () => {
+  it("leg-2 failure after confirmed leg-1 fill with confirmed USD unwind → ONE failed row, realized = MEASURED net USD", async () => {
     scanGraphOpportunities.mockResolvedValue({ routes: [triRoute("TRI-FL-L2")] });
     let placed = 0;
     krakenRawLimitOrder.mockImplementation((_c: unknown, _s: string, _v: number, _p: number, pair: string) => {
@@ -341,13 +344,42 @@ describe("FAILED ledger rows — POST /arb/graph-execute (Kraken triangle)", () 
     const { body } = await graphExecute(liveBody("TRI-FL-L2"));
     expect(body["success"]).toBe(false);
 
-    const row = expectSingleFailedRow({ realized: null });
+    // Round trip closed: buy 2 ATOM @ $10 + $0.01 fee, unwind sold 2 ATOM for
+    // $10 (fee 0) → measured net −$0.01. The risk gate now learns THIS number
+    // instead of assuming 1.5% of size.
+    const row = expectSingleFailedRow({ realized: "-0.010000" });
+    expect(body["realizedNetUsd"]).toBeCloseTo(-0.01, 6);
     // Leg-1 evidence: confirmed fill volume + order id for reconciliation.
     expect(String(row["buyOrderId"])).toContain("L1");
     const fills = row["legFills"] as Array<Record<string, unknown>>;
     expect(fills.some(f => f["leg"] === 1 && f["txid"] === "L1" && (f["volume"] as number) > 0)).toBe(true);
     expect(parseFloat(String(row["volume"]))).toBeGreaterThan(0); // leg-1 confirmed volume recorded
   });
+
+  it("leg-2 failure with unwind accepted but NOT confirmed → failed row, realized NULL (never a guess)", async () => {
+    scanGraphOpportunities.mockResolvedValue({ routes: [triRoute("TRI-FL-UNCONF")] });
+    let placed = 0;
+    krakenRawLimitOrder.mockImplementation((_c: unknown, _s: string, _v: number, _p: number, pair: string) => {
+      placed++;
+      if (pair === "ATOMXBT") return Promise.reject(new Error("EOrder:Rejected"));
+      return Promise.resolve({ txid: [`L${placed}`] });
+    });
+    krakenRawMarketOrder.mockImplementation((_c: unknown, _s: string, _v: number, pair: string) =>
+      pair === "ATOMXBT" ? Promise.reject(new Error("EOrder:Rejected")) : Promise.resolve({ txid: ["UNWIND-U"] }));
+    krakenRawIocLimitOrder.mockRejectedValue(new Error("EOrder:Rejected"));
+    // Unwind order accepted but its status never confirms → zero-volume
+    // evidence row → the USD flow is unknown → realized MUST stay NULL.
+    krakenOrderInfo.mockImplementation((_c: unknown, txid: string) => Promise.resolve(
+      txid === "L1" ? kClosed(2, 10, 0.01) : kOpen));
+
+    const { body } = await graphExecute(liveBody("TRI-FL-UNCONF"));
+    expect(body["success"]).toBe(false);
+
+    const row = expectSingleFailedRow({ realized: null });
+    expect(body["realizedNetUsd"]).toBeNull();
+    const fills = row["legFills"] as Array<Record<string, unknown>>;
+    expect(fills.some(f => f["txid"] === "UNWIND-U" && f["volume"] === 0)).toBe(true);
+  }, 30_000);
 
   it("leg-3 failure after confirmed legs 1+2 → ONE failed row, realized NULL, both legs' evidence kept", async () => {
     scanGraphOpportunities.mockResolvedValue({ routes: [triRoute("TRI-FL-L3")] });
@@ -371,13 +403,16 @@ describe("FAILED ledger rows — POST /arb/graph-execute (Kraken triangle)", () 
     const { body } = await graphExecute(liveBody("TRI-FL-L3"));
     expect(body["success"]).toBe(false);
 
+    // Leg-2 filled on the cross pair (quote isn't USD) → net USD effect is
+    // NOT provably closed → realized stays NULL, never a reconstruction.
     const row = expectSingleFailedRow({ realized: null });
+    expect(body["realizedNetUsd"]).toBeNull();
     const fills = row["legFills"] as Array<Record<string, unknown>>;
     expect(fills.some(f => f["leg"] === 1 && f["txid"] === "L1")).toBe(true);
     expect(fills.some(f => f["leg"] === 2 && f["txid"] === "L2")).toBe(true);
   }, 30_000);
 
-  it("lock revoked (HARD RESET) while leg 1 rests with a partial fill → failed row, realized NULL, partial evidence kept", async () => {
+  it("lock revoked (HARD RESET) while leg 1 rests with a partial fill, fully unwound → failed row, realized measured", async () => {
     scanGraphOpportunities.mockResolvedValue({ routes: [triRoute("TRI-FL-REVOKE")] });
     let polls = 0;
     let cancelled = false;
@@ -402,7 +437,9 @@ describe("FAILED ledger rows — POST /arb/graph-execute (Kraken triangle)", () 
     expect(body["success"]).toBe(false);
     expect(String(body["error"])).toMatch(/revoked/i);
 
-    const row = expectSingleFailedRow({ realized: null }); // partial fill → unknown net → NULL
+    // Partial 1 ATOM buy ($5 + $0.01 fee) fully unwound for $5 − $0.01 fee →
+    // measured net −$0.02 (round trip provably closed).
+    const row = expectSingleFailedRow({ realized: "-0.020000" });
     const fills = row["legFills"] as Array<Record<string, unknown>>;
     expect(fills.some(f => f["txid"] === "R1" && (f["volume"] as number) > 0)).toBe(true);
   }, 30_000);

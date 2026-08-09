@@ -1216,6 +1216,36 @@ class ResidualError extends Error {
   constructor(message: string, public readonly residual: number) { super(message); }
 }
 
+/** Measured net USD effect of a FAILED run's confirmed fills (cycle legs +
+ *  unwinds). Returns a number ONLY when the USD round trip is provably closed:
+ *  every record is a confirmed non-zero fill on a USD-quoted pair, and each
+ *  pair's bought/sold volume nets to ~zero (no residual inventory, ≤$0.01
+ *  notional dust). Anything less returns null — the risk gate must learn only
+ *  from measured unwind costs, never from a guessed reconstruction.
+ *  Kraken charges fees on USD-quoted pairs in USD, so net = Σ(sell cost − fee)
+ *  − Σ(buy cost + fee). Cross-pair fills (quote ≠ USD) are not reconcilable
+ *  here and force null. */
+export function measuredFailedNetUsd(fills: Array<{ pair: string; side: string; price: number | null; volume: number; costUsd: number; fee: number }>): number | null {
+  if (fills.length === 0) return null;
+  let netUsd = 0;
+  const perPair = new Map<string, { netVol: number; lastPrice: number }>();
+  for (const f of fills) {
+    if (!(f.volume > 0)) return null;         // accepted-but-unconfirmed order — USD flow unknown
+    if (!f.pair.endsWith("USD")) return null; // cross leg — quote currency isn't USD
+    netUsd += (f.side === "sell" ? f.costUsd : -f.costUsd) - f.fee;
+    const p = perPair.get(f.pair) ?? { netVol: 0, lastPrice: 0 };
+    p.netVol += (f.side === "buy" ? 1 : -1) * f.volume;
+    if (f.price != null && f.price > 0) p.lastPrice = f.price;
+    perPair.set(f.pair, p);
+  }
+  for (const p of perPair.values()) {
+    // Residual inventory means the round trip is NOT closed — its value is
+    // unknown, so the measured number would misstate the true loss.
+    if (p.lastPrice > 0 ? Math.abs(p.netVol) * p.lastPrice > 0.01 : Math.abs(p.netVol) > 1e-8) return null;
+  }
+  return netUsd;
+}
+
 async function runKrakenTriangle(input: TriangleExecInput, reqLog: ReqLog): Promise<TriangleExecOut> {
   const { krakenKey, krakenSecret, assetA, assetB, tradeSizeUsd, feesPct, minProfitUsd, isDryRun } = input;
   const creds = { krakenKey, krakenSecret };
@@ -1248,7 +1278,7 @@ async function runKrakenTriangle(input: TriangleExecInput, reqLog: ReqLog): Prom
   // Failure-ledger context: kept OUTSIDE the try so the catch can persist a
   // FAILED row with the confirmed fill evidence gathered before the error.
   const failCtx: {
-    legFills: Array<{ leg: number; volume: number; costUsd: number; txid: string }>;
+    legFills: Array<{ leg: number; label: string; pair: string; side: string; price: number | null; volume: number; costUsd: number; fee: number; txid: string; taker?: boolean; unwind?: boolean }>;
     /** EVERY order Kraken accepted (txid returned), even zero-fill /
      * indeterminate / revoked ones — a failed run must never vanish. */
     acceptedOrders: Array<{ leg: number; label: string; pair: string; side: string; txid: string }>;
@@ -2016,6 +2046,16 @@ async function runKrakenTriangle(input: TriangleExecInput, reqLog: ReqLog): Prom
     return { body: { success: true, isDryRun: false, executed: true, route, preflightProfitUsd: realizedProfit, leg1OrderId: legIds[0] || null, leg2OrderId: legIds[1] || null, leg3OrderId: legIds[2] || null, leg4OrderId: legIds[3] || null, legsFilled: legsCompleted } };
   } catch (err) {
     reqLog.error({ err, route }, "OB manual execute error");
+    // Unwind reconciliation: when every accepted order has a CONFIRMED fill on
+    // a USD-quoted pair and inventory nets to zero, the failed run's true net
+    // USD effect is measured from actual fills (leg 1 spend vs unwind
+    // proceeds, fee-inclusive) — so the risk gate learns this route's REAL
+    // average unwind loss instead of assuming 1.5% of size.
+    const confirmedTxids = new Set(failCtx.legFills.map(f => f.txid));
+    const unconfirmedAccepted = failCtx.acceptedOrders.filter(o => !confirmedTxids.has(o.txid));
+    const measuredNetUsd = !isDryRun && unconfirmedAccepted.length === 0
+      ? measuredFailedNetUsd(failCtx.legFills)
+      : null;
     // FAILED ledger row — a live route that placed ANY order but did not
     // complete is recorded as failed (with its confirmed fills + order IDs for
     // reconciliation), never as a profitable trade.
@@ -2026,9 +2066,7 @@ async function runKrakenTriangle(input: TriangleExecInput, reqLog: ReqLog): Prom
         const l3Fills = failCtx.legFills.filter(f => f.leg === finalLegNum);
         // Include accepted-but-unconfirmed orders (zero fill / indeterminate)
         // as zero-volume evidence rows so no accepted order vanishes.
-        const filledTxids = new Set(failCtx.legFills.map(f => f.txid));
-        const acceptedOnly = failCtx.acceptedOrders
-          .filter(o => !filledTxids.has(o.txid))
+        const acceptedOnly = unconfirmedAccepted
           .map(o => ({ leg: o.leg, label: `${o.label} (accepted, no confirmed fill)`, pair: o.pair, side: o.side, price: null, volume: 0, costUsd: 0, fee: 0, txid: o.txid }));
         await db.insert(tradesTable).values({
           pair: `${route} [FAILED: ${(err as Error).message.slice(0, 120)}]`,
@@ -2040,9 +2078,11 @@ async function runKrakenTriangle(input: TriangleExecInput, reqLog: ReqLog): Prom
           buyOrderId: (l1Fills.map(f => f.txid).filter(Boolean).join(",") || failCtx.acceptedOrders.filter(o => o.leg === 1).map(o => o.txid).join(",")) || null,
           sellOrderId: (l3Fills.map(f => f.txid).filter(Boolean).join(",") || failCtx.acceptedOrders.filter(o => o.leg === finalLegNum).map(o => o.txid).join(",")) || null,
           // Zero confirmed fills → nothing moved → realized is exactly $0.
-          // With partial fills the net USD effect is unknown (unwinds aren't
-          // reconciled yet) → null, rendered as "—", never an estimate.
-          realizedProfitUsd: failCtx.legFills.length === 0 ? "0" : null,
+          // With fills: use the MEASURED net USD (leg spend vs confirmed
+          // unwind proceeds) when the round trip is provably closed;
+          // otherwise null, rendered as "—", never an estimate.
+          realizedProfitUsd: failCtx.legFills.length === 0 ? "0"
+            : measuredNetUsd != null ? measuredNetUsd.toFixed(6) : null,
           status: "failed", legFills: [...failCtx.legFills, ...acceptedOnly],
         });
       } catch (e) { reqLog.error(`Failed to write FAILED ledger row: ${(e as Error).message}`); }
@@ -2052,7 +2092,7 @@ async function runKrakenTriangle(input: TriangleExecInput, reqLog: ReqLog): Prom
     // prove. Keep the diagnostic null (unknown) rather than a false zero.
     // Later-leg indeterminacy keeps the last CONFIRMED count, which is true.
     const legsForRecord = err instanceof IndeterminateOrderError && legsCompleted === 0 ? null : legsCompleted;
-    return { body: { success: false, isDryRun, executed: false, route, preflightProfitUsd: null, error: (err as Error).message, legsFilled: legsForRecord } };
+    return { body: { success: false, isDryRun, executed: false, route, preflightProfitUsd: null, error: (err as Error).message, legsFilled: legsForRecord, realizedNetUsd: measuredNetUsd } };
   } finally {
     // Only the CURRENT lock holder may reset shared state — the generation
     // token makes this a no-op if this run was stale-evicted and a newer
@@ -3003,13 +3043,18 @@ router.post("/arb/graph-execute", async (req, res): Promise<void> => {
       // Live triangles report realized profit (actual cost/fee accounting)
       // in preflightProfitUsd when all legs filled.
       const realizedTri = isLiveTri && b["success"] === true && typeof b["preflightProfitUsd"] === "number" ? b["preflightProfitUsd"] as number : null;
+      // Reconciled unwind P&L on FAILED live runs — the measured net USD from
+      // confirmed leg + unwind fills (null unless the round trip is provably
+      // closed). Feeds routeLegRisk's avgUnwindLossUsd so the EV gate uses the
+      // route's TRUE unwind cost instead of the assumed 1.5% of size.
+      const reconciledFailUsd = isLiveTri && b["success"] !== true && typeof b["realizedNetUsd"] === "number" ? b["realizedNetUsd"] as number : null;
       if (b["executed"] === true || (isLiveTri && !wasPreflightReject)) {
         await recordQuality({
           accountId: accountScope(parsed.data.krakenKey, parsed.data.coinbaseKey, parsed.data.coinbaseSecret),
           route: route.description, style: executionStyle, isDryRun: !!b["isDryRun"],
           filled: b["success"] === true, tradeSizeUsd,
           expectedProfitUsd: effNetProfitUsd,
-          realizedProfitUsd: realizedTri,
+          realizedProfitUsd: realizedTri ?? reconciledFailUsd,
           slippagePct: effSlippagePct,
           legsFilled: typeof b["legsFilled"] === "number" ? b["legsFilled"] as number : null,
           note: errText || undefined,
@@ -3034,7 +3079,7 @@ router.post("/arb/graph-execute", async (req, res): Promise<void> => {
       if (b["executed"] === true) {
         req.log.info({ route: route.description, ...latency }, "[LATENCY] market update → decision → submit → exchange ack");
       }
-      res.json({ success: b["success"], isDryRun: b["isDryRun"], executed: b["executed"], route: route.description, preflightProfitUsd: b["preflightProfitUsd"], realizedProfitUsd: realizedTri, orderIds: [b["leg1OrderId"], b["leg2OrderId"], b["leg3OrderId"]].filter(Boolean), error: b["error"] ?? null, chosenMode: executionStyle, latency });
+      res.json({ success: b["success"], isDryRun: b["isDryRun"], executed: b["executed"], route: route.description, preflightProfitUsd: b["preflightProfitUsd"], realizedProfitUsd: realizedTri, realizedNetUsd: reconciledFailUsd, orderIds: [b["leg1OrderId"], b["leg2OrderId"], b["leg3OrderId"]].filter(Boolean), error: b["error"] ?? null, chosenMode: executionStyle, latency });
       return;
     }
 
