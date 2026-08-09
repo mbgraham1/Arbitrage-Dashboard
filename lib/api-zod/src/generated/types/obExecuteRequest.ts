@@ -12,6 +12,8 @@ export interface ObExecuteRequest {
   /** Asset A of the displayed top route (server re-verifies via fresh pre-flight) */
   assetA: string;
   assetB: string;
+  /** v21 — full asset chain between the USD legs (e.g. [SOL, BTC, ETH] for USD→SOL→BTC→ETH→USD). When present (length ≥ 2) it overrides assetA/assetB and the executor places one order per hop (4 orders for a 4-leg route). Omitted → classic [assetA, assetB] triangle. */
+  path?: string[];
   tradeSizeUsd?: number;
   feesPct?: number;
   /** Min net profit ($) at $10; pre-flight gate scales it by size/10 */

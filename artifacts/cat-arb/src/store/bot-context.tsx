@@ -606,6 +606,9 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
           krakenSecret: creds.krakenSecret,
           assetA: top.assetA,
           assetB: top.assetB,
+          // v21: full asset chain so 4-leg routes execute every hop — the
+          // server overrides assetA/assetB with this when present.
+          path: top.path,
           tradeSizeUsd: s.obTradeSize,
           feesPct: s.obFeesPct,
           minProfitUsd: s.obMinProfitUsd,

@@ -1485,10 +1485,10 @@ function OrderBookHunterCard() {
   });
 
   const cycles: ObCycleEntry[] = data?.cycles ?? [];
-  // Execute targets the top 3-LEG route only — the live OB executor places
-  // exactly three orders from (assetA, assetB); firing it on a 4-leg route
-  // would silently skip the middle hop. 4-leg routes are display/ranking only.
-  const topCycle = cycles.find(c => (c.legs ?? 3) === 3);
+  // v21: Execute targets the top route regardless of leg count — the OB
+  // executor places one order per hop from the cycle's full asset path, so
+  // 4-leg routes fire all four orders.
+  const topCycle = cycles[0];
   // Execution gate: fresh profit after real fees must clear the min-profit
   // floor. The button stays clickable whenever a route exists — the server
   // pre-flight is the real guard.
@@ -1507,6 +1507,8 @@ function OrderBookHunterCard() {
           krakenSecret: credentials.krakenSecret,
           assetA: topCycle.assetA,
           assetB: topCycle.assetB,
+          // v21: full asset chain — server executes every hop (4 orders on 4-leg routes)
+          path: topCycle.path,
           tradeSizeUsd: tradeSize,
           feesPct: settings.obFeesPct, // fallback only — server uses your actual Kraken fee tier
           minProfitUsd: minProfit,
@@ -1515,7 +1517,7 @@ function OrderBookHunterCard() {
       });
       if (r.success && r.executed) {
         const profit = r.preflightProfitUsd ?? 0;
-        addLog("success", `[OB·EXEC] ✅ ${r.route} | profit $${profit.toFixed(4)}${r.isDryRun ? " (dry run)" : ` | orders ${[r.leg1OrderId, r.leg2OrderId, r.leg3OrderId].filter(Boolean).join(", ")}`}`);
+        addLog("success", `[OB·EXEC] ✅ ${r.route} | profit $${profit.toFixed(4)}${r.isDryRun ? " (dry run)" : ` | orders ${[r.leg1OrderId, r.leg2OrderId, r.leg3OrderId, r.leg4OrderId].filter(Boolean).join(", ")}`}`);
         setExecResult(`✅ Cycle Completed ${r.route} — expected $${profit.toFixed(4)}${r.isDryRun ? " (dry run, recorded to ledger)" : ""}`);
       } else {
         addLog("warning", `[OB·EXEC] ❌ ${r.error ?? "Pre-flight failed."}`);
@@ -1702,11 +1704,11 @@ function OrderBookHunterCard() {
           <div className="px-3 py-2 text-[10px] font-mono border-b border-border/50 bg-muted/30 grid grid-cols-2 sm:grid-cols-5 gap-x-4 gap-y-0.5">
             <span className="col-span-2 sm:col-span-5 font-bold uppercase text-muted-foreground">Kraken Fee Diagnostic</span>
             <span className="text-muted-foreground">Fee/leg: <span className="text-foreground">{data.feesPct.toFixed(2)}%</span>{actualFee != null && <span className="text-success"> ·actual tier</span>}</span>
-            <span className="text-muted-foreground">3-leg drag: <span className="text-foreground">${topCycle.feeUsd.toFixed(4)} ({((topCycle.feeUsd / tradeSize) * 100).toFixed(3)}%)</span></span>
+            <span className="text-muted-foreground">{topCycle.legs ?? 3}-leg drag: <span className="text-foreground">${topCycle.feeUsd.toFixed(4)} ({((topCycle.feeUsd / tradeSize) * 100).toFixed(3)}%)</span></span>
             <span className="text-muted-foreground">Break-even edge: <span className="text-foreground">{((topCycle.feeUsd / tradeSize) * 100).toFixed(3)}%</span></span>
             <span className="text-muted-foreground">Best raw edge: <span className={topCycle.grossProfitUsd > 0 ? "text-success" : "text-destructive"}>${topCycle.grossProfitUsd.toFixed(4)} ({((topCycle.grossProfitUsd / tradeSize) * 100).toFixed(3)}%)</span></span>
             <span className={cn("font-bold", topCycle.estimatedProfitUsd > minProfit ? "text-success" : "text-destructive")}>
-              {topCycle.estimatedProfitUsd > minProfit ? "✅ EXECUTABLE TRIANGLE" : "✕ NO EXECUTABLE TRIANGLE"}
+              {topCycle.estimatedProfitUsd > minProfit ? "✅ EXECUTABLE ROUTE" : "✕ NO EXECUTABLE ROUTE"}
             </span>
           </div>
         )}

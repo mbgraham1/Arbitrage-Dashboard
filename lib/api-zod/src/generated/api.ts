@@ -391,7 +391,8 @@ export const GetObScanResponse = zod.object({
   "slippagePct": zod.number().describe('total execution slippage across 3 legs (%)'),
   "status": zod.enum(['READY', 'HIGH_SLIPPAGE', 'LOW_PROFIT']).describe('v15 conservative classification'),
   "confidencePct": zod.number().describe('v17 liquidity confidence 0-100 — avg top-of-book coverage across all legs'),
-  "legs": zod.number().describe('v20 — number of legs in the route: 3 (USD→A→B→USD) or 4 (USD→A→M→B→USD via the BTC\/ETH cross)')
+  "legs": zod.number().describe('v20 — number of legs in the route: 3 (USD→A→B→USD) or 4 (USD→A→M→B→USD via the BTC\/ETH cross)'),
+  "path": zod.array(zod.string()).optional().describe('v21 — full asset chain between the USD legs (e.g. [A, B] or [A, M1, M2]); pass to ob-execute so 4-leg routes execute all hops')
 })),
   "tradeSizeUsd": zod.number(),
   "feesPct": zod.number(),
@@ -441,6 +442,7 @@ export const ObExecuteBody = zod.object({
   "krakenSecret": zod.string(),
   "assetA": zod.string().describe('Asset A of the displayed top route (server re-verifies via fresh pre-flight)'),
   "assetB": zod.string(),
+  "path": zod.array(zod.string()).optional().describe('v21 — full asset chain between the USD legs (e.g. [SOL, BTC, ETH] for USD→SOL→BTC→ETH→USD). When present (length ≥ 2) it overrides assetA\/assetB and the executor places one order per hop (4 orders for a 4-leg route). Omitted → classic [assetA, assetB] triangle.\n'),
   "tradeSizeUsd": zod.number().default(obExecuteBodyTradeSizeUsdDefault),
   "feesPct": zod.number().default(obExecuteBodyFeesPctDefault),
   "minProfitUsd": zod.number().default(obExecuteBodyMinProfitUsdDefault).describe('Min net profit ($) at $10; pre-flight gate scales it by size\/10'),
@@ -459,6 +461,7 @@ export const ObExecuteResponse = zod.object({
   "leg1OrderId": zod.string().nullish(),
   "leg2OrderId": zod.string().nullish(),
   "leg3OrderId": zod.string().nullish(),
+  "leg4OrderId": zod.string().nullish().describe('v21 — final-leg order id for 4-leg routes (null on triangles)'),
   "error": zod.string().nullish()
 })
 

@@ -50,10 +50,10 @@ export function maybeAutoExecuteOb(p: ObAutoExecuteParams): boolean {
   // Pick the best READY cycle above the profit floor. cycles[] is sorted by
   // estimatedProfitUsd descending, but the #1 entry may be HIGH_SLIPPAGE or
   // LOW_PROFIT — filter first, then take the highest-profit READY one.
-  // Only 3-leg routes are executable — the OB executor places exactly three
-  // orders from (assetA, assetB); a 4-leg route would skip the middle hop.
+  // v21: 4-leg routes are executable too — the executor places one order per
+  // hop from the cycle's full asset path (bot-context passes `path` through).
   const top = p.cycles
-    .filter(c => (c.legs ?? 3) === 3 && c.status === "READY" && c.estimatedProfitUsd > p.obMinProfitUsd)
+    .filter(c => c.status === "READY" && c.estimatedProfitUsd > p.obMinProfitUsd)
     .sort((a, b) => b.estimatedProfitUsd - a.estimatedProfitUsd)[0];
   if (!top) return false;
 

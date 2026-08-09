@@ -35,4 +35,6 @@ export interface ObCycleEntry {
   confidencePct: number;
   /** v20 — number of legs in the route: 3 (USD→A→B→USD) or 4 (USD→A→M→B→USD via the BTC/ETH cross) */
   legs: number;
+  /** v21 — full asset chain between the USD legs (e.g. [A, B] or [A, M1, M2]); pass to ob-execute so 4-leg routes execute all hops */
+  path?: string[];
 }

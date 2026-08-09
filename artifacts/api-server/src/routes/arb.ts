@@ -61,7 +61,7 @@ import {
   type Pair,
 } from "../lib/exchange";
 import { getBestPairPrices, getTriPrices, getBtcTriPrices, scanAllPairs, getPairPrices, getAllPairSnapshots } from "../lib/price-cache";
-import { scanOrderBookCycles, preflightObCycle, discoverCrossPairs, freshJoinPrice, makerQuote, takerCycleBreakdown, cachedTakerCycleBreakdown, getEventScan, krakenStreamStats, getStreamBook, waitForBookTouch, formatLegAges, OB_ASSETS, OB_USD_PAIRS, CROSS_LOOKUP, type ObAsset } from "../lib/order-book";
+import { scanOrderBookCycles, preflightObCycle, preflightObPath, discoverCrossPairs, freshJoinPrice, makerQuote, takerCycleBreakdown, cachedTakerCycleBreakdown, getEventScan, krakenStreamStats, getStreamBook, waitForBookTouch, formatLegAges, OB_ASSETS, OB_USD_PAIRS, CROSS_LOOKUP, type ObAsset } from "../lib/order-book";
 import { scanGraphOpportunities, type GeminiScanInput, type GeminiEdgeBook, type BookLevels } from "../lib/graph-engine";
 import { crossTakerBreakdown, crossTakerBreakdownRest } from "../lib/cross-pricing";
 import { routeSanityError } from "../lib/route-sanity";
@@ -1161,6 +1161,10 @@ router.get("/arb/execution-status", (_req, res): void => {
 interface TriangleExecInput {
   krakenKey: string; krakenSecret: string;
   assetA: string; assetB: string;
+  /** v21: full asset chain between the USD legs (e.g. [A, M1, M2] for a
+   *  4-leg route). When present (length ≥ 2), overrides assetA/assetB.
+   *  Omitted / length 2 → classic triangle [assetA, assetB]. */
+  path?: string[];
   tradeSizeUsd: number; feesPct: number; minProfitUsd: number; isDryRun: boolean;
   /** Override the per-leg maker fill window (e.g. 2s probe attempts). */
   makerTimeoutMs?: number;
@@ -1215,7 +1219,13 @@ class ResidualError extends Error {
 async function runKrakenTriangle(input: TriangleExecInput, reqLog: ReqLog): Promise<TriangleExecOut> {
   const { krakenKey, krakenSecret, assetA, assetB, tradeSizeUsd, feesPct, minProfitUsd, isDryRun } = input;
   const creds = { krakenKey, krakenSecret };
-  const route = `USD→${assetA}→${assetB}→USD`;
+  // v21: 4-leg support — the executed chain is the full asset path between
+  // the USD legs. [A, B] = classic triangle; [A, M1, M2] = 4-leg route.
+  const chain: string[] = input.path && input.path.length >= 2 ? input.path : [assetA, assetB];
+  const first = chain[0]!;
+  const last = chain[chain.length - 1]!;
+  const legsTotal = chain.length + 1;
+  const route = `USD→${chain.join("→")}→USD`;
   let lockGen: number | null = null;
   let ownsLock = false; // true only when WE acquired the lock (not adopted from caller)
   // Per-leg diagnostic: how many legs CONFIRMED filled before the run ended.
@@ -1223,8 +1233,16 @@ async function runKrakenTriangle(input: TriangleExecInput, reqLog: ReqLog): Prom
   // rejections stay null so they can't skew leg-level fill rates).
   let legsCompleted: number | null = null;
 
-  if (!(OB_ASSETS as readonly string[]).includes(assetA) || !(OB_ASSETS as readonly string[]).includes(assetB)) {
-    return { badRequest: `Unknown asset(s): ${assetA}/${assetB}` };
+  for (const a of chain) {
+    if (!(OB_ASSETS as readonly string[]).includes(a)) {
+      return { badRequest: `Unknown asset(s): ${chain.join("/")}` };
+    }
+  }
+  if (chain.length > 3) {
+    return { badRequest: `Routes longer than 4 legs are not supported (got ${legsTotal} legs).` };
+  }
+  if (new Set(chain).size !== chain.length) {
+    return { badRequest: `Route repeats an asset: ${route}` };
   }
 
   // Failure-ledger context: kept OUTSIDE the try so the catch can persist a
@@ -1244,8 +1262,13 @@ async function runKrakenTriangle(input: TriangleExecInput, reqLog: ReqLog): Prom
     //    v19: use the dynamically-discovered cross map so execution works for
     //    pairs not present in the hardcoded fallback.
     const { lookup: activeLookup } = await discoverCrossPairs();
-    const crossPair = activeLookup.get(`${assetA}-${assetB}`)?.pair;
-    const feePairs = [OB_USD_PAIRS[assetA as ObAsset], OB_USD_PAIRS[assetB as ObAsset], crossPair].filter((p): p is string => !!p);
+    // One cross per consecutive asset pair in the chain (1 for triangles,
+    // 2 for 4-leg routes). Missing cross = route not executable on Kraken.
+    const crosses = chain.slice(0, -1).map((a, i) => activeLookup.get(`${a}-${chain[i + 1]}`));
+    for (let i = 0; i < crosses.length; i++) {
+      if (!crosses[i]) return { badRequest: `No Kraken cross pair for ${chain[i]}-${chain[i + 1]} — route not executable.` };
+    }
+    const feePairs = [OB_USD_PAIRS[first as ObAsset], OB_USD_PAIRS[last as ObAsset], ...crosses.map(c => c!.pair)].filter((p): p is string => !!p);
     // All three legs are submitted POST-ONLY (limit at best bid/ask), so the
     // fee actually paid is the MAKER tier — the same tier the scanner uses in
     // maker mode. Using the taker tier here caused scanner-vs-preflight fee
@@ -1274,7 +1297,7 @@ async function runKrakenTriangle(input: TriangleExecInput, reqLog: ReqLog): Prom
     // limits at join prices (maker), not a taker depth-walk — otherwise the
     // simulation understates the edge by the spread and rejects routes the
     // maker scanner correctly approved.
-    const pf = await preflightObCycle(assetA as ObAsset, assetB as ObAsset, tradeSizeUsd, effectiveFeesPct, takerOnly ? "taker" : "maker", input.maxQuoteAgeMs);
+    const pf = await preflightObPath(chain as ObAsset[], tradeSizeUsd, effectiveFeesPct, takerOnly ? "taker" : "maker", input.maxQuoteAgeMs);
     if (!pf) {
       return { body: { success: false, isDryRun, executed: false, route, preflightProfitUsd: null, error: "Could not fetch fresh order books (or depth can't absorb the size)." } };
     }
@@ -1316,7 +1339,7 @@ async function runKrakenTriangle(input: TriangleExecInput, reqLog: ReqLog): Prom
         pair: route,
         buyExchange: "kraken",
         sellExchange: "kraken",
-        volume: pf.volumeA.toFixed(8),
+        volume: pf.volumes[0]!.toFixed(8),
         estimatedProfitUsd: pf.profitUsd.toFixed(6),
         netEdgePct: ((pf.profitUsd / tradeSizeUsd) * 100).toFixed(4),
         isDryRun: true,
@@ -1359,12 +1382,11 @@ async function runKrakenTriangle(input: TriangleExecInput, reqLog: ReqLog): Prom
     legsCompleted = 0;
 
     const log = { info: (m: string) => reqLog.info(m), error: (m: string) => reqLog.error(m) };
-    const [l1, l2, l3] = pf.legs;
-    // v19: use the dynamically-discovered lookup (same activeLookup from step 0)
-    // so routes found only via AssetPairs discovery execute correctly.
-    const cross = activeLookup.get(`${assetA}-${assetB}`)!; // validated by pre-flight
-    const pairA = OB_USD_PAIRS[assetA as ObAsset];
-    const pairB = OB_USD_PAIRS[assetB as ObAsset];
+    const l1 = pf.legs[0]!;
+    const lastSpec = pf.legs[pf.legs.length - 1]!;
+    const crossSpecs = pf.legs.slice(1, -1); // one per cross hop (validated by pre-flight)
+    const pairFirst = OB_USD_PAIRS[first as ObAsset];
+    const pairLast = OB_USD_PAIRS[last as ObAsset];
 
     // Route-level precision preflight (BEFORE any order): every planned leg —
     // and therefore every full-size unwind, which uses the same USD pairs —
@@ -1620,7 +1642,9 @@ async function runKrakenTriangle(input: TriangleExecInput, reqLog: ReqLog): Prom
       return { volExec: info.volExec, cost: info.cost, fee: info.fee, txid };
     };
 
-    let leg1Id = "", leg2Id = "", leg3Id = "";
+    // Exchange order IDs per leg (comma-joined when maker + taker fallback
+    // both placed orders). legIds[0] = leg 1 … legIds[legsTotal-1] = final leg.
+    const legIds: string[] = Array.from({ length: legsTotal }, () => "");
     let usdSpent = 0, usdReceived = 0, totalFees = 0;
     // USD recovered by sweeping tolerance-accepted residual inventory back to
     // USD at market (confirmed fills only) — counted into realized P&L.
@@ -1653,10 +1677,10 @@ async function runKrakenTriangle(input: TriangleExecInput, reqLog: ReqLog): Prom
           setExecStatus({ orderPrice: q0.price, bestBid: q0.bestBid, bestAsk: q0.bestAsk, queueAheadVol: q0.queueAheadVol, reprices: 0 });
         }
         f1 = await fillLeg(1, "leg1", l1, async () => {
-          const fresh = await preflightObCycle(assetA as ObAsset, assetB as ObAsset, tradeSizeUsd, effectiveFeesPct, "maker");
+          const fresh = await preflightObPath(chain as ObAsset[], tradeSizeUsd, effectiveFeesPct, "maker");
           if (!fresh || fresh.profitUsd <= threshold) return null; // edge gone — stop retrying
           const q = await makerQuote(l1.pair, l1.side);
-          return q?.price ?? fresh.legs[0].limitPrice;
+          return q?.price ?? fresh.legs[0]!.limitPrice;
         }, {
           // Leg 1 holds no inventory, so patience is free: rest the post-only
           // order up to LEG1_MAX_REST_MS, abort the MOMENT fresh books say the
@@ -1668,14 +1692,14 @@ async function runKrakenTriangle(input: TriangleExecInput, reqLog: ReqLog): Prom
           // Full pre-flight before every reprice: null aborts (edge gone);
           // otherwise re-place at the freshest aggressive maker price.
           freshLimit: async () => {
-            const fresh = await preflightObCycle(assetA as ObAsset, assetB as ObAsset, tradeSizeUsd, effectiveFeesPct, "maker");
+            const fresh = await preflightObPath(chain as ObAsset[], tradeSizeUsd, effectiveFeesPct, "maker");
             if (!fresh || fresh.profitUsd <= threshold) return null; // edge gone
             const q = await makerQuote(l1.pair, l1.side);
-            if (!q) return { price: fresh.legs[0].limitPrice };
+            if (!q) return { price: fresh.legs[0]!.limitPrice };
             // Tick-premium guard on repricing too: improve only when profit
             // still clears the floor at the improved price; else join.
-            const premium = Math.max(0, (q.price - fresh.legs[0].limitPrice) * fresh.legs[0].volume);
-            if (fresh.profitUsd - premium <= threshold) return { price: fresh.legs[0].limitPrice, bestBid: q.bestBid, bestAsk: q.bestAsk, queueAheadVol: q.queueAheadVol };
+            const premium = Math.max(0, (q.price - fresh.legs[0]!.limitPrice) * fresh.legs[0]!.volume);
+            if (fresh.profitUsd - premium <= threshold) return { price: fresh.legs[0]!.limitPrice, bestBid: q.bestBid, bestAsk: q.bestAsk, queueAheadVol: q.queueAheadVol };
             return q;
           },
         });
@@ -1685,12 +1709,12 @@ async function runKrakenTriangle(input: TriangleExecInput, reqLog: ReqLog): Prom
           // Revoked mid-rest: unwind any ACTUAL leg-1 fill (money-safest exit),
           // then abort — no taker fallback, no further legs.
           const v = e.fill?.volExec ?? 0;
-          if (v > 0) await tryUnwindMarket(creds, "sell", v, pairA, `sell ${assetA} (unwind leg1 after lock revoked)`, log, { records: legFillRecords, leg: 1 });
+          if (v > 0) await tryUnwindMarket(creds, "sell", v, pairFirst, `sell ${first} (unwind leg1 after lock revoked)`, log, { records: legFillRecords, leg: 1 });
           throw e;
         }
         if (!(e instanceof TakerOnlySkip)) log.info(`leg1 maker attempt placed nothing (${(e as Error).message}) — evaluating taker fallback`);
       }
-      leg1Id = f1.txid;
+      legIds[0] = f1.txid;
       aHeld = f1.volExec;
       usdSpent = f1.cost + f1.fee;
       totalFees += f1.fee;
@@ -1705,7 +1729,7 @@ async function runKrakenTriangle(input: TriangleExecInput, reqLog: ReqLog): Prom
           throw new LockRevokedError("leg1", "aborted before taker fallback — no new orders placed.");
         }
         const takerFeePct = tiers?.takerFeePct ?? effectiveFeesPct;
-        const freshTaker = await preflightObCycle(assetA as ObAsset, assetB as ObAsset, tradeSizeUsd, takerFeePct, "taker", input.maxQuoteAgeMs);
+        const freshTaker = await preflightObPath(chain as ObAsset[], tradeSizeUsd, takerFeePct, "taker", input.maxQuoteAgeMs);
         // Floor for the taker fire: taker mode adds the safety buffer on top
         // of the trader's minimum — fresh taker net must clear BOTH.
         const takerFloor = threshold + safetyBufferUsd;
@@ -1730,16 +1754,16 @@ async function runKrakenTriangle(input: TriangleExecInput, reqLog: ReqLog): Prom
           const cappedVol = capPx != null ? Math.min(remVol, tradeSizeUsd / (capPx * (1 + takerFeePct / 100))) : remVol;
           const m = await marketFill(1, "leg1", l1.side, cappedVol, l1.pair, capPx);
           aHeld += m.volExec; usdSpent += m.cost + m.fee; totalFees += m.fee;
-          leg1Id = [leg1Id, m.txid].filter(Boolean).join(",");
+          legIds[0] = [legIds[0], m.txid].filter(Boolean).join(",");
         } else {
           log.info(`leg1 taker ${takerOnly ? "fire" : "fallback"} declined — taker-priced net ${freshTaker ? `$${freshTaker.profitUsd.toFixed(4)}` : "unavailable"} ≤ floor $${threshold.toFixed(4)}${safetyBufferUsd > 0 ? ` + buffer $${safetyBufferUsd.toFixed(4)}` : ""}`);
         }
       }
       if (aHeld < l1.volume * FILL_TOLERANCE) {
-        if (aHeld > 0) await tryUnwindMarket(creds, "sell", aHeld, pairA, `sell ${assetA} (unwind partial leg1)`, log, { records: legFillRecords, leg: 1 });
+        if (aHeld > 0) await tryUnwindMarket(creds, "sell", aHeld, pairFirst, `sell ${first} (unwind partial leg1)`, log, { records: legFillRecords, leg: 1 });
         throw new Error(takerOnly
           ? `Leg 1 taker fire aborted — fresh taker-priced net (after real taker fees, depth slippage${safetyBufferUsd > 0 ? `, $${safetyBufferUsd.toFixed(4)} safety buffer` : ""}) ≤ your $${threshold.toFixed(4)} floor; no orders kept — trying the next-best route.`
-          : `Leg 1 unfilled after ${LEG1_MAX_REPRICES} maker reprices (aggressive pricing, pre-flight each time) and taker fallback ${aHeld > 0 ? "left a shortfall" : "declined (taker-priced net ≤ your floor)"} (${aHeld.toFixed(8)}/${l1.volume.toFixed(8)} ${assetA}); order canceled — trying the next-best route.`);
+          : `Leg 1 unfilled after ${LEG1_MAX_REPRICES} maker reprices (aggressive pricing, pre-flight each time) and taker fallback ${aHeld > 0 ? "left a shortfall" : "declined (taker-priced net ≤ your floor)"} (${aHeld.toFixed(8)}/${l1.volume.toFixed(8)} ${first}); order canceled — trying the next-best route.`);
       }
       legsCompleted = 1;
     }
@@ -1749,188 +1773,211 @@ async function runKrakenTriangle(input: TriangleExecInput, reqLog: ReqLog): Prom
     // the normal catch → actual-residual unwind (selling back what leg 1
     // bought is the money-safest exit even after a kill).
     if (lockGen != null && !liveLockOwned(lockGen)) {
-      const unwound = aHeld > 0 ? await tryUnwindMarket(creds, "sell", aHeld, pairA, `sell ${assetA} (lock revoked before leg 2)`, log, { records: legFillRecords, leg: 1 }) : true;
+      const unwound = aHeld > 0 ? await tryUnwindMarket(creds, "sell", aHeld, pairFirst, `sell ${first} (lock revoked before leg 2)`, log, { records: legFillRecords, leg: 1 }) : true;
       throw new Error(`Execution lock revoked (KILL/HARD RESET) — aborted before leg 2; leg 1 inventory ${unwound ? "unwound" : "UNWIND FAILED — position still held, reconcile manually"}.`);
     }
 
-    // ── Leg 2: convert A → B on cross. Post-only limit at best bid/ask ───────
-    // We already hold A, so retries just re-join the fresh top of book —
-    // abandoning here means unwinding at market, which costs the spread anyway.
-    const l2Volume = l2.volume * (aHeld / pf.volumeA); // scale to actual leg-1 fill
-    let bHeld = 0;
-    let f2: AggFill = { volExec: 0, cost: 0, fee: 0, txid: "" };
-    try {
-      if (takerOnly) throw new TakerOnlySkip(); // straight to the fresh-priced market completion below
-      f2 = await fillLeg(2, "leg2", { ...l2, volume: l2Volume }, () => freshJoinPrice(l2.pair, l2.side));
-      leg2Id = f2.txid;
-    } catch (e) {
-      // Indeterminate order state: the order may still be live/filling —
-      // do NOT unwind on assumed volumes; surface for manual review.
-      if (e instanceof IndeterminateOrderError) throw e;
-      if (e instanceof LockRevokedError) {
-        // Revoked mid-rest: unwind ACTUAL holdings only, then abort — no
-        // taker fallback (that would be a NEW order on a revoked run).
-        const fl = e.fill ?? { volExec: 0, cost: 0, fee: 0, txid: "" };
-        const aConsumedR = cross.aIsQuote ? fl.cost + fl.fee : fl.volExec;
-        const bAcquiredR = cross.aIsQuote ? fl.volExec : Math.max(0, fl.cost - fl.fee);
-        const aResidualR = Math.max(0, aHeld - aConsumedR);
-        if (aResidualR > 0) await tryUnwindMarket(creds, "sell", aResidualR, pairA, `sell residual ${assetA} (leg2 lock revoked)`, log, { records: legFillRecords, leg: 1 });
-        if (bAcquiredR > 0) await tryUnwindMarket(creds, "sell", bAcquiredR, pairB, `sell acquired ${assetB} (leg2 lock revoked)`, log, { records: legFillRecords, leg: 2 });
-        throw e;
-      }
-      // Nothing placed — fall through to the taker fallback below: we hold A,
-      // and completing at market beats unwinding at market (same taker cost).
-      if (!(e instanceof TakerOnlySkip)) log.info(`leg2 maker attempt placed nothing (${(e as Error).message}) — completing at market`);
-    }
-    {
-      // Taker fallback: complete any remainder with a market order. We already
-      // hold A, so this beats unwinding (same taker fee, backward). The order
-      // is sized by the A THIS RUN still holds — never the original plan — so
-      // it can never draw on pre-existing account inventory.
-      if (f2.volExec < l2Volume * FILL_TOLERANCE) {
-        try {
-          const takerFeeFrac = (tiers?.takerFeePct ?? effectiveFeesPct) / 100;
-          let fbVolume = 0;
-          let fbPriceCap: number | undefined;
-          if (cross.aIsQuote) {
-            // buy B priced in A: budget = remaining A after the maker portion
-            // (cost+fee are in A — fciq guarantees fee in quote). A plain
-            // market buy has NO max quote spend, so use an IOC limit with an
-            // explicit price cap: worst-case spend = fbVolume × cap × (1+fee),
-            // sized to stay within remainingA. Never draws pre-existing A.
-            const remainingA = Math.max(0, aHeld - (f2.cost + f2.fee));
-            const px = await freshJoinPrice(l2.pair, l2.side);
-            if (px != null && px > 0) {
-              fbPriceCap = px * 1.002; // cross the spread, but bounded
-              fbVolume = Math.min(l2Volume - f2.volExec, (remainingA * (1 - takerFeeFrac) * 0.999) / fbPriceCap);
-            }
-          } else {
-            // sell A: volume is A units — cap at the A this run still holds.
-            const remainingA = Math.max(0, aHeld - f2.volExec);
-            fbVolume = Math.min(l2Volume - f2.volExec, remainingA);
-          }
-          if (fbVolume > 0) {
-            const m = await marketFill(2, "leg2", l2.side, fbVolume, l2.pair, fbPriceCap);
-            f2.volExec += m.volExec; f2.cost += m.cost; f2.fee += m.fee;
-            leg2Id = [leg2Id, m.txid].filter(Boolean).join(",");
-          }
-        } catch (e) {
-          if (e instanceof IndeterminateOrderError) throw e;
-          log.error(`leg2 taker fallback failed: ${(e as Error).message}`);
+    // ── Cross legs: convert chain[i] → chain[i+1]. Post-only at best bid/ask ──
+    // One iteration per cross hop (1 for triangles, 2 for 4-leg routes). We
+    // already hold the from-asset, so retries just re-join the fresh top of
+    // book — abandoning means unwinding at market, which costs the spread
+    // anyway. Residual unwinds always sell BOTH sides back to USD via each
+    // asset's own USD pair, from ACTUAL fills only.
+    let held = aHeld; // amount of chain[i] currently held entering hop i
+    for (let ci = 0; ci < crossSpecs.length; ci++) {
+      const from = chain[ci]!;
+      const to = chain[ci + 1]!;
+      const cross = crosses[ci]!;
+      const spec = crossSpecs[ci]!;
+      const legIdx = ci + 2; // 1-based leg number (leg 2 is the first cross)
+      const legLabel = `leg${legIdx}`;
+      const pairFrom = OB_USD_PAIRS[from as ObAsset];
+      const pairTo = OB_USD_PAIRS[to as ObAsset];
+      // Scale the planned volume to what we ACTUALLY hold vs the plan.
+      const plannedHeld = pf.volumes[ci]!;
+      const legVolume = spec.volume * (held / plannedHeld);
+      let acquired = 0;
+      let f2: AggFill = { volExec: 0, cost: 0, fee: 0, txid: "" };
+      try {
+        if (takerOnly) throw new TakerOnlySkip(); // straight to the fresh-priced market completion below
+        f2 = await fillLeg(legIdx, legLabel, { ...spec, volume: legVolume }, () => freshJoinPrice(spec.pair, spec.side));
+        legIds[legIdx - 1] = f2.txid;
+      } catch (e) {
+        // Indeterminate order state: the order may still be live/filling —
+        // do NOT unwind on assumed volumes; surface for manual review.
+        if (e instanceof IndeterminateOrderError) throw e;
+        if (e instanceof LockRevokedError) {
+          // Revoked mid-rest: unwind ACTUAL holdings only, then abort — no
+          // taker fallback (that would be a NEW order on a revoked run).
+          const fl = e.fill ?? { volExec: 0, cost: 0, fee: 0, txid: "" };
+          const fromConsumedR = cross.aIsQuote ? fl.cost + fl.fee : fl.volExec;
+          const toAcquiredR = cross.aIsQuote ? fl.volExec : Math.max(0, fl.cost - fl.fee);
+          const fromResidualR = Math.max(0, held - fromConsumedR);
+          if (fromResidualR > 0) await tryUnwindMarket(creds, "sell", fromResidualR, pairFrom, `sell residual ${from} (${legLabel} lock revoked)`, log, { records: legFillRecords, leg: legIdx - 1 });
+          if (toAcquiredR > 0) await tryUnwindMarket(creds, "sell", toAcquiredR, pairTo, `sell acquired ${to} (${legLabel} lock revoked)`, log, { records: legFillRecords, leg: legIdx });
+          throw e;
         }
+        // Nothing placed — fall through to the taker fallback below: we hold
+        // the from-asset, and completing at market beats unwinding at market
+        // (same taker cost).
+        if (!(e instanceof TakerOnlySkip)) log.info(`${legLabel} maker attempt placed nothing (${(e as Error).message}) — completing at market`);
       }
-      // aIsQuote → bought base B: volExec = B acquired, cost+fee = A consumed.
-      // else     → sold base A:   volExec = A consumed, cost−fee = B received.
-      const aConsumed = cross.aIsQuote ? f2.cost + f2.fee : f2.volExec;
-      bHeld = cross.aIsQuote ? f2.volExec : Math.max(0, f2.cost - f2.fee);
-      const fullFill = f2.volExec >= l2Volume * FILL_TOLERANCE;
-      if (!fullFill) {
-        // Unwind BOTH residuals from actual fills: leftover A + acquired B.
-        const aResidual = Math.max(0, aHeld - aConsumed);
-        if (aResidual > 0) await tryUnwindMarket(creds, "sell", aResidual, pairA, `sell residual ${assetA} (partial leg2)`, log, { records: legFillRecords, leg: 1 });
-        if (bHeld > 0)     await tryUnwindMarket(creds, "sell", bHeld,     pairB, `sell acquired ${assetB} (partial leg2)`, log, { records: legFillRecords, leg: 2 });
-        throw new Error(`Leg 2 did not fully fill (${f2.volExec.toFixed(8)}/${l2Volume.toFixed(8)}); residual ${assetA} and acquired ${assetB} unwound.`);
-      }
-      // Cross-leg fee is charged in A or B units and is implicitly captured in
-      // the final USD delta (less B acquired → less USD out), so it is not
-      // added to totalFees (which tracks USD-denominated fees only).
-      if (bHeld <= 0) {
-        throw new Error("Leg 2 reported zero acquired volume despite full fill.");
-      }
-      // Tolerance-accepted partial: the cycle proceeds sized to bHeld, but any
-      // leftover A must not sit as inventory — sweep it back to USD at market
-      // with a confirmed fill so the proceeds count in realized P&L. Dust below
-      // Kraken's min order size just stays (cheaper than the error).
       {
-        const aResidual = Math.max(0, aHeld - aConsumed);
-        if (aResidual > 0 && f2.volExec < l2Volume) {
-          let sweptA = 0;
+        // Taker fallback: complete any remainder with a market order. We
+        // already hold the from-asset, so this beats unwinding (same taker
+        // fee, backward). The order is sized by what THIS RUN still holds —
+        // never the original plan — so it can never draw on pre-existing
+        // account inventory.
+        if (f2.volExec < legVolume * FILL_TOLERANCE) {
           try {
-            const sw = await marketFill(2, "leg2 residual sweep", "sell", aResidual, pairA);
-            residualSweepUsd += Math.max(0, sw.cost - sw.fee);
-            totalFees += sw.fee;
-            sweptA = sw.volExec;
+            const takerFeeFrac = (tiers?.takerFeePct ?? effectiveFeesPct) / 100;
+            let fbVolume = 0;
+            let fbPriceCap: number | undefined;
+            if (cross.aIsQuote) {
+              // buy `to` priced in `from`: budget = remaining from-asset after
+              // the maker portion (cost+fee are in `from` — fciq guarantees
+              // fee in quote). A plain market buy has NO max quote spend, so
+              // use an IOC limit with an explicit price cap: worst-case spend
+              // = fbVolume × cap × (1+fee), sized to stay within the budget.
+              const remainingFrom = Math.max(0, held - (f2.cost + f2.fee));
+              const px = await freshJoinPrice(spec.pair, spec.side);
+              if (px != null && px > 0) {
+                fbPriceCap = px * 1.002; // cross the spread, but bounded
+                fbVolume = Math.min(legVolume - f2.volExec, (remainingFrom * (1 - takerFeeFrac) * 0.999) / fbPriceCap);
+              }
+            } else {
+              // sell `from`: volume is from-units — cap at what this run holds.
+              const remainingFrom = Math.max(0, held - f2.volExec);
+              fbVolume = Math.min(legVolume - f2.volExec, remainingFrom);
+            }
+            if (fbVolume > 0) {
+              const m = await marketFill(legIdx, legLabel, spec.side, fbVolume, spec.pair, fbPriceCap);
+              f2.volExec += m.volExec; f2.cost += m.cost; f2.fee += m.fee;
+              legIds[legIdx - 1] = [legIds[legIdx - 1], m.txid].filter(Boolean).join(",");
+            }
           } catch (e) {
             if (e instanceof IndeterminateOrderError) throw e;
-            log.info(`leg2 residual sweep failed (${aResidual.toFixed(8)} ${assetA}): ${(e as Error).message}`);
-          }
-          // Anything above dust left unswept → the trade cannot be verified.
-          if (aResidual - sweptA > aHeld * DUST_FRAC) {
-            unresolvedResidual = true;
-            log.error(`leg2 residual UNRESOLVED: ${(aResidual - sweptA).toFixed(8)} ${assetA} remains on account — trade will be recorded as estimated, not verified`);
+            log.error(`${legLabel} taker fallback failed: ${(e as Error).message}`);
           }
         }
+        // aIsQuote → bought base `to`:  volExec = to acquired, cost+fee = from consumed.
+        // else     → sold base `from`:  volExec = from consumed, cost−fee = to received.
+        const fromConsumed = cross.aIsQuote ? f2.cost + f2.fee : f2.volExec;
+        acquired = cross.aIsQuote ? f2.volExec : Math.max(0, f2.cost - f2.fee);
+        const fullFill = f2.volExec >= legVolume * FILL_TOLERANCE;
+        if (!fullFill) {
+          // Unwind BOTH residuals from actual fills: leftover from + acquired to.
+          const fromResidual = Math.max(0, held - fromConsumed);
+          if (fromResidual > 0) await tryUnwindMarket(creds, "sell", fromResidual, pairFrom, `sell residual ${from} (partial ${legLabel})`, log, { records: legFillRecords, leg: legIdx - 1 });
+          if (acquired > 0)     await tryUnwindMarket(creds, "sell", acquired,     pairTo,   `sell acquired ${to} (partial ${legLabel})`, log, { records: legFillRecords, leg: legIdx });
+          throw new Error(`Leg ${legIdx} did not fully fill (${f2.volExec.toFixed(8)}/${legVolume.toFixed(8)}); residual ${from} and acquired ${to} unwound.`);
+        }
+        // Cross-leg fee is charged in from/to units and is implicitly captured
+        // in the final USD delta (less acquired → less USD out), so it is not
+        // added to totalFees (which tracks USD-denominated fees only).
+        if (acquired <= 0) {
+          throw new Error(`Leg ${legIdx} reported zero acquired volume despite full fill.`);
+        }
+        // Tolerance-accepted partial: the cycle proceeds sized to `acquired`,
+        // but any leftover from-asset must not sit as inventory — sweep it
+        // back to USD at market with a confirmed fill so the proceeds count in
+        // realized P&L. Dust below Kraken's min order size just stays (cheaper
+        // than the error).
+        {
+          const fromResidual = Math.max(0, held - fromConsumed);
+          if (fromResidual > 0 && f2.volExec < legVolume) {
+            let swept = 0;
+            try {
+              const sw = await marketFill(legIdx, `${legLabel} residual sweep`, "sell", fromResidual, pairFrom);
+              residualSweepUsd += Math.max(0, sw.cost - sw.fee);
+              totalFees += sw.fee;
+              swept = sw.volExec;
+            } catch (e) {
+              if (e instanceof IndeterminateOrderError) throw e;
+              log.info(`${legLabel} residual sweep failed (${fromResidual.toFixed(8)} ${from}): ${(e as Error).message}`);
+            }
+            // Anything above dust left unswept → the trade cannot be verified.
+            if (fromResidual - swept > held * DUST_FRAC) {
+              unresolvedResidual = true;
+              log.error(`${legLabel} residual UNRESOLVED: ${(fromResidual - swept).toFixed(8)} ${from} remains on account — trade will be recorded as estimated, not verified`);
+            }
+          }
+        }
+        legsCompleted = legIdx;
       }
-      legsCompleted = 2;
-    }
+      held = acquired;
 
-    // Cooperative KILL check before the final leg (see leg-2 check above).
-    if (lockGen != null && !liveLockOwned(lockGen)) {
-      const unwound = bHeld > 0 ? await tryUnwindMarket(creds, "sell", bHeld, pairB, `sell ${assetB} (lock revoked before leg 3)`, log, { records: legFillRecords, leg: 2 }) : true;
-      throw new Error(`Execution lock revoked (KILL/HARD RESET) — aborted before leg 3; held inventory ${unwound ? "unwound" : "UNWIND FAILED — position still held, reconcile manually"}.`);
+      // Cooperative KILL check before committing more capital on the next leg.
+      if (lockGen != null && !liveLockOwned(lockGen)) {
+        const unwound = held > 0 ? await tryUnwindMarket(creds, "sell", held, pairTo, `sell ${to} (lock revoked before leg ${legIdx + 1})`, log, { records: legFillRecords, leg: legIdx }) : true;
+        throw new Error(`Execution lock revoked (KILL/HARD RESET) — aborted before leg ${legIdx + 1}; held inventory ${unwound ? "unwound" : "UNWIND FAILED — position still held, reconcile manually"}.`);
+      }
     }
+    const bHeld = held; // amount of chain[last] entering the final USD leg
 
-    // ── Leg 3: sell B for USD. Post-only limit at best ask → maker fee ───────
+    // ── Final leg: sell chain[last] for USD. Post-only at best ask → maker fee ─
+    const finalIdx = legsTotal; // 1-based leg number of the USD exit leg
+    const finalLabel = `leg${finalIdx}`;
     let f3: AggFill = { volExec: 0, cost: 0, fee: 0, txid: "" };
     try {
       if (takerOnly) throw new TakerOnlySkip(); // straight to the market completion below
-      f3 = await fillLeg(3, "leg3", { ...l3, volume: bHeld }, () => freshJoinPrice(l3.pair, l3.side));
-      leg3Id = f3.txid;
+      f3 = await fillLeg(finalIdx, finalLabel, { ...lastSpec, volume: bHeld }, () => freshJoinPrice(lastSpec.pair, lastSpec.side));
+      legIds[finalIdx - 1] = f3.txid;
     } catch (e) {
       // Indeterminate order state: do NOT unwind on assumed volumes.
       if (e instanceof IndeterminateOrderError) throw e;
       if (e instanceof LockRevokedError) {
-        // Revoked mid-rest on the final leg: selling the remaining B is the
-        // unwind itself — do it, then abort with the revocation surfaced.
+        // Revoked mid-rest on the final leg: selling the remaining inventory
+        // is the unwind itself — do it, then abort with the revocation surfaced.
         const soldR = e.fill?.volExec ?? 0;
         const bRemaining = Math.max(0, bHeld - soldR);
-        if (bRemaining > 0) await tryUnwindMarket(creds, "sell", bRemaining, pairB, `sell remaining ${assetB} (leg3 lock revoked)`, log, { records: legFillRecords, leg: 2 });
+        if (bRemaining > 0) await tryUnwindMarket(creds, "sell", bRemaining, pairLast, `sell remaining ${last} (${finalLabel} lock revoked)`, log, { records: legFillRecords, leg: finalIdx - 1 });
         throw e;
       }
-      // Nothing placed — fall through to the taker fallback: selling B at
+      // Nothing placed — fall through to the taker fallback: selling at
       // market IS the intended trade here, not an unwind.
-      if (!(e instanceof TakerOnlySkip)) log.info(`leg3 maker attempt placed nothing (${(e as Error).message}) — completing at market`);
+      if (!(e instanceof TakerOnlySkip)) log.info(`${finalLabel} maker attempt placed nothing (${(e as Error).message}) — completing at market`);
     }
     {
-      // Taker fallback: sell any remaining B at market — identical action to
+      // Taker fallback: sell any remainder at market — identical action to
       // the "unwind", but accounted as completing the cycle.
       if (f3.volExec < bHeld * FILL_TOLERANCE) {
         try {
-          const m = await marketFill(3, "leg3", l3.side, bHeld - f3.volExec, l3.pair);
+          const m = await marketFill(finalIdx, finalLabel, lastSpec.side, bHeld - f3.volExec, lastSpec.pair);
           f3.volExec += m.volExec; f3.cost += m.cost; f3.fee += m.fee;
-          leg3Id = [leg3Id, m.txid].filter(Boolean).join(",");
+          legIds[finalIdx - 1] = [legIds[finalIdx - 1], m.txid].filter(Boolean).join(",");
         } catch (e) {
           if (e instanceof IndeterminateOrderError) throw e;
-          log.error(`leg3 taker fallback failed: ${(e as Error).message}`);
+          log.error(`${finalLabel} taker fallback failed: ${(e as Error).message}`);
         }
       }
       usdReceived = Math.max(0, f3.cost - f3.fee) + residualSweepUsd;
       totalFees += f3.fee;
       const bResidual = Math.max(0, bHeld - f3.volExec);
       if (f3.volExec < bHeld * FILL_TOLERANCE) {
-        // Sell the residual B; report as a partial (failed) execution, not success.
-        if (bResidual > 0) await tryUnwindMarket(creds, "sell", bResidual, pairB, `sell residual ${assetB} (partial leg3)`, log, { records: legFillRecords, leg: 2 });
-        throw new Error(`Leg 3 partially filled (${f3.volExec.toFixed(8)}/${bHeld.toFixed(8)} ${assetB}); residual sold via unwind. USD received so far: $${usdReceived.toFixed(4)}.`);
+        // Sell the residual; report as a partial (failed) execution, not success.
+        if (bResidual > 0) await tryUnwindMarket(creds, "sell", bResidual, pairLast, `sell residual ${last} (partial ${finalLabel})`, log, { records: legFillRecords, leg: finalIdx - 1 });
+        throw new Error(`Leg ${finalIdx} partially filled (${f3.volExec.toFixed(8)}/${bHeld.toFixed(8)} ${last}); residual sold via unwind. USD received so far: $${usdReceived.toFixed(4)}.`);
       }
-      // Tolerance-accepted partial: sweep leftover B to USD at market with a
+      // Tolerance-accepted partial: sweep the leftover to USD at market with a
       // confirmed fill so proceeds count in realized P&L (dust just stays).
       if (bResidual > 0) {
         let sweptB = 0;
         try {
-          const sw = await marketFill(3, "leg3 residual sweep", "sell", bResidual, pairB);
+          const sw = await marketFill(finalIdx, `${finalLabel} residual sweep`, "sell", bResidual, lastSpec.pair);
           usdReceived += Math.max(0, sw.cost - sw.fee);
           totalFees += sw.fee;
           sweptB = sw.volExec;
         } catch (e) {
           if (e instanceof IndeterminateOrderError) throw e;
-          log.info(`leg3 residual sweep failed (${bResidual.toFixed(8)} ${assetB}): ${(e as Error).message}`);
+          log.info(`${finalLabel} residual sweep failed (${bResidual.toFixed(8)} ${last}): ${(e as Error).message}`);
         }
         if (bResidual - sweptB > bHeld * DUST_FRAC) {
           unresolvedResidual = true;
-          log.error(`leg3 residual UNRESOLVED: ${(bResidual - sweptB).toFixed(8)} ${assetB} remains on account — trade will be recorded as estimated, not verified`);
+          log.error(`${finalLabel} residual UNRESOLVED: ${(bResidual - sweptB).toFixed(8)} ${last} remains on account — trade will be recorded as estimated, not verified`);
         }
       }
-      legsCompleted = 3;
+      legsCompleted = finalIdx;
     }
 
     // Realized P&L from actual fills, fee-inclusive (cost fields exclude fees;
@@ -1942,8 +1989,9 @@ async function runKrakenTriangle(input: TriangleExecInput, reqLog: ReqLog): Prom
     // legs must have a confirmed fill record with a real txid and volume —
     // not just bookkeeping flags and order IDs.
     const legEvidence = (leg: number) => legFillRecords.some(f => f.leg === leg && !f.unwind && f.volume > 0 && !!f.txid);
-    const fullyVerified = legsCompleted === 3 && !!leg1Id && !!leg2Id && !!leg3Id && usdSpent > 0 && usdReceived > 0
-      && legEvidence(1) && legEvidence(2) && legEvidence(3)
+    const allLegNums = Array.from({ length: legsTotal }, (_, i) => i + 1);
+    const fullyVerified = legsCompleted === legsTotal && legIds.every(id => !!id) && usdSpent > 0 && usdReceived > 0
+      && allLegNums.every(legEvidence)
       // A tolerance-accepted partial with non-dust inventory left on account
       // has an incomplete USD round trip — never "verified" realized P&L.
       && !unresolvedResidual;
@@ -1958,14 +2006,14 @@ async function runKrakenTriangle(input: TriangleExecInput, reqLog: ReqLog): Prom
       isDryRun: false,
       krakenPrice: "0",
       coinbasePrice: "0",
-      buyOrderId: leg1Id || null,
-      sellOrderId: leg3Id || null,
+      buyOrderId: legIds[0] || null,
+      sellOrderId: legIds[legsTotal - 1] || null,
       status: fullyVerified ? "verified" : "estimated",
       realizedProfitUsd: fullyVerified ? realizedProfit.toFixed(6) : null,
       legFills: legFillRecords,
     });
-    reqLog.info({ route, tradeSizeUsd, realizedProfit, usdSpent, usdReceived, totalFees, leg1Id, leg2Id, leg3Id }, "OB manual execute LIVE");
-    return { body: { success: true, isDryRun: false, executed: true, route, preflightProfitUsd: realizedProfit, leg1OrderId: leg1Id, leg2OrderId: leg2Id, leg3OrderId: leg3Id, legsFilled: legsCompleted } };
+    reqLog.info({ route, tradeSizeUsd, realizedProfit, usdSpent, usdReceived, totalFees, legIds }, "OB manual execute LIVE");
+    return { body: { success: true, isDryRun: false, executed: true, route, preflightProfitUsd: realizedProfit, leg1OrderId: legIds[0] || null, leg2OrderId: legIds[1] || null, leg3OrderId: legIds[2] || null, leg4OrderId: legIds[3] || null, legsFilled: legsCompleted } };
   } catch (err) {
     reqLog.error({ err, route }, "OB manual execute error");
     // FAILED ledger row — a live route that placed ANY order but did not
@@ -1973,8 +2021,9 @@ async function runKrakenTriangle(input: TriangleExecInput, reqLog: ReqLog): Prom
     // reconciliation), never as a profitable trade.
     if (!isDryRun && (failCtx.legFills.length > 0 || failCtx.acceptedOrders.length > 0)) {
       try {
+        const finalLegNum = chain.length + 1;
         const l1Fills = failCtx.legFills.filter(f => f.leg === 1);
-        const l3Fills = failCtx.legFills.filter(f => f.leg === 3);
+        const l3Fills = failCtx.legFills.filter(f => f.leg === finalLegNum);
         // Include accepted-but-unconfirmed orders (zero fill / indeterminate)
         // as zero-volume evidence rows so no accepted order vanishes.
         const filledTxids = new Set(failCtx.legFills.map(f => f.txid));
@@ -1989,7 +2038,7 @@ async function runKrakenTriangle(input: TriangleExecInput, reqLog: ReqLog): Prom
           netEdgePct: "0",
           isDryRun: false, krakenPrice: "0", coinbasePrice: "0",
           buyOrderId: (l1Fills.map(f => f.txid).filter(Boolean).join(",") || failCtx.acceptedOrders.filter(o => o.leg === 1).map(o => o.txid).join(",")) || null,
-          sellOrderId: (l3Fills.map(f => f.txid).filter(Boolean).join(",") || failCtx.acceptedOrders.filter(o => o.leg === 3).map(o => o.txid).join(",")) || null,
+          sellOrderId: (l3Fills.map(f => f.txid).filter(Boolean).join(",") || failCtx.acceptedOrders.filter(o => o.leg === finalLegNum).map(o => o.txid).join(",")) || null,
           // Zero confirmed fills → nothing moved → realized is exactly $0.
           // With partial fills the net USD effect is unknown (unwinds aren't
           // reconciled yet) → null, rendered as "—", never an estimate.

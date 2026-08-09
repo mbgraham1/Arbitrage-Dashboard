@@ -23,6 +23,11 @@ export interface ObExecuteResult {
   leg2OrderId?: string | null;
   /** @nullable */
   leg3OrderId?: string | null;
+  /**
+     * v21 — final-leg order id for 4-leg routes (null on triangles)
+     * @nullable
+     */
+  leg4OrderId?: string | null;
   /** @nullable */
   error?: string | null;
 }

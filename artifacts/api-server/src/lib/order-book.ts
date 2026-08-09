@@ -669,6 +669,8 @@ export interface ObCycleEntry {
   confidencePct: number;
   /** v20: number of legs in the route — 3 (USD→A→B→USD) or 4 (USD→A→M→B→USD) */
   legs: number;
+  /** v21: full asset chain between the USD legs, e.g. [A] crosses [B] or [A, M1, M2] — pass to ob-execute for 4-leg routes */
+  path: string[];
 }
 
 /** v18: scaling analysis status at a given trade size. */
@@ -907,14 +909,119 @@ export interface ObPreflightResult {
   volumeB: number;
 }
 
+/** Generic path pre-flight result: one execution leg per hop (USD entry,
+ *  crosses, USD exit) plus the per-asset holdings chain used for sizing. */
+export interface ObPathPreflightResult {
+  profitUsd: number;
+  slippagePct: number;
+  confidencePct: number;
+  /** path.length + 1 orientation-aware legs ready for AddOrder. */
+  legs: ObExecutionLeg[];
+  /** volumes[i] = amount of path[i] held after acquiring it (pricing-model based). */
+  volumes: number[];
+}
+
 /**
- * v18 manual-execute pre-flight: re-fetches FRESH order books (cache bypassed)
- * for the route's three pairs and re-simulates at the given size.
- * Returns null when books can't be fetched or depth can't absorb the size.
- *
- * NOTE: the Python v18 button sizes leg 2 as an unconditional "sell" of vol_A
- * and leg 3 with `vol × profit/size` — both wrong (ignores cross orientation).
- * We derive all three legs from the simulation instead.
+ * v21 generic manual-execute pre-flight for a USD-anchored asset path
+ * (USD→path[0]→…→path[last]→USD). Re-fetches FRESH order books (cache
+ * bypassed) for every pair in the route and re-simulates at the given size.
+ * Supports 3-leg triangles ([A, B]) and 4-leg routes ([A, M1, M2]).
+ * Returns null when books can't be fetched, a cross pair is missing, or
+ * depth can't absorb the size.
+ */
+export async function preflightObPath(
+  path: ObAsset[],
+  sizeUsd: number,
+  feesPct: number,
+  pricing: "maker" | "taker" = "taker",
+  /** Trader's freshness window: when set, ALL legs must come from the live
+   *  stream within this age (exchange-timestamp based) — REST is never used
+   *  and one stale leg fails the whole preflight (returns null). */
+  maxQuoteAgeMs?: number,
+): Promise<ObPathPreflightResult | null> {
+  if (path.length < 2 || path.length > 3) return null; // 3- and 4-leg routes only
+  // v19: use the same dynamically-discovered cross map so preflight covers
+  // pairs that aren't in the hardcoded fallback.
+  const { lookup: activeLookup } = await discoverCrossPairs();
+  const crosses: CrossRoute[] = [];
+  for (let i = 0; i < path.length - 1; i++) {
+    const c = activeLookup.get(`${path[i]}-${path[i + 1]}`);
+    if (!c) return null;
+    crosses.push(c);
+  }
+  const pairFirst = OB_USD_PAIRS[path[0]!];
+  const pairLast  = OB_USD_PAIRS[path[path.length - 1]!];
+  const pairKeys  = [pairFirst, ...crosses.map(c => c.pair), pairLast];
+
+  // Freshest books: strict mode (maxQuoteAgeMs set) = stream-only within the
+  // trader's window, any stale leg → whole route stale (null). Legacy mode =
+  // stream <400ms or cache-bypassing REST.
+  const strict = maxQuoteAgeMs != null;
+  const winMs = maxQuoteAgeMs ?? 400;
+  const snaps = await Promise.all(pairKeys.map(p => bookSnapshot(p, winMs, !strict)));
+  if (snaps.some(s => !s)) return null;
+  const books = new Map<string, OrderBook>();
+  pairKeys.forEach((p, i) => { if (!books.has(p)) books.set(p, snaps[i]!.book); });
+
+  const sim = simulatePath(path, sizeUsd, books, feesPct, activeLookup);
+  if (!sim) return null;
+
+  // Post-only limit prices: buys rest at best bid, sells rest at best ask.
+  // (Post-only order is rejected if it would cross the spread, so buy price
+  //  must be ≤ current best bid to queue as a maker — never at or above ask.)
+  const obFirst = books.get(pairFirst)!;
+  const obLast  = books.get(pairLast)!;
+  const priceBuyFirst = obFirst.bids[0]![0]; // leg 1: buy path[0] — join top bid
+  const priceSellLast = obLast.asks[0]![0];  // final leg: sell path[last] — join top ask
+  const crossPrices = crosses.map(c => {
+    const ob = books.get(c.pair)!;
+    return c.aIsQuote ? ob.bids[0]![0] : ob.asks[0]![0]; // buy joins bid, sell joins ask
+  });
+  const buildLegs = (volumes: number[]): ObExecutionLeg[] => [
+    { pair: pairFirst, side: "buy", volume: volumes[0]!, limitPrice: priceBuyFirst },
+    ...crosses.map((c, i): ObExecutionLeg => c.aIsQuote
+      ? { pair: c.pair, side: "buy",  volume: volumes[i + 1]!, limitPrice: crossPrices[i]! }
+      : { pair: c.pair, side: "sell", volume: volumes[i]!,     limitPrice: crossPrices[i]! }),
+    { pair: pairLast, side: "sell", volume: volumes[volumes.length - 1]!, limitPrice: priceSellLast },
+  ];
+
+  // MAKER pricing: the orders are POST-ONLY limits resting at the join
+  // prices — they fill at limitPrice or not at all. Simulating profit with the
+  // taker depth-walk (avg ask/bid VWAP) systematically understates the edge by
+  // the spread, rejecting routes the maker scanner correctly ranked viable.
+  // Recompute volumes and profit from the actual limit prices, zero slippage.
+  if (pricing === "maker") {
+    const volumes: number[] = [sizeUsd / priceBuyFirst];
+    for (let i = 0; i < crosses.length; i++) {
+      const v = volumes[i]!;
+      volumes.push(crosses[i]!.aIsQuote ? v / crossPrices[i]! : v * crossPrices[i]!);
+    }
+    const usdFinal = volumes[volumes.length - 1]! * priceSellLast;
+    const gross    = usdFinal - sizeUsd;
+    // Per-leg fee on each leg's ACTUAL notional (USD value of assets exchanged):
+    // entry leg = sizeUsd; exit leg = usdFinal. Cross-leg notional is the USD
+    // value of what changes hands there: buying base with the held quote
+    // (aIsQuote) the amount spent is worth ~sizeUsd; selling the held base
+    // (!aIsQuote) the quote received is worth ~usdFinal.
+    const crossNotionalUsd = crosses.reduce((s, c) => s + (c.aIsQuote ? sizeUsd : usdFinal), 0);
+    const feeUsd = (feesPct / 100) * (sizeUsd + crossNotionalUsd + usdFinal); // per-leg on notional
+    return { profitUsd: gross - feeUsd, slippagePct: 0, confidencePct: sim.confidencePct, legs: buildLegs(volumes), volumes };
+  }
+
+  // TAKER pricing: holdings chain from the depth-walk VWAPs. Cross legDiag
+  // vwapPx is quote-per-base for buys (from per to) and to-per-from for sells.
+  const volumes: number[] = [sim.volA];
+  for (let i = 0; i < crosses.length; i++) {
+    const d = sim.legDiag[i + 1]!;
+    const v = volumes[i]!;
+    volumes.push(crosses[i]!.aIsQuote ? v / d.vwapPx : v * d.vwapPx);
+  }
+  return { profitUsd: sim.profitUsd, slippagePct: sim.slippagePct, confidencePct: sim.confidencePct, legs: buildLegs(volumes), volumes };
+}
+
+/**
+ * v18 3-leg manual-execute pre-flight — thin wrapper over preflightObPath
+ * preserving the triangle-shaped result for existing callers.
  */
 export async function preflightObCycle(
   assetA: ObAsset,
@@ -922,82 +1029,18 @@ export async function preflightObCycle(
   sizeUsd: number,
   feesPct: number,
   pricing: "maker" | "taker" = "taker",
-  /** Trader's freshness window: when set, ALL THREE legs must come from the
-   *  live stream within this age (exchange-timestamp based) — REST is never
-   *  used and one stale leg fails the whole preflight (returns null). */
   maxQuoteAgeMs?: number,
 ): Promise<ObPreflightResult | null> {
-  // v19: use the same dynamically-discovered cross map so preflight covers
-  // pairs that aren't in the hardcoded fallback.
-  const { lookup: activeLookup } = await discoverCrossPairs();
-  const cross = activeLookup.get(`${assetA}-${assetB}`);
-  if (!cross) return null;
-  const pairA = OB_USD_PAIRS[assetA];
-  const pairB = OB_USD_PAIRS[assetB];
-
-  // Freshest books: strict mode (maxQuoteAgeMs set) = stream-only within the
-  // trader's window, any stale leg → whole route stale (null). Legacy mode =
-  // stream <400ms or cache-bypassing REST.
-  const strict = maxQuoteAgeMs != null;
-  const winMs = maxQuoteAgeMs ?? 400;
-  const [sA, sX, sB] = await Promise.all([
-    bookSnapshot(pairA, winMs, !strict), bookSnapshot(cross.pair, winMs, !strict), bookSnapshot(pairB, winMs, !strict),
-  ]);
-  if (!sA || !sX || !sB) return null;
-  const [obA, obX, obB] = [sA.book, sX.book, sB.book];
-
-  const books = new Map<string, OrderBook>([[pairA, obA], [cross.pair, obX], [pairB, obB]]);
-  const sim = simulateCycle(assetA, assetB, sizeUsd, books, feesPct, activeLookup);
-  if (!sim) return null;
-
-  const volumeA = sim.volA;
-  const volumeB = sim.volA * sim.avg2; // B acquired in leg 2 (avg2 = B per A)
-
-  // Post-only limit prices: buys rest at best bid, sells rest at best ask.
-  // (Post-only order is rejected if it would cross the spread, so buy price
-  //  must be ≤ current best bid to queue as a maker — never at or above ask.)
-  const priceBuyA   = obA.bids[0]![0];   // leg 1: buy A — join top bid
-  const priceCross  = cross.aIsQuote
-    ? obX.bids[0]![0]                     // buy B on B/A cross — join top bid
-    : obX.asks[0]![0];                    // sell A on A/B cross — join top ask
-  const priceSellB  = obB.asks[0]![0];   // leg 3: sell B — join top ask
-
-  // MAKER pricing: the orders below are POST-ONLY limits resting at the join
-  // prices — they fill at limitPrice or not at all. Simulating profit with the
-  // taker depth-walk (avg ask/bid VWAP) systematically understates the edge by
-  // the spread, rejecting routes the maker scanner correctly ranked viable.
-  // Recompute volumes and profit from the actual limit prices, zero slippage.
-  if (pricing === "maker") {
-    const mVolumeA = sizeUsd / priceBuyA;
-    const mVolumeB = cross.aIsQuote ? mVolumeA / priceCross : mVolumeA * priceCross;
-    const usdFinal = mVolumeB * priceSellB;
-    const gross    = usdFinal - sizeUsd;
-    // Per-leg fee on each leg's ACTUAL notional (USD value of assets exchanged):
-    // leg 1 notional = sizeUsd; leg 3 notional = usdFinal. Cross-leg notional is
-    // the USD value of what changes hands there: buying B with A (aIsQuote) the
-    // A spent is worth ~sizeUsd; selling A for B (!aIsQuote) the B received is
-    // worth ~usdFinal. Previously hard-coded sizeUsd for both orientations.
-    const crossNotionalUsd = cross.aIsQuote ? sizeUsd : usdFinal;
-    const feeUsd   = (feesPct / 100) * (sizeUsd + crossNotionalUsd + usdFinal); // per-leg on notional
-    const legs: [ObExecutionLeg, ObExecutionLeg, ObExecutionLeg] = [
-      { pair: pairA,      side: "buy",                       volume: mVolumeA, limitPrice: priceBuyA  },
-      cross.aIsQuote
-        ? { pair: cross.pair, side: "buy",  volume: mVolumeB, limitPrice: priceCross }
-        : { pair: cross.pair, side: "sell", volume: mVolumeA, limitPrice: priceCross },
-      { pair: pairB,      side: "sell",                      volume: mVolumeB, limitPrice: priceSellB },
-    ];
-    return { profitUsd: gross - feeUsd, slippagePct: 0, confidencePct: sim.confidencePct, legs, volumeA: mVolumeA, volumeB: mVolumeB };
-  }
-
-  const legs: [ObExecutionLeg, ObExecutionLeg, ObExecutionLeg] = [
-    { pair: pairA,      side: "buy",                      volume: volumeA, limitPrice: priceBuyA  },
-    cross.aIsQuote
-      ? { pair: cross.pair, side: "buy",  volume: volumeB, limitPrice: priceCross }
-      : { pair: cross.pair, side: "sell", volume: volumeA, limitPrice: priceCross },
-    { pair: pairB,      side: "sell",                     volume: volumeB, limitPrice: priceSellB },
-  ];
-
-  return { profitUsd: sim.profitUsd, slippagePct: sim.slippagePct, confidencePct: sim.confidencePct, legs, volumeA, volumeB };
+  const pf = await preflightObPath([assetA, assetB], sizeUsd, feesPct, pricing, maxQuoteAgeMs);
+  if (!pf) return null;
+  return {
+    profitUsd: pf.profitUsd,
+    slippagePct: pf.slippagePct,
+    confidencePct: pf.confidencePct,
+    legs: pf.legs as [ObExecutionLeg, ObExecutionLeg, ObExecutionLeg],
+    volumeA: pf.volumes[0]!,
+    volumeB: pf.volumes[1]!,
+  };
 }
 
 /** Pre-fire taker breakdown: raw top-of-book edge, depth-walk slippage cost,
@@ -1322,6 +1365,7 @@ export async function scanOrderBookCycles(
       status,
       confidencePct:       r.confidencePct,
       legs:                r.legs,
+      path:                [...path],
     });
   };
 

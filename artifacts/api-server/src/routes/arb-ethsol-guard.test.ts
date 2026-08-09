@@ -99,13 +99,24 @@ vi.mock("@workspace/api-zod", async (importOriginal) => {
   return mod;
 });
 
-vi.mock("../lib/order-book.js", () => ({
+vi.mock("../lib/order-book.js", () => {
+  // v21: the executor pre-flights via the path-based preflightObPath; these
+  // tests stub the triangle-shaped preflightObCycle, so this adapter delegates
+  // and converts the result shape ({volumeA, volumeB} -> volumes[]).
+  const preflightObCycle = vi.fn();
+  const preflightObPath = vi.fn(async (path: string[], ...rest: unknown[]) => {
+    const r = await (preflightObCycle as unknown as (...a: unknown[]) => Promise<Record<string, unknown> | null>)(path[0], path[1], ...rest);
+    return r ? { ...r, volumes: [r["volumeA"], r["volumeB"]] } : r;
+  });
+  return {
   scanOrderBookCycles: vi.fn(() => Promise.resolve({ cycles: [] })),
-  preflightObCycle:    vi.fn(),
+  preflightObCycle,
+  preflightObPath,
   OB_ASSETS:           [] as string[],
   OB_USD_PAIRS:        {} as Record<string, string>,
   CROSS_LOOKUP:        new Map(),
-}));
+  };
+});
 
 vi.mock("../lib/graph-engine.js", () => ({
   scanGraphOpportunities: vi.fn(() => Promise.resolve({ routes: [] })),

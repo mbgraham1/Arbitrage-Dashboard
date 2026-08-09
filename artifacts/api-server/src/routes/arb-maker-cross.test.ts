@@ -96,9 +96,19 @@ vi.mock("@workspace/db", () => {
   };
 });
 
-vi.mock("../lib/order-book.js", () => ({
+vi.mock("../lib/order-book.js", () => {
+  // v21: the executor pre-flights via the path-based preflightObPath; these
+  // tests stub the triangle-shaped preflightObCycle, so this adapter delegates
+  // and converts the result shape ({volumeA, volumeB} -> volumes[]).
+  const preflightObCycle = vi.fn();
+  const preflightObPath = vi.fn(async (path: string[], ...rest: unknown[]) => {
+    const r = await (preflightObCycle as unknown as (...a: unknown[]) => Promise<Record<string, unknown> | null>)(path[0], path[1], ...rest);
+    return r ? { ...r, volumes: [r["volumeA"], r["volumeB"]] } : r;
+  });
+  return {
   scanOrderBookCycles: vi.fn(() => Promise.resolve({ cycles: [] })),
-  preflightObCycle:    vi.fn(),
+  preflightObCycle,
+  preflightObPath,
   discoverCrossPairs:  vi.fn(() => Promise.resolve({ lookup: new Map() })),
   freshJoinPrice:      vi.fn(() => Promise.resolve(150.0)),
   waitForBookTouch:    vi.fn(() => Promise.resolve(false)),
@@ -106,7 +116,8 @@ vi.mock("../lib/order-book.js", () => ({
   OB_ASSETS:           ["SOL"] as string[],
   OB_USD_PAIRS:        { SOL: "SOLUSD" } as Record<string, string>,
   CROSS_LOOKUP:        new Map(),
-}));
+  };
+});
 
 // Executor-grade cross pre-fire dependency: LIVE stream books on both venues.
 // Default fixture is FRESH and PROFITABLE so the containment tests below reach

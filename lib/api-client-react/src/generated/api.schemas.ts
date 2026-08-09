@@ -340,6 +340,8 @@ export interface ObCycleEntry {
   confidencePct: number;
   /** v20 — number of legs in the route: 3 (USD→A→B→USD) or 4 (USD→A→M→B→USD via the BTC/ETH cross) */
   legs: number;
+  /** v21 — full asset chain between the USD legs (e.g. [A, B] or [A, M1, M2]); pass to ob-execute so 4-leg routes execute all hops */
+  path?: string[];
 }
 
 /**
@@ -432,6 +434,8 @@ export interface ObExecuteRequest {
   /** Asset A of the displayed top route (server re-verifies via fresh pre-flight) */
   assetA: string;
   assetB: string;
+  /** v21 — full asset chain between the USD legs (e.g. [SOL, BTC, ETH] for USD→SOL→BTC→ETH→USD). When present (length ≥ 2) it overrides assetA/assetB and the executor places one order per hop (4 orders for a 4-leg route). Omitted → classic [assetA, assetB] triangle. */
+  path?: string[];
   tradeSizeUsd?: number;
   feesPct?: number;
   /** Min net profit ($) at $10; pre-flight gate scales it by size/10 */
@@ -2176,6 +2180,11 @@ export interface ObExecuteResult {
   leg2OrderId?: string | null;
   /** @nullable */
   leg3OrderId?: string | null;
+  /**
+     * v21 — final-leg order id for 4-leg routes (null on triangles)
+     * @nullable
+     */
+  leg4OrderId?: string | null;
   /** @nullable */
   error?: string | null;
 }

@@ -86,9 +86,19 @@ vi.mock("../lib/exchange.js", () => ({
   PAIRS: ["SOL/USD"] as string[],
 }));
 
-vi.mock("../lib/order-book.js", () => ({
+vi.mock("../lib/order-book.js", () => {
+  // v21: the executor pre-flights via the path-based preflightObPath; these
+  // tests stub the triangle-shaped preflightObCycle, so this adapter delegates
+  // and converts the result shape ({volumeA, volumeB} -> volumes[]).
+  const preflightObCycle = vi.fn();
+  const preflightObPath = vi.fn(async (path: string[], ...rest: unknown[]) => {
+    const r = await (preflightObCycle as unknown as (...a: unknown[]) => Promise<Record<string, unknown> | null>)(path[0], path[1], ...rest);
+    return r ? { ...r, volumes: [r["volumeA"], r["volumeB"]] } : r;
+  });
+  return {
   scanOrderBookCycles: vi.fn(() => Promise.resolve({ cycles: [] })),
-  preflightObCycle:    vi.fn(),
+  preflightObCycle,
+  preflightObPath,
   discoverCrossPairs:  vi.fn(() => Promise.resolve({ lookup: new Map(), crossMap: [], cachedAt: 1 })),
   freshJoinPrice:      vi.fn(() => Promise.resolve(null)),
   makerQuote:          vi.fn(() => Promise.resolve(null)),
@@ -102,7 +112,8 @@ vi.mock("../lib/order-book.js", () => ({
   OB_ASSETS:           ["BTC", "ETH", "SOL"] as string[],
   OB_USD_PAIRS:        { BTC: "XXBTZUSD", ETH: "XETHZUSD", SOL: "SOLUSD" } as Record<string, string>,
   CROSS_LOOKUP:        new Map(),
-}));
+  };
+});
 
 vi.mock("../lib/graph-engine.js", () => ({
   scanGraphOpportunities: vi.fn(),

@@ -82,14 +82,20 @@ describe("OB auto-executor gate (maybeAutoExecuteOb)", () => {
     }
   });
 
-  it("skips non-READY, 4-leg, and below-floor cycles even when the gate is open", () => {
+  it("skips non-READY and below-floor cycles even when the gate is open", () => {
     const execute = vi.fn();
     const cycles = [
       { ...readyCycle, status: "HIGH_SLIPPAGE" },
-      { ...readyCycle, legs: 4 },
       { ...readyCycle, estimatedProfitUsd: 0.01 },
     ] as ObCycleEntry[];
     expect(maybeAutoExecuteOb(baseParams({ cycles, execute }))).toBe(false);
     expect(execute).not.toHaveBeenCalled();
+  });
+
+  it("v21: executes a READY 4-leg route above the floor (executor places one order per hop)", () => {
+    const execute = vi.fn();
+    const fourLeg = { ...readyCycle, legs: 4, route: "USD→SOL→BTC→ETH→USD", path: ["SOL", "BTC", "ETH"] } as ObCycleEntry;
+    expect(maybeAutoExecuteOb(baseParams({ cycles: [fourLeg], execute }))).toBe(true);
+    expect(execute).toHaveBeenCalledWith(fourLeg);
   });
 });
