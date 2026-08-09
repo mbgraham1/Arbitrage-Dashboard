@@ -45,6 +45,7 @@ import {
   quantizeDown,
   PAIRS,
   type Pair,
+  bindLockHeartbeat,
 } from "../lib/exchange";
 import { geminiVerify, type GeminiCreds, type GeminiAccount } from "../lib/gemini";
 import {
@@ -56,7 +57,7 @@ import {
   isExplicitGeminiReject,
   type GeminiSymbolDetails,
 } from "../lib/gemini-exec";
-import { tryAcquireSharedLiveLock, releaseLiveLock, touchLiveLock, liveLockOwned } from "./arb";
+import { tryAcquireSharedLiveLock, releaseLiveLock, touchLiveLock, liveLockOwned, liveLockHeartbeat } from "./arb";
 
 const router: IRouter = Router();
 
@@ -685,6 +686,7 @@ async function executeXvCycle(b: z.infer<typeof ExecuteBody>, log: XvLogger): Pr
     // 5. Shared live lock — same lock every other executor gates on.
     lockGen = tryAcquireSharedLiveLock();
     if (lockGen == null) { skip("another live executor holds the execution lock", { projection: p }); return out!; }
+    bindLockHeartbeat(liveLockHeartbeat(lockGen));
 
     const tag = `${buyVenue}-buy→${sellVenue}-sell`;
 

@@ -24,7 +24,7 @@ import {
   getKrakenPrice,
   getKrakenBalances,
   krakenCancelAllOrders,
-  setPrivateCallHeartbeat,
+  bindLockHeartbeat,
   krakenPairMeta,
   armLatencyProbe,
   disarmLatencyProbe,
@@ -732,11 +732,17 @@ function liveLockSilentMs(): number {
  *  silence means the holder is dead. Shorter than LIVE_LOCK_STALE_MS (30s)
  *  because the trader has explicitly opted into aggressive behavior. */
 const FORCE_LOCK_STALE_MS = 15_000;
-// Every private exchange call (Kraken AND Coinbase) — including rate-limit
-// backoff sleeps and paced-queue waits — beats the execution-lock heartbeat,
-// so a legitimately waiting executor is never silent long enough (>15s) for
-// FORCE MODE to evict it.
-setPrivateCallHeartbeat(touchLiveLock);
+/** Ownership-scoped heartbeat for the lock holder: executors bind this (via
+ *  bindLockHeartbeat) right after acquiring the lock, so THEIR private
+ *  exchange calls — including rate-limit backoff sleeps and paced-queue
+ *  waits — beat the lock heartbeat every ≤5s and a legitimately waiting
+ *  executor is never silent long enough (>15s) for FORCE MODE to evict it.
+ *  The generation check makes it a no-op the moment ownership is revoked
+ *  (KILL / eviction / release), and calls OUTSIDE the owner's scope beat
+ *  nothing — unrelated traffic can never keep a dead lock alive. */
+export function liveLockHeartbeat(gen: number): () => void {
+  return () => { if (liveLockOwned(gen)) touchLiveLock(); };
+}
 
 /** HARD RESET: force-release the live lock regardless of holder. Bumps the
  *  generation so the evicted holder's finally-release becomes a no-op. */
@@ -1239,6 +1245,7 @@ async function runKrakenTriangle(input: TriangleExecInput, reqLog: ReqLog): Prom
       lockGen = acquireLiveLock();
       ownsLock = true;
     }
+    bindLockHeartbeat(liveLockHeartbeat(lockGen));
     // An ADOPTED lock may already be stale (caller evicted during its own
     // preflight). Verify ownership BEFORE placing any order.
     if (!liveLockOwned(lockGen)) {
@@ -2524,6 +2531,7 @@ router.post("/arb/graph-execute", async (req, res): Promise<void> => {
       return;
     }
     lockGen = acquireLiveLock();
+    bindLockHeartbeat(liveLockHeartbeat(lockGen));
   }
   try {
     // 0. Prefer the account's ACTUAL Kraken fee tier over the caller's
@@ -4462,6 +4470,7 @@ router.post("/arb/cross-mm-execute", async (req, res): Promise<void> => {
       return;
     }
     lockGen = acquireLiveLock();
+    bindLockHeartbeat(liveLockHeartbeat(lockGen));
   }
   try {
     // 1. REAL Kraken maker fee tier for this pair (never assume).
@@ -5437,6 +5446,7 @@ router.post("/arb/inventory-execute", async (req, res): Promise<void> => {
       return;
     }
     lockGen = acquireLiveLock();
+    bindLockHeartbeat(liveLockHeartbeat(lockGen));
 
     const KRAKEN_RAW_PAIRS: Record<string, string> = {
       "BTC/USD": "XXBTZUSD", "ETH/USD": "ETHUSD", "SOL/USD": "SOLUSD",

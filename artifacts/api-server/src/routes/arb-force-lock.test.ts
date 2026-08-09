@@ -3,7 +3,8 @@
  *
  * FORCE MODE evicts the live execution lock only when its heartbeat has been
  * silent > FORCE_LOCK_STALE_MS (15s). Every Kraken private call — including
- * rate-limit backoff sleeps — beats the heartbeat via setPrivateCallHeartbeat.
+ * rate-limit backoff sleeps — beats the OWNER-scoped heartbeat the executor
+ * bound via bindLockHeartbeat(liveLockHeartbeat(gen)) when it took the lock.
  * These tests prove:
  *   1. A heartbeat-LIVE lock (beating ≤5s apart, as during a long rate-limit
  *      backoff) is NEVER force-evicted — a concurrent forceMode graph-execute
@@ -41,6 +42,8 @@ vi.mock("../lib/exchange.js", () => ({
   getKrakenBalances:        vi.fn(() => Promise.resolve([{ currency: "ZUSD", amount: 10_000 }])),
   krakenCancelAllOrders:    vi.fn(() => Promise.resolve(0)),
   setPrivateCallHeartbeat:  vi.fn(),
+  bindLockHeartbeat:        vi.fn(),
+  runWithLockHeartbeat:     vi.fn((_hb: unknown, fn: () => unknown) => fn()),
   krakenPairMeta:           vi.fn(() => Promise.resolve({ ordermin: 0, pairDecimals: 8, lotDecimals: 8 })),
   armLatencyProbe:          vi.fn(() => null),
   disarmLatencyProbe:       vi.fn(),
@@ -183,11 +186,17 @@ const krakenRawMarketOrder   = exchangeModule.krakenRawMarketOrder    as ReturnT
 const krakenOrderInfo        = exchangeModule.krakenOrderInfo         as ReturnType<typeof vi.fn>;
 const krakenCancelOrder      = exchangeModule.krakenCancelOrder       as ReturnType<typeof vi.fn>;
 const krakenCancelAllOrders  = exchangeModule.krakenCancelAllOrders   as ReturnType<typeof vi.fn>;
-const setPrivateCallHeartbeat = exchangeModule.setPrivateCallHeartbeat as ReturnType<typeof vi.fn>;
+const bindLockHeartbeat      = exchangeModule.bindLockHeartbeat       as ReturnType<typeof vi.fn>;
 
-/** The heartbeat the arb router registered at module load (touchLiveLock).
- *  Captured in beforeAll BEFORE clearAllMocks wipes recorded calls. */
-let heartbeat: () => void;
+/** The ownership-scoped heartbeat the executor bound when it acquired the
+ *  live lock (liveLockHeartbeat(gen)) — captured per-test from the mocked
+ *  bindLockHeartbeat. Calling it mirrors what withPrivateLimiter's queue/
+ *  backoff beats do inside the owner's scope. */
+const boundHeartbeat = (): (() => void) => {
+  const call = bindLockHeartbeat.mock.calls.at(-1);
+  if (!call) throw new Error("no lock heartbeat was bound");
+  return call[0] as () => void;
+};
 
 // ── Fixtures ───────────────────────────────────────────────────────────────────
 
@@ -244,8 +253,6 @@ let server: ReturnType<typeof createServer>;
 let baseUrl: string;
 
 beforeAll(async () => {
-  // Registered once at arb.ts module load — grab it before mocks are cleared.
-  heartbeat = setPrivateCallHeartbeat.mock.calls[0]![0] as () => void;
   const app = express();
   app.use(express.json());
   app.use((req, _res, next) => {
@@ -310,6 +317,7 @@ describe("FORCE MODE lock eviction — POST /arb/graph-execute", () => {
 
     // 20s of wall clock pass, but the backoff loop beats the heartbeat every
     // 5s (mirroring withPrivateLimiter's ≤5s beat cadence during backoff).
+    const heartbeat = boundHeartbeat();
     for (let i = 0; i < 4; i++) { advanceClock(5_000); heartbeat(); }
 
     // Concurrent forceMode graph-execute: the lock's heartbeat is RECENT, so

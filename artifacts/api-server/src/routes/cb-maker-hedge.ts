@@ -61,6 +61,7 @@ import {
   quantizeDown,
   PAIRS,
   type Pair,
+  bindLockHeartbeat,
 } from "../lib/exchange";
 import { geminiVerify, type GeminiCreds, type GeminiAccount } from "../lib/gemini";
 import {
@@ -75,7 +76,7 @@ import {
   type GeminiSymbolDetails,
 } from "../lib/gemini-exec";
 import { getGeminiStreamBook, startGeminiBookStream } from "../lib/book-stream";
-import { tryAcquireSharedLiveLock, releaseLiveLock, touchLiveLock, liveLockOwned } from "./arb";
+import { tryAcquireSharedLiveLock, releaseLiveLock, touchLiveLock, liveLockOwned, liveLockHeartbeat } from "./arb";
 
 const router: IRouter = Router();
 
@@ -694,6 +695,7 @@ async function runCbMmCycle(b: CycleParams, log: Logger): Promise<CycleResult> {
     // 4. Shared live lock — same lock every other executor gates on.
     lockGen = tryAcquireSharedLiveLock();
     if (lockGen == null) return finish("skipped", "another live executor holds the execution lock", { projection: projInfo });
+    bindLockHeartbeat(liveLockHeartbeat(lockGen));
 
     // 5. POST-ONLY maker on Coinbase, joining the top of our side.
     const t0 = Date.now();
@@ -994,6 +996,7 @@ async function runVenueMmCycle(b: VenueCycleParams, log: Logger): Promise<VenueC
     // 4. Shared live lock.
     lockGen = tryAcquireSharedLiveLock();
     if (lockGen == null) return finish("skipped", "another live executor holds the execution lock", { projection: projInfo });
+    bindLockHeartbeat(liveLockHeartbeat(lockGen));
 
     // 5. POST-ONLY maker on makerVenue.
     const makerQty = quantVenueQty(makerVenue, proj.makerQty, meta);

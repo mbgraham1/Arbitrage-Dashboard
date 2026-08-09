@@ -44,6 +44,8 @@ vi.mock("../lib/exchange.js", () => ({
   getKrakenBalances:        vi.fn(() => Promise.resolve([{ currency: "ZUSD", amount: 10_000 }])),
   krakenCancelAllOrders:    vi.fn(() => Promise.resolve(0)),
   setPrivateCallHeartbeat:  vi.fn(),
+  bindLockHeartbeat:        vi.fn(),
+  runWithLockHeartbeat:     vi.fn((_hb: unknown, fn: () => unknown) => fn()),
   krakenPairMeta:           vi.fn(() => Promise.resolve({ ordermin: 0, pairDecimals: 8, lotDecimals: 8 })),
   armLatencyProbe:          vi.fn(() => null),
   disarmLatencyProbe:       vi.fn(),

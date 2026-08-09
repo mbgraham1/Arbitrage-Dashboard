@@ -3,6 +3,7 @@
  * Uses only Node.js built-in crypto + fetch (Node 24+).
  */
 import crypto from "node:crypto";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { getStreamTicker } from "./book-stream";
 
 // ---------------------------------------------------------------------------
@@ -224,18 +225,37 @@ export function getKrakenNonceHealth(): KrakenNonceHealth {
  * chain so a read's retry can never block a queued order/unwind behind a
  * multi-second sleep. Reads retry on rate-limit; order mutations never do.
  */
-/** Liveness hook: called on every private-call attempt AND every few seconds
- *  during rate-limit backoff sleeps, so the execution-lock heartbeat never
- *  goes silent while a live executor is legitimately waiting on Kraken.
- *  Registered by the arb router (touches the live execution lock). */
-let privateCallHeartbeat: (() => void) | null = null;
-export function setPrivateCallHeartbeat(fn: () => void): void {
-  privateCallHeartbeat = fn;
+/** Ownership-scoped liveness hook. The heartbeat is carried through an
+ *  AsyncLocalStorage scope bound by the executor that HOLDS the live
+ *  execution lock (see arb.ts liveLockHeartbeat: it checks lock-generation
+ *  ownership and no-ops once revoked). Private calls made INSIDE that scope
+ *  beat the owner's heartbeat on every attempt, every ≤5s during rate-limit
+ *  backoff sleeps, and every 5s while queued behind other paced calls on the
+ *  same key. Private calls made OUTSIDE any scope (dashboard reads, other
+ *  accounts) beat NOTHING — they can never keep a dead execution lock alive
+ *  or shield it from FORCE stale-lock eviction. */
+const lockHeartbeatScope = new AsyncLocalStorage<() => void>();
+/** Bind `hb` as the lock heartbeat for the REMAINDER of the current async
+ *  execution (and everything it awaits/spawns). Call right after acquiring
+ *  the live execution lock; pass an ownership-checked heartbeat so the
+ *  binding self-neutralizes when the lock is revoked or released. */
+export function bindLockHeartbeat(hb: () => void): void {
+  lockHeartbeatScope.enterWith(hb);
 }
-const beat = () => { try { privateCallHeartbeat?.(); } catch { /* never break a call */ } };
+/** Run `fn` with `hb` as the lock heartbeat (scoped variant for callers that
+ *  can wrap their execution body — also the test seam). */
+export function runWithLockHeartbeat<T>(hb: () => void, fn: () => Promise<T>): Promise<T> {
+  return lockHeartbeatScope.run(hb, fn);
+}
+const beat = () => { try { lockHeartbeatScope.getStore()?.(); } catch { /* never break a call */ } };
 
-async function withPrivateLimiter<T>(key: string, fn: () => Promise<T>, retryOnRateLimit: boolean): Promise<T> {
+export async function withPrivateLimiter<T>(key: string, fn: () => Promise<T>, retryOnRateLimit: boolean): Promise<T> {
   const st = limiterFor(key);
+  // Capture the caller's scoped heartbeat ONCE at entry: the queue-beat
+  // interval and chained continuations then beat the exact owner that
+  // initiated this call, regardless of timer/context propagation.
+  const scoped = lockHeartbeatScope.getStore();
+  const beat = () => { try { scoped?.(); } catch { /* never break a call */ } };
   for (let attempt = 0; ; attempt++) {
     // Wait out an open backoff window WITHOUT holding the chain, beating the
     // liveness hook every ≤5s so the lock heartbeat never goes silent.
@@ -260,6 +280,11 @@ async function withPrivateLimiter<T>(key: string, fn: () => Promise<T>, retryOnR
       }
     });
     st.chain = p.catch(() => undefined); // keep the chain alive on failures
+    // Beat periodically while this call is QUEUED behind other paced calls on
+    // this key (and while its HTTP request is in flight). A backed-up serial
+    // queue can otherwise leave >15s of heartbeat silence, letting FORCE-mode
+    // stale-lock eviction kill a healthy run that is merely waiting its turn.
+    const queueBeat = setInterval(beat, 5_000);
     try {
       const out = await p;
       st.backoffMs = 2_000; // healthy call — reset backoff
@@ -269,6 +294,8 @@ async function withPrivateLimiter<T>(key: string, fn: () => Promise<T>, retryOnR
       st.rateLimitedUntil = Date.now() + st.backoffMs;
       st.backoffMs = Math.min(RATE_BACKOFF_MAX_MS, st.backoffMs * 2);
       if (!retryOnRateLimit || attempt >= 2) throw e;
+    } finally {
+      clearInterval(queueBeat);
     }
   }
 }

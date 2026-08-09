@@ -39,8 +39,9 @@ import {
   coinbaseOrderDetails,
   getCoinbaseProductIncrements,
   getCoinbaseBidAsk,
-  quantizeDown, type Pair } from "../lib/exchange";
-import { tryAcquireSharedLiveLock, releaseLiveLock, touchLiveLock, liveLockOwned } from "./arb";
+  quantizeDown, bindLockHeartbeat, type Pair,
+} from "../lib/exchange";
+import { tryAcquireSharedLiveLock, releaseLiveLock, touchLiveLock, liveLockOwned, liveLockHeartbeat } from "./arb";
 
 const router: IRouter = Router();
 
@@ -291,6 +292,7 @@ router.post("/arb/2x-execute", async (req, res): Promise<void> => {
     // 4. Shared live lock — same lock every other executor gates on.
     lockGen = tryAcquireSharedLiveLock();
     if (lockGen == null) { skip("another live executor holds the execution lock", { projection: d }); return; }
+    bindLockHeartbeat(liveLockHeartbeat(lockGen));
 
     // 5. Leg 1: BUY on the cheap venue. Confirmed actual fill = only truth.
     const t0 = Date.now();

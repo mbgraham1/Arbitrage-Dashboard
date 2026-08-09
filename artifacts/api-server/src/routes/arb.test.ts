@@ -41,6 +41,8 @@ vi.mock("../lib/exchange.js", () => ({
   ])),
   krakenCancelAllOrders:    vi.fn(() => Promise.resolve(0)),
   setPrivateCallHeartbeat:  vi.fn(),
+  bindLockHeartbeat:        vi.fn(),
+  runWithLockHeartbeat:     vi.fn((_hb: unknown, fn: () => unknown) => fn()),
   krakenMarketOrder:        vi.fn(),
   krakenLimitOrder:         vi.fn(),
   krakenRawMarketOrder:     vi.fn(),
