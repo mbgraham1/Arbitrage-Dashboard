@@ -2294,12 +2294,24 @@ async function routeFillStats(style: string, accountId: string): Promise<Map<str
  *    this opportunity doesn't actually execute. Blocks decay: once the last
  *    attempt is over an hour old, the route gets one fresh probe.
  */
-async function routeQualityPenalty(route: string, style: string, tradeSizeUsd: number, accountId: string, currentNetUsd = 0, allowProbe = false): Promise<{ shortfallUsd: number; attempts: number; blockReason: string | null; bigEdgeBypass: boolean; probe: boolean }> {
-  try {
-    const rows = await db.select().from(executionQualityTable)
-      .where(dbAnd(dbEq(executionQualityTable.route, route), dbEq(executionQualityTable.style, style), dbEq(executionQualityTable.isDryRun, false),
-        dbEq(executionQualityTable.accountId, accountId)))
-      .orderBy(dbDesc(executionQualityTable.id)).limit(20);
+type RouteQualityRow = typeof executionQualityTable.$inferSelect;
+
+/** Single shared read of a route+style's newest ≤20 LIVE execution-quality
+ *  rows for one account. Both history gates (fill-rate/shortfall penalty and
+ *  leg-conditional risk) compute from this ONE result set — never issue a
+ *  second identical query per execution. */
+async function fetchRouteQualityRows(route: string, style: string, accountId: string): Promise<RouteQualityRow[]> {
+  return db.select().from(executionQualityTable)
+    .where(dbAnd(dbEq(executionQualityTable.route, route), dbEq(executionQualityTable.style, style), dbEq(executionQualityTable.isDryRun, false),
+      dbEq(executionQualityTable.accountId, accountId)))
+    .orderBy(dbDesc(executionQualityTable.id)).limit(20);
+}
+
+interface RouteQualityPenalty { shortfallUsd: number; attempts: number; blockReason: string | null; bigEdgeBypass: boolean; probe: boolean }
+
+/** Fill-rate/shortfall penalty computed from already-fetched rows
+ *  (async only for the one-probe claim). Callers go through routeHistoryGates. */
+async function qualityPenaltyFromRows(rows: RouteQualityRow[], tradeSizeUsd: number, accountId: string, style: string, route: string, currentNetUsd = 0, allowProbe = false): Promise<RouteQualityPenalty> {
     if (rows.length === 0) return { shortfallUsd: 0, attempts: 0, blockReason: null, bigEdgeBypass: false, probe: false };
     const fills = rows.filter(r => r.filled);
     // Historical average EXPECTED edge, normalized per trade size and scaled
@@ -2332,7 +2344,6 @@ async function routeQualityPenalty(route: string, style: string, tradeSizeUsd: n
     const avgShortfallPct = realized.reduce((s, r) =>
       s + (parseFloat(r.expectedProfitUsd) - parseFloat(r.realizedProfitUsd!)) / parseFloat(r.tradeSizeUsd), 0) / realized.length;
     return { shortfallUsd: Math.max(0, avgShortfallPct * tradeSizeUsd), attempts: rows.length, blockReason: null, bigEdgeBypass: false, probe: false };
-  } catch { return { shortfallUsd: 0, attempts: 0, blockReason: null, bigEdgeBypass: false, probe: false }; }
 }
 
 // ── Leg-conditional risk model ────────────────────────────────────────────────
@@ -2371,10 +2382,12 @@ interface RouteLegRisk {
  *  produce a hard 0 or 1. */
 async function routeLegRisk(route: string, style: string, accountId: string): Promise<RouteLegRisk | null> {
   try {
-    const rows = await db.select().from(executionQualityTable)
-      .where(dbAnd(dbEq(executionQualityTable.route, route), dbEq(executionQualityTable.style, style), dbEq(executionQualityTable.isDryRun, false),
-        dbEq(executionQualityTable.accountId, accountId)))
-      .orderBy(dbDesc(executionQualityTable.id)).limit(20);
+    return legRiskFromRows(await fetchRouteQualityRows(route, style, accountId));
+  } catch { return null; }
+}
+
+/** Pure leg-risk computation from already-fetched execution-quality rows. */
+function legRiskFromRows(rows: RouteQualityRow[]): RouteLegRisk | null {
     const legRows = rows.filter(r => r.legsFilled != null);
     if (legRows.length === 0) return null;
     const n = legRows.length;
@@ -2401,7 +2414,22 @@ async function routeLegRisk(route: string, style: string, accountId: string): Pr
       avgRealizedUsd: realizedRows.length > 0 ? realizedRows.reduce((s, r) => s + parseFloat(r.realizedProfitUsd!), 0) / realizedRows.length : null,
       lastAttemptAtMs: legRows[0]?.createdAt ? new Date(legRows[0].createdAt).getTime() : 0,
     };
-  } catch { return null; }
+}
+
+/** Combined feedback-loop + leg-risk gate: ONE DB read over this route's
+ *  execution-quality history feeds both the fill-rate/shortfall penalty and
+ *  the leg-conditional risk model. Failure-safe like the individual gates:
+ *  a DB hiccup yields neutral penalty and no risk stats, never a throw. */
+async function routeHistoryGates(route: string, style: string, tradeSizeUsd: number, accountId: string, currentNetUsd = 0, allowProbe = false): Promise<{ hist: RouteQualityPenalty; risk: RouteLegRisk | null }> {
+  try {
+    const rows = await fetchRouteQualityRows(route, style, accountId);
+    return {
+      hist: await qualityPenaltyFromRows(rows, tradeSizeUsd, accountId, style, route, currentNetUsd, allowProbe),
+      risk: legRiskFromRows(rows),
+    };
+  } catch {
+    return { hist: { shortfallUsd: 0, attempts: 0, blockReason: null, bigEdgeBypass: false, probe: false }, risk: null };
+  }
 }
 
 /** Risk-adjusted expected value for firing leg 1:
@@ -2921,7 +2949,7 @@ router.post("/arb/graph-execute", async (req, res): Promise<void> => {
       // Big-edge bypass and probes apply to any shape with its own fresh
       // final re-quote (Kraken triangles AND cross/inventory routes) — the
       // pre-fire re-validates the edge before any order is placed.
-      const hist = await routeQualityPenalty(route.description, executionStyle, tradeSizeUsd, accountScope(krakenKey, coinbaseKey, coinbaseSecret), hasFreshPreFire ? effNetProfitUsd : 0, hasFreshPreFire);
+      const { hist, risk } = await routeHistoryGates(route.description, executionStyle, tradeSizeUsd, accountScope(krakenKey, coinbaseKey, coinbaseSecret), hasFreshPreFire ? effNetProfitUsd : 0, hasFreshPreFire);
       // Big-edge bypass overrides the blacklist too: an edge > 2× this
       // route's historical average is a NEW opportunity, not the old pattern.
       const gate = await getRouteGate(accountScope(krakenKey, coinbaseKey, coinbaseSecret), executionStyle, route.description);
@@ -2953,8 +2981,8 @@ router.post("/arb/graph-execute", async (req, res): Promise<void> => {
       // eats fees+spread. Gates below run on leg-tracked live history and are
       // NOT bypassed by the profitable-route override (real losses observed);
       // only the big-edge bypass (market moved — history isn't the pattern)
-      // and probes skip them.
-      const risk = await routeLegRisk(route.description, executionStyle, accountScope(krakenKey, coinbaseKey, coinbaseSecret));
+      // and probes skip them. (risk comes from the same single history read
+      // as hist above — see routeHistoryGates.)
       // Persistent-negative-realized block (trader-directed): a route whose
       // MEASURED realized P&L averages below zero keeps losing money no matter
       // what the scanner claims — applies even under the big-edge bypass and
