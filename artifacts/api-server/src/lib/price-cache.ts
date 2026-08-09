@@ -489,7 +489,28 @@ async function verifyPairAvailability(): Promise<void> {
 export interface TriPrices {
   kraken:   { solBid: number; solAsk: number; ethBid: number; ethAsk: number; ethSolBid: number; ethSolAsk: number; ethSolSource: "direct" | "synthetic" } | null;
   coinbase: { solBid: number; solAsk: number; ethBid: number; ethAsk: number; ethSolBid: number; ethSolAsk: number; ethSolSource: "direct" | "synthetic" } | null;
+  /**
+   * Advisory cross-exchange sanity check on the ETH/SOL cross rate. Present
+   * only when BOTH exchanges produced a result. Compares the ETH/SOL mid each
+   * venue's tri scan actually uses (Kraken direct book when available,
+   * synthetic otherwise; Coinbase always synthetic). `warning` is true when
+   * the mids deviate by more than ETH_SOL_CROSS_WARN_BPS — a signal that one
+   * venue's feed is stale or mid-flash-move and triangular edges from the
+   * drifting venue are unreliable. Never blocks anything.
+   */
+  ethSolCrossCheck: { deviationBps: number; warning: boolean; thresholdBps: number } | null;
 }
+
+/** Deviation threshold (basis points) above which the ETH/SOL cross-exchange
+ *  disagreement warning fires. Validated baseline agreement is ~1.3 bp, so
+ *  25 bp is a ~20× departure from normal — clearly anomalous, yet loose
+ *  enough not to fire on routine spread noise. */
+export const ETH_SOL_CROSS_WARN_BPS = 25;
+
+// Rate-limit the warning log so a sustained divergence doesn't flood the
+// System Log on every 2 s poll of the tri-scan endpoint.
+const CROSS_WARN_LOG_INTERVAL_MS = 30_000;
+let lastCrossWarnLogAt = 0;
 
 /**
  * Returns per-exchange ETH/USD and ETH/SOL bid/ask prices for triangular arb scanning.
@@ -570,7 +591,28 @@ export function getTriPrices(): TriPrices {
     }
   }
 
-  return { kraken: krakenResult, coinbase: coinbaseResult };
+  // ── Cross-exchange ETH/SOL sanity check (advisory only) ──────────────────
+  let ethSolCrossCheck: TriPrices["ethSolCrossCheck"] = null;
+  if (krakenResult && coinbaseResult) {
+    const kMid = (krakenResult.ethSolBid + krakenResult.ethSolAsk) / 2;
+    const cMid = (coinbaseResult.ethSolBid + coinbaseResult.ethSolAsk) / 2;
+    if (kMid > 0 && cMid > 0) {
+      const avg = (kMid + cMid) / 2;
+      const deviationBps = Math.abs(kMid - cMid) / avg * 10_000;
+      const warning = deviationBps > ETH_SOL_CROSS_WARN_BPS;
+      ethSolCrossCheck = { deviationBps, warning, thresholdBps: ETH_SOL_CROSS_WARN_BPS };
+      if (warning && now - lastCrossWarnLogAt >= CROSS_WARN_LOG_INTERVAL_MS) {
+        lastCrossWarnLogAt = now;
+        console.warn(
+          `[price-cache] ETH/SOL cross-rate disagreement: Kraken mid ${kMid.toFixed(6)} (${krakenResult.ethSolSource}) vs ` +
+          `Coinbase mid ${cMid.toFixed(6)} (synthetic) — deviation ${deviationBps.toFixed(1)} bp exceeds ${ETH_SOL_CROSS_WARN_BPS} bp. ` +
+          `One venue's feed may be stale or mid-flash-move; triangular edges from the drifting venue are unreliable (advisory only).`
+        );
+      }
+    }
+  }
+
+  return { kraken: krakenResult, coinbase: coinbaseResult, ethSolCrossCheck };
 }
 
 // ── BTC triangular arb prices (SOL/BTC direct market, Kraken only) ────────────

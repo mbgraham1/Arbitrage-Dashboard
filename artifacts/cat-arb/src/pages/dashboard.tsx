@@ -199,7 +199,7 @@ export default function Dashboard() {
     isExecutingTriangular,
     emergencyStop, setEmergencyStop,
     startTime, failedTrades, sessionTradeCount, apiLatencyMs,
-    triOpportunities, triPriceSource, btcTriStatus,
+    triOpportunities, triPriceSource, btcTriStatus, ethSolCrossCheck,
     isAutoExecutingOb, isExecutingCross,
     forceFeeModel,
   } = useBotContext();
@@ -518,6 +518,7 @@ export default function Dashboard() {
         isExecutingTri={isExecutingTriangular}
         priceSource={triPriceSource}
         btcTriStatus={btcTriStatus}
+        ethSolCrossCheck={ethSolCrossCheck}
         blockedBy={isAutoExecutingOb ? "OB" : isExecutingCross ? "CROSS" : null}
       />
 
@@ -1731,6 +1732,7 @@ function TriangularCard({
   isExecutingTri,
   priceSource,
   btcTriStatus,
+  ethSolCrossCheck,
   blockedBy,
 }: {
   opportunities: Array<{ exchange: string; loop: string; profitPct: number; solUsd: number; ethUsd: number; ethSol: number; variant?: string; timestamp: string }>;
@@ -1739,6 +1741,8 @@ function TriangularCard({
   priceSource?: Record<string, "direct" | "synthetic">;
   /** BTC loop availability — available=false when SOL/BTC is unlisted on Kraken */
   btcTriStatus?: { available: boolean; reason: string | null } | null;
+  /** Advisory ETH/SOL cross-exchange disagreement check from the latest scan */
+  ethSolCrossCheck?: { deviationBps: number; warning: boolean; thresholdBps: number } | null;
   /** Which other executor is holding the shared lock, blocking TRI auto-fires */
   blockedBy?: "OB" | "CROSS" | null;
 }) {
@@ -1829,6 +1833,22 @@ function TriangularCard({
         )}
       </CardHeader>
       <CardContent className="p-0">
+        {ethSolCrossCheck?.warning && (
+          <div
+            className="flex items-start gap-2 px-3 py-2 border-b border-orange-500/50 bg-orange-500/10"
+            data-testid="banner-ethsol-cross-warning"
+          >
+            <span className="text-[9px] font-mono font-bold px-1 mt-0.5 shrink-0 border border-orange-500 text-orange-600">
+              ETH/SOL CROSS DISAGREEMENT
+            </span>
+            <span className="text-xs font-mono text-orange-600">
+              Kraken and Coinbase ETH/SOL mids deviate {ethSolCrossCheck.deviationBps.toFixed(1)} bp
+              (warning threshold {ethSolCrossCheck.thresholdBps} bp) — one venue&apos;s feed may be stale or
+              mid-flash-move, so triangular edges from the drifting venue are unreliable. Advisory only;
+              this clears automatically when the venues agree again.
+            </span>
+          </div>
+        )}
         {btcTriStatus && !btcTriStatus.available && (
           <div
             className="flex items-start gap-2 px-3 py-2 border-b border-yellow-500/50 bg-yellow-500/10"

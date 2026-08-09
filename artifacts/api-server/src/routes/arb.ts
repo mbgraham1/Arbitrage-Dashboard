@@ -3340,7 +3340,7 @@ router.get("/arb/triangular", async (_req, res): Promise<void> => {
         .catch(() => {});
     }
 
-    res.json({ opportunities, prices, priceSource, btcTriStatus, scannedAt: new Date().toISOString() });
+    res.json({ opportunities, prices, priceSource, btcTriStatus, ethSolCrossCheck: tri.ethSolCrossCheck, scannedAt: new Date().toISOString() });
   } catch (err) {
     res.status(500).json({ error: (err as Error).message });
   }

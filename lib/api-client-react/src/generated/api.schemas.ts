@@ -2214,6 +2214,16 @@ export type TriangularScanResultBtcTriStatus = {
   reason?: string | null;
 };
 
+/**
+ * Advisory ETH/SOL cross-rate sanity check. Present only when both Kraken and Coinbase tri prices are available: compares each venue's ETH/SOL mid (Kraken direct or synthetic; Coinbase synthetic). warning=true when deviation exceeds thresholdBps (25 bp) — a sign one venue's feed is stale or mid-flash-move and its triangular edges are unreliable. Never blocks execution.
+ */
+export type TriangularScanResultEthSolCrossCheck = {
+  /** Absolute deviation between the two venues' ETH/SOL mids, in basis points of their average */
+  deviationBps: number;
+  warning: boolean;
+  thresholdBps: number;
+} | null;
+
 export interface TriangularScanResult {
   opportunities: TriangularOpportunity[];
   /** Raw prices used in this scan */
@@ -2222,6 +2232,8 @@ export interface TriangularScanResult {
   priceSource?: TriangularScanResultPriceSource;
   /** Availability of Kraken BTC triangular loops. available=false only when the SOL/BTC (SOLXBT) market is confirmed unlisted on Kraken; reason carries the trader-facing explanation. */
   btcTriStatus?: TriangularScanResultBtcTriStatus;
+  /** Advisory ETH/SOL cross-rate sanity check. Present only when both Kraken and Coinbase tri prices are available: compares each venue's ETH/SOL mid (Kraken direct or synthetic; Coinbase synthetic). warning=true when deviation exceeds thresholdBps (25 bp) — a sign one venue's feed is stale or mid-flash-move and its triangular edges are unreliable. Never blocks execution. */
+  ethSolCrossCheck?: TriangularScanResultEthSolCrossCheck;
   scannedAt: string;
 }
 

@@ -3841,6 +3841,19 @@ components:
             reason:
               type: string
               nullable: true
+        ethSolCrossCheck:
+          type: object
+          nullable: true
+          description: "Advisory ETH/SOL cross-rate sanity check. Present only when both Kraken and Coinbase tri prices are available: compares each venue's ETH/SOL mid (Kraken direct or synthetic; Coinbase synthetic). warning=true when deviation exceeds thresholdBps (25 bp) — a sign one venue's feed is stale or mid-flash-move and its triangular edges are unreliable. Never blocks execution."
+          required: [deviationBps, warning, thresholdBps]
+          properties:
+            deviationBps:
+              type: number
+              description: "Absolute deviation between the two venues' ETH/SOL mids, in basis points of their average"
+            warning:
+              type: boolean
+            thresholdBps:
+              type: number
         scannedAt:
           type: string
 

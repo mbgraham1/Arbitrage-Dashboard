@@ -141,6 +141,7 @@ export * from './tradeSummary';
 export * from './triangularOpportunity';
 export * from './triangularScanResult';
 export * from './triangularScanResultBtcTriStatus';
+export * from './triangularScanResultEthSolCrossCheck';
 export * from './triangularScanResultPrices';
 export * from './triangularScanResultPriceSource';
 export * from './triExecuteRequest';

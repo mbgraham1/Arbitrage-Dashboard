@@ -145,6 +145,13 @@ export interface BotContextType {
    * available=false only when SOL/BTC (SOLXBT) is confirmed unlisted on Kraken.
    */
   btcTriStatus: { available: boolean; reason: string | null } | null;
+  /**
+   * Advisory ETH/SOL cross-exchange sanity check from the latest triangular
+   * scan. warning=true when Kraken's and Coinbase's ETH/SOL mids deviate by
+   * more than thresholdBps — one venue's feed may be stale or mid-flash-move.
+   * Null when either exchange has no fresh data.
+   */
+  ethSolCrossCheck: { deviationBps: number; warning: boolean; thresholdBps: number } | null;
   /** Latest cointegration mean-reversion signals from the Kalman filter scan */
   cointSignals: CointegrationSignal[];
   /** Latest OB scan cycles from the Order Book Hunter */
@@ -290,6 +297,10 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
   const [triOpportunities, setTriOpportunities] = useState<TriangularOpportunity[]>([]);
   const [triPriceSource, setTriPriceSource] = useState<Record<string, "direct" | "synthetic">>({});
   const [btcTriStatus, setBtcTriStatus] = useState<{ available: boolean; reason: string | null } | null>(null);
+  const [ethSolCrossCheck, setEthSolCrossCheck] = useState<{ deviationBps: number; warning: boolean; thresholdBps: number } | null>(null);
+  // Log the cross-rate disagreement to the System Log only on transitions
+  // (ok→warning and warning→ok), not on every poll.
+  const prevCrossWarnRef = useRef(false);
   const [cointSignals, setCointSignals] = useState<CointegrationSignal[]>([]);
   const [isAutoExecutingOb, setIsAutoExecutingOb] = useState(false);
   // Mirrors isExecutingRef for the auto cross-exchange executor so the UI can
@@ -389,6 +400,20 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
         reason: triScan.data.btcTriStatus.reason ?? null,
       });
     }
+    // ── ETH/SOL cross-exchange sanity check (advisory) ─────────────────────
+    const cc = triScan.data.ethSolCrossCheck ?? null;
+    setEthSolCrossCheck(cc);
+    const warnNow = !!cc?.warning;
+    if (warnNow && !prevCrossWarnRef.current && cc) {
+      addLog(
+        "warning",
+        `[TRI·CHECK] ETH/SOL cross-rate disagreement — Kraken and Coinbase mids deviate ${cc.deviationBps.toFixed(1)} bp ` +
+        `(threshold ${cc.thresholdBps} bp). One venue's feed may be stale or mid-flash-move; triangular edges from the drifting venue are unreliable. Advisory only.`,
+      );
+    } else if (!warnNow && prevCrossWarnRef.current) {
+      addLog("info", "[TRI·CHECK] ETH/SOL cross-rate disagreement cleared — Kraken and Coinbase agree again.");
+    }
+    prevCrossWarnRef.current = warnNow;
     if (opps.length > 0) {
       for (const opp of opps) {
         const variant = opp.variant === "btc" ? "BTC" : "ETH";
@@ -1081,6 +1106,7 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
     triOpportunities,
     triPriceSource,
     btcTriStatus,
+    ethSolCrossCheck,
     cointSignals,
     obCycles,
     isAutoExecutingOb,
