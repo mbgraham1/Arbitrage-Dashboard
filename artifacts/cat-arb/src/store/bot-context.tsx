@@ -327,6 +327,10 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
   // changes mid-session, the cache is invalidated so the Exchange Balances card
   // doesn't show the previous pair's base-asset balance for up to 30 s.
   const lastBalancePairRef = useRef<string | null>(null);
+  // Monotonic sequence for balance fetches — only the latest request may
+  // write cachedBalances, so an out-of-order slow response for a previous
+  // pair can't overwrite the current pair's balances.
+  const balanceFetchSeqRef = useRef<number>(0);
   const dailyLossRef = useRef<number>(0);
   const emergencyStopRef = useRef<boolean>(false);
   const isExecutingRef = useRef<boolean>(false);
@@ -976,9 +980,14 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
       if (pairChanged || Date.now() - lastBalanceUpdateRef.current > BALANCE_CACHE_TTL_MS) {
         lastBalanceUpdateRef.current = Date.now(); // optimistic — prevents concurrent fetches
         lastBalancePairRef.current = activePair;
+        // Sequence-tag this request so a slow response for a previous pair can
+        // never land after (and overwrite) the latest pair's balances.
+        const seq = ++balanceFetchSeqRef.current;
         // Pass the active pair so the backend returns the correct base-asset balance.
         fetchBalancesMutation.mutateAsync({ data: { ...c, ...(activePair ? { pair: activePair } : {}) } })
-          .then((bal) => { if (!cancelled) setCachedBalances(bal); })
+          .then((bal) => {
+            if (!cancelled && seq === balanceFetchSeqRef.current) setCachedBalances(bal);
+          })
           .catch(() => { /* keep stale cache */ });
       }
 
