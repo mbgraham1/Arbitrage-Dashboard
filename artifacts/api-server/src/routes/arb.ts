@@ -1615,7 +1615,8 @@ async function runKrakenTriangle(input: TriangleExecInput, reqLog: ReqLog): Prom
     // the normal catch → actual-residual unwind (selling back what leg 1
     // bought is the money-safest exit even after a kill).
     if (lockGen != null && !liveLockOwned(lockGen)) {
-      throw new Error("Execution lock revoked (KILL/HARD RESET) — aborted before leg 2; leg 1 inventory unwound.");
+      const unwound = aHeld > 0 ? await tryUnwindMarket(creds, "sell", aHeld, pairA, `sell ${assetA} (lock revoked before leg 2)`, log) : true;
+      throw new Error(`Execution lock revoked (KILL/HARD RESET) — aborted before leg 2; leg 1 inventory ${unwound ? "unwound" : "UNWIND FAILED — position still held, reconcile manually"}.`);
     }
 
     // ── Leg 2: convert A → B on cross. Post-only limit at best bid/ask ───────
@@ -1731,7 +1732,8 @@ async function runKrakenTriangle(input: TriangleExecInput, reqLog: ReqLog): Prom
 
     // Cooperative KILL check before the final leg (see leg-2 check above).
     if (lockGen != null && !liveLockOwned(lockGen)) {
-      throw new Error("Execution lock revoked (KILL/HARD RESET) — aborted before leg 3; held inventory unwound.");
+      const unwound = bHeld > 0 ? await tryUnwindMarket(creds, "sell", bHeld, pairB, `sell ${assetB} (lock revoked before leg 3)`, log) : true;
+      throw new Error(`Execution lock revoked (KILL/HARD RESET) — aborted before leg 3; held inventory ${unwound ? "unwound" : "UNWIND FAILED — position still held, reconcile manually"}.`);
     }
 
     // ── Leg 3: sell B for USD. Post-only limit at best ask → maker fee ───────
