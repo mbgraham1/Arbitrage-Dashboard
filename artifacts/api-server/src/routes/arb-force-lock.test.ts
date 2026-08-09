@@ -368,9 +368,17 @@ describe("FORCE MODE lock eviction — POST /arb/graph-execute", () => {
     // Partial 1 ATOM unwound at market.
     expect(krakenRawMarketOrder).toHaveBeenCalledTimes(1);
     expect(krakenRawMarketOrder).toHaveBeenCalledWith(expect.anything(), "sell", 1, "ATOMUSD");
-    // FAILED ledger row recorded for reconciliation.
+    // FAILED ledger row recorded for reconciliation — and the UNWIND order
+    // appears as its own legFills entry. Its status poll here never turns
+    // terminal (kOpen), so it must be recorded as accepted-but-UNCONFIRMED
+    // (zero volume, txid kept) rather than vanish or block recovery.
     const failed = inserts.map(i => i.values as Record<string, unknown>).filter(v => typeof v["pair"] === "string" && (v["pair"] as string).includes("FAILED"));
     expect(failed).toHaveLength(1);
+    const fills = failed[0]!["legFills"] as Array<Record<string, unknown>>;
+    const unwinds = fills.filter(f => f["unwind"] === true);
+    expect(unwinds).toHaveLength(1);
+    expect(unwinds[0]).toMatchObject({ txid: "UNWIND-TX", side: "sell", pair: "ATOMUSD", volume: 0 });
+    expect(String(unwinds[0]!["label"])).toMatch(/unconfirmed/i);
   }, 30_000);
 
   it("evicted between legs 1 and 2 → cooperative check aborts BEFORE leg 2 and unwinds leg-1 inventory", async () => {
@@ -379,6 +387,7 @@ describe("FORCE MODE lock eviction — POST /arb/graph-execute", () => {
     let t1Polls = 0;
     krakenRawLimitOrder.mockImplementation(() => Promise.resolve({ txid: ["C1"] }));
     krakenOrderInfo.mockImplementation((_c: unknown, txid: string) => {
+      if (txid === "UNWIND-TX") return Promise.resolve(kClosed(2, 9.9, 0.01)); // unwind sell confirms
       if (txid !== "C1") return Promise.resolve(kOpen);
       t1Polls++;
       return t1Polls === 1 ? hang.promise : Promise.resolve(kClosed(2, 10, 0.01));
@@ -401,6 +410,14 @@ describe("FORCE MODE lock eviction — POST /arb/graph-execute", () => {
     expect(krakenRawLimitOrder).toHaveBeenCalledTimes(1); // no leg-2 order ever placed
     expect(krakenRawMarketOrder).toHaveBeenCalledTimes(1);
     expect(krakenRawMarketOrder).toHaveBeenCalledWith(expect.anything(), "sell", 2, "ATOMUSD"); // full leg-1 fill unwound
+    // The unwind's CONFIRMED fill appears as its own legFills entry (unwind: true)
+    // in the FAILED ledger row — actual volExec/cost/fee/txid, not the request.
+    const failed = inserts.map(i => i.values as Record<string, unknown>).filter(v => typeof v["pair"] === "string" && (v["pair"] as string).includes("FAILED"));
+    expect(failed).toHaveLength(1);
+    const fills = failed[0]!["legFills"] as Array<Record<string, unknown>>;
+    const unwinds = fills.filter(f => f["unwind"] === true);
+    expect(unwinds).toHaveLength(1);
+    expect(unwinds[0]).toMatchObject({ txid: "UNWIND-TX", side: "sell", pair: "ATOMUSD", volume: 2, costUsd: 9.9, fee: 0.01 });
   }, 30_000);
 
   it("evicted between legs 2 and 3 → cooperative check aborts BEFORE leg 3 and unwinds held B inventory", async () => {

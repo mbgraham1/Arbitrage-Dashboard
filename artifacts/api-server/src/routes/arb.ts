@@ -1582,7 +1582,7 @@ async function runKrakenTriangle(input: TriangleExecInput, reqLog: ReqLog): Prom
           // Revoked mid-rest: unwind any ACTUAL leg-1 fill (money-safest exit),
           // then abort — no taker fallback, no further legs.
           const v = e.fill?.volExec ?? 0;
-          if (v > 0) await tryUnwindMarket(creds, "sell", v, pairA, `sell ${assetA} (unwind leg1 after lock revoked)`, log);
+          if (v > 0) await tryUnwindMarket(creds, "sell", v, pairA, `sell ${assetA} (unwind leg1 after lock revoked)`, log, { records: legFillRecords, leg: 1 });
           throw e;
         }
         if (!(e instanceof TakerOnlySkip)) log.info(`leg1 maker attempt placed nothing (${(e as Error).message}) — evaluating taker fallback`);
@@ -1633,7 +1633,7 @@ async function runKrakenTriangle(input: TriangleExecInput, reqLog: ReqLog): Prom
         }
       }
       if (aHeld < l1.volume * FILL_TOLERANCE) {
-        if (aHeld > 0) await tryUnwindMarket(creds, "sell", aHeld, pairA, `sell ${assetA} (unwind partial leg1)`, log);
+        if (aHeld > 0) await tryUnwindMarket(creds, "sell", aHeld, pairA, `sell ${assetA} (unwind partial leg1)`, log, { records: legFillRecords, leg: 1 });
         throw new Error(takerOnly
           ? `Leg 1 taker fire aborted — fresh taker-priced net (after real taker fees, depth slippage${safetyBufferUsd > 0 ? `, $${safetyBufferUsd.toFixed(4)} safety buffer` : ""}) ≤ your $${threshold.toFixed(4)} floor; no orders kept — trying the next-best route.`
           : `Leg 1 unfilled after ${LEG1_MAX_REPRICES} maker reprices (aggressive pricing, pre-flight each time) and taker fallback ${aHeld > 0 ? "left a shortfall" : "declined (taker-priced net ≤ your floor)"} (${aHeld.toFixed(8)}/${l1.volume.toFixed(8)} ${assetA}); order canceled — trying the next-best route.`);
@@ -1646,7 +1646,7 @@ async function runKrakenTriangle(input: TriangleExecInput, reqLog: ReqLog): Prom
     // the normal catch → actual-residual unwind (selling back what leg 1
     // bought is the money-safest exit even after a kill).
     if (lockGen != null && !liveLockOwned(lockGen)) {
-      const unwound = aHeld > 0 ? await tryUnwindMarket(creds, "sell", aHeld, pairA, `sell ${assetA} (lock revoked before leg 2)`, log) : true;
+      const unwound = aHeld > 0 ? await tryUnwindMarket(creds, "sell", aHeld, pairA, `sell ${assetA} (lock revoked before leg 2)`, log, { records: legFillRecords, leg: 1 }) : true;
       throw new Error(`Execution lock revoked (KILL/HARD RESET) — aborted before leg 2; leg 1 inventory ${unwound ? "unwound" : "UNWIND FAILED — position still held, reconcile manually"}.`);
     }
 
@@ -1671,8 +1671,8 @@ async function runKrakenTriangle(input: TriangleExecInput, reqLog: ReqLog): Prom
         const aConsumedR = cross.aIsQuote ? fl.cost + fl.fee : fl.volExec;
         const bAcquiredR = cross.aIsQuote ? fl.volExec : Math.max(0, fl.cost - fl.fee);
         const aResidualR = Math.max(0, aHeld - aConsumedR);
-        if (aResidualR > 0) await tryUnwindMarket(creds, "sell", aResidualR, pairA, `sell residual ${assetA} (leg2 lock revoked)`, log);
-        if (bAcquiredR > 0) await tryUnwindMarket(creds, "sell", bAcquiredR, pairB, `sell acquired ${assetB} (leg2 lock revoked)`, log);
+        if (aResidualR > 0) await tryUnwindMarket(creds, "sell", aResidualR, pairA, `sell residual ${assetA} (leg2 lock revoked)`, log, { records: legFillRecords, leg: 1 });
+        if (bAcquiredR > 0) await tryUnwindMarket(creds, "sell", bAcquiredR, pairB, `sell acquired ${assetB} (leg2 lock revoked)`, log, { records: legFillRecords, leg: 2 });
         throw e;
       }
       // Nothing placed — fall through to the taker fallback below: we hold A,
@@ -1724,8 +1724,8 @@ async function runKrakenTriangle(input: TriangleExecInput, reqLog: ReqLog): Prom
       if (!fullFill) {
         // Unwind BOTH residuals from actual fills: leftover A + acquired B.
         const aResidual = Math.max(0, aHeld - aConsumed);
-        if (aResidual > 0) await tryUnwindMarket(creds, "sell", aResidual, pairA, `sell residual ${assetA} (partial leg2)`, log);
-        if (bHeld > 0)     await tryUnwindMarket(creds, "sell", bHeld,     pairB, `sell acquired ${assetB} (partial leg2)`, log);
+        if (aResidual > 0) await tryUnwindMarket(creds, "sell", aResidual, pairA, `sell residual ${assetA} (partial leg2)`, log, { records: legFillRecords, leg: 1 });
+        if (bHeld > 0)     await tryUnwindMarket(creds, "sell", bHeld,     pairB, `sell acquired ${assetB} (partial leg2)`, log, { records: legFillRecords, leg: 2 });
         throw new Error(`Leg 2 did not fully fill (${f2.volExec.toFixed(8)}/${l2Volume.toFixed(8)}); residual ${assetA} and acquired ${assetB} unwound.`);
       }
       // Cross-leg fee is charged in A or B units and is implicitly captured in
@@ -1763,7 +1763,7 @@ async function runKrakenTriangle(input: TriangleExecInput, reqLog: ReqLog): Prom
 
     // Cooperative KILL check before the final leg (see leg-2 check above).
     if (lockGen != null && !liveLockOwned(lockGen)) {
-      const unwound = bHeld > 0 ? await tryUnwindMarket(creds, "sell", bHeld, pairB, `sell ${assetB} (lock revoked before leg 3)`, log) : true;
+      const unwound = bHeld > 0 ? await tryUnwindMarket(creds, "sell", bHeld, pairB, `sell ${assetB} (lock revoked before leg 3)`, log, { records: legFillRecords, leg: 2 }) : true;
       throw new Error(`Execution lock revoked (KILL/HARD RESET) — aborted before leg 3; held inventory ${unwound ? "unwound" : "UNWIND FAILED — position still held, reconcile manually"}.`);
     }
 
@@ -1781,7 +1781,7 @@ async function runKrakenTriangle(input: TriangleExecInput, reqLog: ReqLog): Prom
         // unwind itself — do it, then abort with the revocation surfaced.
         const soldR = e.fill?.volExec ?? 0;
         const bRemaining = Math.max(0, bHeld - soldR);
-        if (bRemaining > 0) await tryUnwindMarket(creds, "sell", bRemaining, pairB, `sell remaining ${assetB} (leg3 lock revoked)`, log);
+        if (bRemaining > 0) await tryUnwindMarket(creds, "sell", bRemaining, pairB, `sell remaining ${assetB} (leg3 lock revoked)`, log, { records: legFillRecords, leg: 2 });
         throw e;
       }
       // Nothing placed — fall through to the taker fallback: selling B at
@@ -1806,7 +1806,7 @@ async function runKrakenTriangle(input: TriangleExecInput, reqLog: ReqLog): Prom
       const bResidual = Math.max(0, bHeld - f3.volExec);
       if (f3.volExec < bHeld * FILL_TOLERANCE) {
         // Sell the residual B; report as a partial (failed) execution, not success.
-        if (bResidual > 0) await tryUnwindMarket(creds, "sell", bResidual, pairB, `sell residual ${assetB} (partial leg3)`, log);
+        if (bResidual > 0) await tryUnwindMarket(creds, "sell", bResidual, pairB, `sell residual ${assetB} (partial leg3)`, log, { records: legFillRecords, leg: 2 });
         throw new Error(`Leg 3 partially filled (${f3.volExec.toFixed(8)}/${bHeld.toFixed(8)} ${assetB}); residual sold via unwind. USD received so far: $${usdReceived.toFixed(4)}.`);
       }
       // Tolerance-accepted partial: sweep leftover B to USD at market with a
@@ -3066,8 +3066,30 @@ router.post("/arb/graph-execute", async (req, res): Promise<void> => {
     // manual reconciliation always has the order ids and actual volume.
     let buyOrderId = "", sellOrderId = "";
     let anyAccepted = false;
+    // Unwind orders move real money — collect their CONFIRMED fills so the
+    // failed ledger row shows every real order (unwind: true).
+    const unwindFills: UnwindLegFill[] = [];
+    // Coinbase-side unwind: place the market sell, then confirm the ACTUAL
+    // fill and record it — mirrors what tryUnwindMarket does for Kraken.
+    const cbUnwind = async (vol: number, limitPx: number, prod: string, label: string, leg: number) => {
+      const r = await coinbaseMarketOrder(cbCreds, "SELL", vol, limitPx, prod as Pair);
+      const oid = r.orderId ?? "";
+      if (!oid || r.success === false) throw new Error("Coinbase unwind order rejected (no order id).");
+      const d = await waitCoinbaseFill(oid);
+      unwindFills.push({
+        leg, label: `${label}${d.filledSize > 0 ? "" : " (accepted, fill unconfirmed)"}`,
+        pair: prod, side: "sell", price: d.filledSize > 0 ? d.filledValue / d.filledSize : null,
+        volume: d.filledSize, costUsd: d.filledValue, fee: d.totalFees, txid: oid, unwind: true,
+      });
+    };
     const recordFailure = async (volume: number, note: string) => {
       try {
+        // Confirmed buy-leg fill (if any) + unwind orders — real exchange
+        // numbers only, so reconciliation sees every order that moved money.
+        const failFills: UnwindLegFill[] = [
+          ...(buyOrderId && volume > 0 ? [{ leg: 1, label: "buy (confirmed fill)", pair: buyHop.pair, side: "buy", price: volume > 0 ? buySpendUsd / volume : null, volume, costUsd: buySpendUsd, fee: 0, txid: buyOrderId }] : []),
+          ...unwindFills,
+        ];
         await db.insert(tradesTable).values({
           pair: `${route.description} [FAILED: ${note.slice(0, 120)}]`,
           buyExchange: buyHop.exchange,
@@ -3083,6 +3105,7 @@ router.post("/arb/graph-execute", async (req, res): Promise<void> => {
           status: "failed",
           // No accepted buy order → nothing filled → realized exactly $0.
           realizedProfitUsd: buyOrderId ? null : "0",
+          legFills: failFills.length > 0 ? failFills : undefined,
         });
       } catch (e) { log.error(`Failed to write failure ledger row: ${(e as Error).message}`); }
     };
@@ -3252,7 +3275,7 @@ router.post("/arb/graph-execute", async (req, res): Promise<void> => {
         filledVolume = fill.volExec;
         buySpendUsd = fill.cost + fill.fee;
         if (fill.status !== "closed" || filledVolume <= 0) {
-          if (filledVolume > 0) await tryUnwindMarket(kCreds, "sell", filledVolume, buyHop.pair, "sell partial buy-leg fill (graph cross)", log);
+          if (filledVolume > 0) await tryUnwindMarket(kCreds, "sell", filledVolume, buyHop.pair, "sell partial buy-leg fill (graph cross)", log, { records: unwindFills, leg: 1 });
           throw new Error(`Kraken buy leg did not fully fill (status ${fill.status}, ${filledVolume.toFixed(8)}/${plannedVolume.toFixed(8)}); partial fill unwound. Nothing sold.`);
         }
       } else {
@@ -3266,7 +3289,7 @@ router.post("/arb/graph-execute", async (req, res): Promise<void> => {
         if (d.status !== "FILLED") {
           if (filledVolume > 0) {
             // Partial fill exists — neutralize it on Coinbase.
-            try { await coinbaseMarketOrder(cbCreds, "SELL", filledVolume, buyHop.limitPrice, buyHop.pair as Pair); }
+            try { await cbUnwind(filledVolume, buyHop.limitPrice, buyHop.pair, "sell partial buy-leg fill (graph cross)", 1); }
             catch (e) { log.error(`Coinbase partial-buy unwind failed — MANUAL REBALANCE NEEDED (${filledVolume.toFixed(8)} ${buyHop.pair}): ${(e as Error).message}`); }
           }
           throw new Error(`Coinbase buy order ${buyOrderId} ended ${d.status} with ${filledVolume.toFixed(8)}/${plannedVolume.toFixed(8)} filled; partial fill unwound. Nothing sold.`);
@@ -3307,9 +3330,9 @@ router.post("/arb/graph-execute", async (req, res): Promise<void> => {
         const residual = sellErr instanceof ResidualError ? sellErr.residual : filledVolume;
         if (residual > 0) {
           if (buyHop.exchange === "kraken") {
-            await tryUnwindMarket(kCreds, "sell", residual, buyHop.pair, "unwind residual after sell-leg failure (graph cross)", log);
+            await tryUnwindMarket(kCreds, "sell", residual, buyHop.pair, "unwind residual after sell-leg failure (graph cross)", log, { records: unwindFills, leg: 1 });
           } else {
-            try { await coinbaseMarketOrder(cbCreds, "SELL", residual, buyHop.limitPrice, buyHop.pair as Pair); }
+            try { await cbUnwind(residual, buyHop.limitPrice, buyHop.pair, "unwind residual after sell-leg failure (graph cross)", 1); }
             catch (e) { log.error(`Coinbase unwind failed — MANUAL REBALANCE NEEDED (${residual.toFixed(8)}): ${(e as Error).message}`); }
           }
         }
@@ -3590,6 +3613,11 @@ async function tryCancel(
 export { waitForTriLimitFill, TriIndeterminateOrderError, type TriFillResult } from "../lib/tri-fill.js";
 
 /** Place a market counter-order to unwind an already-filled leg. */
+/** Ledger evidence row for an unwind order — ACTUAL exchange numbers, flagged
+ *  `unwind: true` so reconciliation (and the trades UI) can tell recovery
+ *  orders apart from cycle legs. */
+type UnwindLegFill = { leg: number; label: string; pair: string; side: string; price: number | null; volume: number; costUsd: number; fee: number; txid: string; taker?: boolean; unwind?: boolean };
+
 async function tryUnwindMarket(
   creds: { krakenKey: string; krakenSecret: string },
   side: "buy" | "sell",
@@ -3597,11 +3625,39 @@ async function tryUnwindMarket(
   pair: string,
   label: string,
   log: { info: (msg: string) => void; error: (msg: string) => void },
+  /** When provided, the CONFIRMED fill (volExec/cost/fee/txid — never the
+   *  requested volume) is pushed into `sink.records` with `unwind: true` so
+   *  the caller's FAILED ledger row shows every real order. */
+  sink?: { records: UnwindLegFill[]; leg: number },
 ): Promise<boolean> {
   if (volume <= 0) return true;
   try {
     const r = await krakenRawMarketOrder(creds, side, volume, pair);
-    log.info(`[TRI·UNWIND] Market ${side} ${volume.toFixed(6)} ${pair} — ${label} (${r.txid[0] ?? "?"})`);
+    const txid = r.txid[0] ?? "";
+    log.info(`[TRI·UNWIND] Market ${side} ${volume.toFixed(6)} ${pair} — ${label} (${txid || "?"})`);
+    if (sink && txid) {
+      // Confirm the ACTUAL fill — market orders normally close in one poll.
+      // The confirmation is ITERATION-bounded (never wall-clock-bounded, and
+      // ≤ ~1.5s total) so KILL/HARD RESET recovery is never held hostage by a
+      // slow status API. If it can't confirm promptly, record the accepted
+      // txid with zero volume — the order exists on Kraken and must not
+      // vanish from the ledger; the label marks it unconfirmed.
+      let info = { status: "unknown", volExec: 0, cost: 0, fee: 0 };
+      const MAX_POLLS = 4;
+      for (let attempt = 1; attempt <= MAX_POLLS; attempt++) {
+        try {
+          const i = await krakenOrderInfo(creds, txid);
+          info = i;
+          if (i.status === "closed" || i.status === "canceled" || i.status === "expired") break;
+        } catch { /* transient — keep polling */ }
+        if (attempt < MAX_POLLS) await new Promise(res => setTimeout(res, 500));
+      }
+      sink.records.push({
+        leg: sink.leg, label: `${label}${info.volExec > 0 ? "" : " (accepted, fill unconfirmed)"}`,
+        pair, side, price: info.volExec > 0 ? info.cost / info.volExec : null,
+        volume: info.volExec, costUsd: info.cost, fee: info.fee, txid, unwind: true,
+      });
+    }
     return true;
   } catch (e) {
     // NEVER silently claim recovery: a failed unwind means live inventory is
@@ -3873,6 +3929,9 @@ router.post("/arb/execute-triangular", async (req, res): Promise<void> => {
   // 4. Execute 3 sequential orders.
   //    On failure: cancel unfilled limit orders or place reverse market orders to unwind.
   let leg1Id = "";
+  // Unwind orders move real money — collect their CONFIRMED fills so the
+  // FAILED ledger row shows every real order (rendered with unwind: true).
+  const triUnwindFills: UnwindLegFill[] = [];
   let leg2Id = "";
   let leg3Id = "";
 
@@ -3907,7 +3966,7 @@ router.post("/arb/execute-triangular", async (req, res): Promise<void> => {
         if (useLimit) {
           const f1 = await waitForTriLimitFill(creds, leg1Id, "leg1 BTC buy", log);
           if (!f1.filled) {
-            if (f1.volExec > 0) await tryUnwindMarket(creds, "sell", f1.volExec, "XXBTZUSD", `sell ${f1.volExec.toFixed(8)} BTC partial leg1`, log);
+            if (f1.volExec > 0) await tryUnwindMarket(creds, "sell", f1.volExec, "XXBTZUSD", `sell ${f1.volExec.toFixed(8)} BTC partial leg1`, log, { records: triUnwindFills, leg: 1 });
             throw new Error(`Leg 1 BTC buy timed out — cancelled. ${f1.volExec > 0 ? `Partial ${f1.volExec.toFixed(8)} BTC unwound.` : "No fill."}`);
           }
           actualBtcAmt = f1.volExec; // actual BTC acquired; use for leg 2 sizing
@@ -3923,7 +3982,7 @@ router.post("/arb/execute-triangular", async (req, res): Promise<void> => {
             : await krakenRawMarketOrder(creds, "buy", leg2SolAmt,            "SOLXBT");
           leg2Id = r2.txid[0] ?? "";
         } catch (e) {
-          await tryUnwindMarket(creds, "sell", actualBtcAmt, "XXBTZUSD", "sell BTC (unwind leg1)", log);
+          await tryUnwindMarket(creds, "sell", actualBtcAmt, "XXBTZUSD", "sell BTC (unwind leg1)", log, { records: triUnwindFills, leg: 1 });
           throw new Error(`Leg 2 failed (leg 1 unwound): ${(e as Error).message}`);
         }
         if (useLimit) {
@@ -3932,8 +3991,8 @@ router.post("/arb/execute-triangular", async (req, res): Promise<void> => {
             // SOLXBT buy: vol_exec=SOL acquired, cost+fee=BTC consumed
             const btcConsumed = f2.cost + f2.fee;
             const btcRemaining = Math.max(0, actualBtcAmt - btcConsumed);
-            if (f2.volExec > 0) await tryUnwindMarket(creds, "sell", f2.volExec, "SOLUSD",    `sell ${f2.volExec.toFixed(8)} SOL partial leg2`, log);
-            if (btcRemaining > 0) await tryUnwindMarket(creds, "sell", btcRemaining, "XXBTZUSD", `sell ${btcRemaining.toFixed(8)} BTC remaining leg1`, log);
+            if (f2.volExec > 0) await tryUnwindMarket(creds, "sell", f2.volExec, "SOLUSD",    `sell ${f2.volExec.toFixed(8)} SOL partial leg2`, log, { records: triUnwindFills, leg: 2 });
+            if (btcRemaining > 0) await tryUnwindMarket(creds, "sell", btcRemaining, "XXBTZUSD", `sell ${btcRemaining.toFixed(8)} BTC remaining leg1`, log, { records: triUnwindFills, leg: 1 });
             throw new Error(`Leg 2 SOL buy timed out. SOL ${f2.volExec.toFixed(8)} + BTC ${btcRemaining.toFixed(8)} unwound.`);
           }
           actualSolAmt = f2.volExec; // actual SOL acquired; use for leg 3
@@ -3946,14 +4005,14 @@ router.post("/arb/execute-triangular", async (req, res): Promise<void> => {
             : await krakenRawMarketOrder(creds, "sell", actualSolAmt,         "SOLUSD");
           leg3Id = r3.txid[0] ?? "";
         } catch (e) {
-          await tryUnwindMarket(creds, "sell", actualSolAmt, "SOLUSD", "sell SOL (unwind after leg3 rejected)", log);
+          await tryUnwindMarket(creds, "sell", actualSolAmt, "SOLUSD", "sell SOL (unwind after leg3 rejected)", log, { records: triUnwindFills, leg: 3 });
           throw new Error(`Leg 3 failed (SOL unwound): ${(e as Error).message}`);
         }
         if (useLimit) {
           const f3 = await waitForTriLimitFill(creds, leg3Id, "leg3 SOL sell", log);
           if (!f3.filled) {
             const solRemaining = Math.max(0, actualSolAmt - f3.volExec);
-            if (solRemaining > 0) await tryUnwindMarket(creds, "sell", solRemaining, "SOLUSD", `sell ${solRemaining.toFixed(8)} SOL remaining leg3`, log);
+            if (solRemaining > 0) await tryUnwindMarket(creds, "sell", solRemaining, "SOLUSD", `sell ${solRemaining.toFixed(8)} SOL remaining leg3`, log, { records: triUnwindFills, leg: 3 });
             throw new Error(`Leg 3 SOL sell timed out. ${solRemaining.toFixed(8)} SOL remaining unwound.`);
           }
         }
@@ -3982,7 +4041,7 @@ router.post("/arb/execute-triangular", async (req, res): Promise<void> => {
         if (useLimit) {
           const f1 = await waitForTriLimitFill(creds, leg1Id, "leg1 SOL buy", log);
           if (!f1.filled) {
-            if (f1.volExec > 0) await tryUnwindMarket(creds, "sell", f1.volExec, "SOLUSD", `sell ${f1.volExec.toFixed(8)} SOL partial leg1`, log);
+            if (f1.volExec > 0) await tryUnwindMarket(creds, "sell", f1.volExec, "SOLUSD", `sell ${f1.volExec.toFixed(8)} SOL partial leg1`, log, { records: triUnwindFills, leg: 1 });
             throw new Error(`Leg 1 SOL buy timed out. ${f1.volExec > 0 ? `Partial ${f1.volExec.toFixed(8)} SOL unwound.` : "No fill."}`);
           }
           actualSolAmt2 = f1.volExec;
@@ -3996,7 +4055,7 @@ router.post("/arb/execute-triangular", async (req, res): Promise<void> => {
             : await krakenRawMarketOrder(creds, "sell", actualSolAmt2,            "SOLXBT");
           leg2Id = r2.txid[0] ?? "";
         } catch (e) {
-          await tryUnwindMarket(creds, "sell", actualSolAmt2, "SOLUSD", "sell SOL (unwind leg1)", log);
+          await tryUnwindMarket(creds, "sell", actualSolAmt2, "SOLUSD", "sell SOL (unwind leg1)", log, { records: triUnwindFills, leg: 1 });
           throw new Error(`Leg 2 failed (leg 1 unwound): ${(e as Error).message}`);
         }
         if (useLimit) {
@@ -4005,8 +4064,8 @@ router.post("/arb/execute-triangular", async (req, res): Promise<void> => {
             // SOLXBT sell: vol_exec=SOL sold, cost-fee=BTC acquired
             const btcAcquired = Math.max(0, f2.cost - f2.fee);
             const solRemaining = Math.max(0, actualSolAmt2 - f2.volExec);
-            if (solRemaining > 0) await tryUnwindMarket(creds, "sell", solRemaining, "SOLUSD",    `sell ${solRemaining.toFixed(8)} SOL remaining leg2`, log);
-            if (btcAcquired > 0) await tryUnwindMarket(creds, "sell", btcAcquired,  "XXBTZUSD", `sell ${btcAcquired.toFixed(8)} BTC partial leg2`, log);
+            if (solRemaining > 0) await tryUnwindMarket(creds, "sell", solRemaining, "SOLUSD",    `sell ${solRemaining.toFixed(8)} SOL remaining leg2`, log, { records: triUnwindFills, leg: 2 });
+            if (btcAcquired > 0) await tryUnwindMarket(creds, "sell", btcAcquired,  "XXBTZUSD", `sell ${btcAcquired.toFixed(8)} BTC partial leg2`, log, { records: triUnwindFills, leg: 2 });
             throw new Error(`Leg 2 SOL sell timed out. SOL ${solRemaining.toFixed(8)} + BTC ${btcAcquired.toFixed(8)} unwound.`);
           }
           actualBtcAmt2 = Math.max(0, f2.cost - f2.fee); // actual BTC received
@@ -4019,14 +4078,14 @@ router.post("/arb/execute-triangular", async (req, res): Promise<void> => {
             : await krakenRawMarketOrder(creds, "sell", actualBtcAmt2,         "XXBTZUSD");
           leg3Id = r3.txid[0] ?? "";
         } catch (e) {
-          await tryUnwindMarket(creds, "sell", actualBtcAmt2, "XXBTZUSD", "sell BTC (unwind after leg3 rejected)", log);
+          await tryUnwindMarket(creds, "sell", actualBtcAmt2, "XXBTZUSD", "sell BTC (unwind after leg3 rejected)", log, { records: triUnwindFills, leg: 3 });
           throw new Error(`Leg 3 failed (BTC unwound): ${(e as Error).message}`);
         }
         if (useLimit) {
           const f3 = await waitForTriLimitFill(creds, leg3Id, "leg3 BTC sell", log);
           if (!f3.filled) {
             const btcRemaining = Math.max(0, actualBtcAmt2 - f3.volExec);
-            if (btcRemaining > 0) await tryUnwindMarket(creds, "sell", btcRemaining, "XXBTZUSD", `sell ${btcRemaining.toFixed(8)} BTC remaining leg3`, log);
+            if (btcRemaining > 0) await tryUnwindMarket(creds, "sell", btcRemaining, "XXBTZUSD", `sell ${btcRemaining.toFixed(8)} BTC remaining leg3`, log, { records: triUnwindFills, leg: 3 });
             throw new Error(`Leg 3 BTC sell timed out. ${btcRemaining.toFixed(8)} BTC remaining unwound.`);
           }
         }
@@ -4058,7 +4117,7 @@ router.post("/arb/execute-triangular", async (req, res): Promise<void> => {
         if (useLimit) {
           const f1 = await waitForTriLimitFill(creds, leg1Id, "leg1 SOL buy", log);
           if (!f1.filled) {
-            if (f1.volExec > 0) await tryUnwindMarket(creds, "sell", f1.volExec, "SOLUSD", `sell ${f1.volExec.toFixed(8)} SOL partial leg1`, log);
+            if (f1.volExec > 0) await tryUnwindMarket(creds, "sell", f1.volExec, "SOLUSD", `sell ${f1.volExec.toFixed(8)} SOL partial leg1`, log, { records: triUnwindFills, leg: 1 });
             throw new Error(`Leg 1 SOL buy timed out. ${f1.volExec > 0 ? `Partial ${f1.volExec.toFixed(8)} SOL unwound.` : "No fill."}`);
           }
           actualSolAmt = f1.volExec;
@@ -4074,7 +4133,7 @@ router.post("/arb/execute-triangular", async (req, res): Promise<void> => {
             : await krakenRawMarketOrder(creds, "buy", leg2EthAmt,            "ETHSOL");
           leg2Id = r2.txid[0] ?? "";
         } catch (e) {
-          await tryUnwindMarket(creds, "sell", actualSolAmt, "SOLUSD", "sell SOL (unwind leg1)", log);
+          await tryUnwindMarket(creds, "sell", actualSolAmt, "SOLUSD", "sell SOL (unwind leg1)", log, { records: triUnwindFills, leg: 1 });
           throw new Error(`Leg 2 failed (leg 1 unwound): ${(e as Error).message}`);
         }
         if (useLimit) {
@@ -4083,8 +4142,8 @@ router.post("/arb/execute-triangular", async (req, res): Promise<void> => {
             // ETHSOL buy: vol_exec=ETH acquired, cost+fee=SOL consumed
             const solConsumed = f2.cost + f2.fee;
             const solRemaining = Math.max(0, actualSolAmt - solConsumed);
-            if (f2.volExec > 0) await tryUnwindMarket(creds, "sell", f2.volExec, "XETHZUSD", `sell ${f2.volExec.toFixed(8)} ETH partial leg2`, log);
-            if (solRemaining > 0) await tryUnwindMarket(creds, "sell", solRemaining, "SOLUSD",  `sell ${solRemaining.toFixed(8)} SOL remaining leg1`, log);
+            if (f2.volExec > 0) await tryUnwindMarket(creds, "sell", f2.volExec, "XETHZUSD", `sell ${f2.volExec.toFixed(8)} ETH partial leg2`, log, { records: triUnwindFills, leg: 2 });
+            if (solRemaining > 0) await tryUnwindMarket(creds, "sell", solRemaining, "SOLUSD",  `sell ${solRemaining.toFixed(8)} SOL remaining leg1`, log, { records: triUnwindFills, leg: 1 });
             throw new Error(`Leg 2 ETH buy timed out. ETH ${f2.volExec.toFixed(8)} + SOL ${solRemaining.toFixed(8)} unwound.`);
           }
           actualEthAmt = f2.volExec;
@@ -4097,14 +4156,14 @@ router.post("/arb/execute-triangular", async (req, res): Promise<void> => {
             : await krakenRawMarketOrder(creds, "sell", actualEthAmt,         "XETHZUSD");
           leg3Id = r3.txid[0] ?? "";
         } catch (e) {
-          await tryUnwindMarket(creds, "sell", actualEthAmt, "XETHZUSD", "sell ETH for USD (unwind after leg3 rejected)", log);
+          await tryUnwindMarket(creds, "sell", actualEthAmt, "XETHZUSD", "sell ETH for USD (unwind after leg3 rejected)", log, { records: triUnwindFills, leg: 3 });
           throw new Error(`Leg 3 failed (ETH unwound): ${(e as Error).message}`);
         }
         if (useLimit) {
           const f3 = await waitForTriLimitFill(creds, leg3Id, "leg3 ETH sell", log);
           if (!f3.filled) {
             const ethRemaining = Math.max(0, actualEthAmt - f3.volExec);
-            if (ethRemaining > 0) await tryUnwindMarket(creds, "sell", ethRemaining, "XETHZUSD", `sell ${ethRemaining.toFixed(8)} ETH remaining leg3`, log);
+            if (ethRemaining > 0) await tryUnwindMarket(creds, "sell", ethRemaining, "XETHZUSD", `sell ${ethRemaining.toFixed(8)} ETH remaining leg3`, log, { records: triUnwindFills, leg: 3 });
             throw new Error(`Leg 3 ETH sell timed out. ${ethRemaining.toFixed(8)} ETH remaining unwound.`);
           }
         }
@@ -4130,7 +4189,7 @@ router.post("/arb/execute-triangular", async (req, res): Promise<void> => {
         if (useLimit) {
           const f1 = await waitForTriLimitFill(creds, leg1Id, "leg1 ETH buy", log);
           if (!f1.filled) {
-            if (f1.volExec > 0) await tryUnwindMarket(creds, "sell", f1.volExec, "XETHZUSD", `sell ${f1.volExec.toFixed(8)} ETH partial leg1`, log);
+            if (f1.volExec > 0) await tryUnwindMarket(creds, "sell", f1.volExec, "XETHZUSD", `sell ${f1.volExec.toFixed(8)} ETH partial leg1`, log, { records: triUnwindFills, leg: 1 });
             throw new Error(`Leg 1 ETH buy timed out. ${f1.volExec > 0 ? `Partial ${f1.volExec.toFixed(8)} ETH unwound.` : "No fill."}`);
           }
           actualEthAmt2 = f1.volExec;
@@ -4145,7 +4204,7 @@ router.post("/arb/execute-triangular", async (req, res): Promise<void> => {
             : await krakenRawMarketOrder(creds, "sell", actualEthAmt2,            "ETHSOL");
           leg2Id = r2.txid[0] ?? "";
         } catch (e) {
-          await tryUnwindMarket(creds, "sell", actualEthAmt2, "XETHZUSD", "sell ETH (unwind leg1)", log);
+          await tryUnwindMarket(creds, "sell", actualEthAmt2, "XETHZUSD", "sell ETH (unwind leg1)", log, { records: triUnwindFills, leg: 1 });
           throw new Error(`Leg 2 failed (leg 1 unwound): ${(e as Error).message}`);
         }
         if (useLimit) {
@@ -4154,8 +4213,8 @@ router.post("/arb/execute-triangular", async (req, res): Promise<void> => {
             // ETHSOL sell: vol_exec=ETH sold, cost-fee=SOL received
             const solAcquired = Math.max(0, f2.cost - f2.fee);
             const ethRemaining = Math.max(0, actualEthAmt2 - f2.volExec);
-            if (ethRemaining > 0) await tryUnwindMarket(creds, "sell", ethRemaining, "XETHZUSD", `sell ${ethRemaining.toFixed(8)} ETH remaining leg2`, log);
-            if (solAcquired > 0) await tryUnwindMarket(creds, "sell", solAcquired,   "SOLUSD",   `sell ${solAcquired.toFixed(8)} SOL partial leg2`, log);
+            if (ethRemaining > 0) await tryUnwindMarket(creds, "sell", ethRemaining, "XETHZUSD", `sell ${ethRemaining.toFixed(8)} ETH remaining leg2`, log, { records: triUnwindFills, leg: 2 });
+            if (solAcquired > 0) await tryUnwindMarket(creds, "sell", solAcquired,   "SOLUSD",   `sell ${solAcquired.toFixed(8)} SOL partial leg2`, log, { records: triUnwindFills, leg: 2 });
             throw new Error(`Leg 2 ETH sell timed out. ETH ${ethRemaining.toFixed(8)} + SOL ${solAcquired.toFixed(8)} unwound.`);
           }
           actualSolAmt2 = Math.max(0, f2.cost - f2.fee); // actual SOL received
@@ -4168,14 +4227,14 @@ router.post("/arb/execute-triangular", async (req, res): Promise<void> => {
             : await krakenRawMarketOrder(creds, "sell", actualSolAmt2,         "SOLUSD");
           leg3Id = r3.txid[0] ?? "";
         } catch (e) {
-          await tryUnwindMarket(creds, "sell", actualSolAmt2, "SOLUSD", "sell SOL (unwind after leg3 rejected)", log);
+          await tryUnwindMarket(creds, "sell", actualSolAmt2, "SOLUSD", "sell SOL (unwind after leg3 rejected)", log, { records: triUnwindFills, leg: 3 });
           throw new Error(`Leg 3 failed (SOL unwound): ${(e as Error).message}`);
         }
         if (useLimit) {
           const f3 = await waitForTriLimitFill(creds, leg3Id, "leg3 SOL sell", log);
           if (!f3.filled) {
             const solRemaining = Math.max(0, actualSolAmt2 - f3.volExec);
-            if (solRemaining > 0) await tryUnwindMarket(creds, "sell", solRemaining, "SOLUSD", `sell ${solRemaining.toFixed(8)} SOL remaining leg3`, log);
+            if (solRemaining > 0) await tryUnwindMarket(creds, "sell", solRemaining, "SOLUSD", `sell ${solRemaining.toFixed(8)} SOL remaining leg3`, log, { records: triUnwindFills, leg: 3 });
             throw new Error(`Leg 3 SOL sell timed out. ${solRemaining.toFixed(8)} SOL remaining unwound.`);
           }
         }
@@ -4219,6 +4278,7 @@ router.post("/arb/execute-triangular", async (req, res): Promise<void> => {
           buyOrderId: leg1Id || null, sellOrderId: leg3Id || null,
           status: "failed",
           realizedProfitUsd: null, // fills/unwinds not reconciled — unknown, never an estimate
+          legFills: triUnwindFills.length > 0 ? triUnwindFills : undefined,
         });
       } catch (e) { req.log.error({ e }, "tri FAILED ledger row failed"); }
       await snapshotAccountValue(creds, "post_trade", req.log);
@@ -5547,6 +5607,22 @@ router.post("/arb/inventory-execute", async (req, res): Promise<void> => {
     let filledVolume = 0;
     let buySpendUsd = 0, sellProceedsUsd = 0;
     let anyAccepted = false;
+    // Unwind orders move real money — collect their CONFIRMED fills so the
+    // failed ledger row shows every real order (unwind: true).
+    const invUnwindFills: UnwindLegFill[] = [];
+    // Coinbase-side unwind: place the market sell, then confirm the ACTUAL
+    // fill and record it — mirrors what tryUnwindMarket does for Kraken.
+    const cbInvUnwind = async (vol: number, limitPx: number, label: string, leg: number) => {
+      const r = await coinbaseMarketOrder(cbCreds, "SELL", vol, limitPx, pair);
+      const oid = r.orderId ?? "";
+      if (!oid || r.success === false) throw new Error("Coinbase unwind order rejected (no order id).");
+      const d = await waitCoinbaseFill(oid);
+      invUnwindFills.push({
+        leg, label: `${label}${d.filledSize > 0 ? "" : " (accepted, fill unconfirmed)"}`,
+        pair, side: "sell", price: d.filledSize > 0 ? d.filledValue / d.filledSize : null,
+        volume: d.filledSize, costUsd: d.filledValue, fee: d.totalFees, txid: oid, unwind: true,
+      });
+    };
 
     const CB_TERMINAL = new Set(["FILLED", "CANCELLED", "EXPIRED", "FAILED"]);
     const waitCoinbaseFill = async (orderId: string) => {
@@ -5603,7 +5679,7 @@ router.post("/arb/inventory-execute", async (req, res): Promise<void> => {
         filledVolume = fill.volExec;
         buySpendUsd  = fill.cost + fill.fee;
         if (fill.status !== "closed" || filledVolume <= 0) {
-          if (filledVolume > 0) await tryUnwindMarket(kCreds, "sell", filledVolume, krakenRaw, `unwind partial inv-buy ${sym}`, log);
+          if (filledVolume > 0) await tryUnwindMarket(kCreds, "sell", filledVolume, krakenRaw, `unwind partial inv-buy ${sym}`, log, { records: invUnwindFills, leg: 1 });
           throw new Error(`Kraken buy did not fill (${fill.status}, ${filledVolume.toFixed(8)}/${plannedVolume.toFixed(8)}); unwound.`);
         }
       } else {
@@ -5616,7 +5692,7 @@ router.post("/arb/inventory-execute", async (req, res): Promise<void> => {
         buySpendUsd  = d.filledValue + d.totalFees;
         if (d.status !== "FILLED") {
           if (filledVolume > 0) {
-            try { await coinbaseMarketOrder(cbCreds, "SELL", filledVolume, buyPrice, pair); } catch (e) {
+            try { await cbInvUnwind(filledVolume, buyPrice, `unwind partial inv-buy ${sym}`, 1); } catch (e) {
               log.error(`Coinbase partial-buy unwind failed (${filledVolume.toFixed(8)} ${sym}): ${(e as Error).message}`);
             }
           }
@@ -5651,9 +5727,9 @@ router.post("/arb/inventory-execute", async (req, res): Promise<void> => {
         const residual = sellErr instanceof ResidualError ? sellErr.residual : filledVolume;
         if (residual > 0) {
           if (buyExchange === "Kraken") {
-            await tryUnwindMarket(kCreds, "sell", residual, krakenRaw, `inv sell-fail unwind ${sym}`, log);
+            await tryUnwindMarket(kCreds, "sell", residual, krakenRaw, `inv sell-fail unwind ${sym}`, log, { records: invUnwindFills, leg: 1 });
           } else {
-            try { await coinbaseMarketOrder(cbCreds, "SELL", residual, buyPrice, pair); }
+            try { await cbInvUnwind(residual, buyPrice, `inv sell-fail unwind ${sym}`, 1); }
             catch (e) { log.error(`Coinbase sell-fail unwind failed (${residual.toFixed(8)} ${sym}): ${(e as Error).message}`); }
           }
         }
@@ -5671,6 +5747,14 @@ router.post("/arb/inventory-execute", async (req, res): Promise<void> => {
             buyOrderId: buyOrderId || null, sellOrderId: sellOrderId || null,
             status: "failed",
             realizedProfitUsd: filledVolume > 0 ? null : "0",
+            // Confirmed buy-leg fill (if any) + unwind orders — every real order.
+            legFills: (() => {
+              const fills: UnwindLegFill[] = [
+                ...(buyOrderId && filledVolume > 0 ? [{ leg: 1, label: "buy (confirmed fill)", pair, side: "buy", price: filledVolume > 0 ? buySpendUsd / filledVolume : null, volume: filledVolume, costUsd: buySpendUsd, fee: 0, txid: buyOrderId }] : []),
+                ...invUnwindFills,
+              ];
+              return fills.length > 0 ? fills : undefined;
+            })(),
           });
         } catch { /* best effort */ }
       }
