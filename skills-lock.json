@@ -1,6 +1,12 @@
 {
   "version": 1,
   "skills": {
+    "agent-tools": {
+      "source": "inf-sh/skills",
+      "sourceType": "github",
+      "skillPath": "tools/agent-tools/SKILL.md",
+      "computedHash": "d4388bd70a41006288d8aa3db6f4132e38a26e3ddd725162aca1ef34b1aad6fb"
+    },
     "find-skills": {
       "source": "vercel-labs/skills",
       "sourceType": "github",
