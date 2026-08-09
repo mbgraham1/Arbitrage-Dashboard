@@ -11,7 +11,7 @@ import { useTestKraken, useTestCoinbase, useTestGemini, GeminiTestResult } from 
 const INVENTORY_ASSETS = ["BTC", "ETH", "SOL", "AVAX", "DOT"] as const;
 
 export default function Settings() {
-  const { credentials, setCredentials, settings, setSettings, liveMode, setLiveMode, isRunning, secretsLoaded, cachedBalances } = useBotContext();
+  const { credentials, setCredentials, settings, setSettings, liveMode, setLiveMode, isRunning, secretsLoaded, cachedBalances, latestPriceData } = useBotContext();
 
   const [localCreds, setLocalCreds] = useState(credentials);
   const [localSettings, setLocalSettings] = useState(settings);
@@ -533,15 +533,32 @@ export default function Settings() {
                   ? (cachedBalances.baseAssetOnCoinbase ?? 0)
                   : (cachedBalances.solOnCoinbase ?? 0);
                 const precision = baseAsset === "BTC" ? 6 : 4;
+                // Approx USD value of base-asset holdings, priced from the
+                // latest scan's buy price. Only shown when the live price is
+                // for the SAME base asset as the balances — a stale price for
+                // a different pair must never be used for the conversion.
+                const priceBase = latestPriceData?.pair?.split("/")[0] ?? null;
+                const basePrice =
+                  priceBase === baseAsset && (latestPriceData?.buyPrice ?? 0) > 0
+                    ? latestPriceData!.buyPrice
+                    : null;
+                const usdApprox = (amt: number) =>
+                  basePrice != null ? `≈ $${(amt * basePrice).toFixed(2)}` : null;
                 return (
                   <div className="grid grid-cols-3 divide-x-2 divide-border text-center">
                     <div className="p-2 flex flex-col gap-0.5">
                       <span className="text-[10px] uppercase text-muted-foreground">Kraken {baseAsset}</span>
                       <span className="font-mono text-sm">{krakenAmt.toFixed(precision)}</span>
+                      {usdApprox(krakenAmt) && (
+                        <span className="text-[10px] font-mono text-muted-foreground" data-testid="text-kraken-usd-value">{usdApprox(krakenAmt)}</span>
+                      )}
                     </div>
                     <div className="p-2 flex flex-col gap-0.5">
                       <span className="text-[10px] uppercase text-muted-foreground">Coinbase {baseAsset}</span>
                       <span className="font-mono text-sm">{coinbaseAmt.toFixed(precision)}</span>
+                      {usdApprox(coinbaseAmt) && (
+                        <span className="text-[10px] font-mono text-muted-foreground" data-testid="text-coinbase-usd-value">{usdApprox(coinbaseAmt)}</span>
+                      )}
                     </div>
                     <div className="p-2 flex flex-col gap-0.5 bg-primary/5">
                       <span className="text-[10px] uppercase text-primary font-bold">Coinbase USD · bankroll</span>
