@@ -1060,6 +1060,12 @@ interface TriangleExecInput {
   maxQuoteAgeMs?: number;
   /** Max leg-1 maker reprices before abandoning the route (default 4). */
   maxReprices?: number;
+  /** Total leg-1 maker rest window in ms (clamped 5000–120000 server-side).
+   *  Overrides the derived/makerTimeoutMs rest window for leg 1 only. */
+  leg1RestMs?: number;
+  /** Leg-1 edge re-check / reprice interval in ms while the maker order rests
+   *  (clamped 500–30000 server-side; default 2500). */
+  edgeCheckMs?: number;
   /** Trader-directed: when leg-1 maker doesn't fill in its window, go taker
    *  IMMEDIATELY without the taker-priced profit-floor gate. WARNING: a
    *  decayed edge will execute at whatever the fresh taker price gives —
@@ -1298,9 +1304,16 @@ async function runKrakenTriangle(input: TriangleExecInput, reqLog: ReqLog): Prom
     // most aggressive valid maker price every LEG1_REPRICE_MS; after
     // LEG1_MAX_REPRICES the leg is abandoned so the caller can fall through to
     // the next-best route. Total window derives from the two.
-    const LEG1_REPRICE_MS = 2_500;
-    const LEG1_MAX_REPRICES = input.maxReprices ?? 4;
-    const LEG1_MAX_REST_MS = input.makerTimeoutMs ?? (LEG1_MAX_REPRICES + 1) * LEG1_REPRICE_MS;
+    // Server-side clamps — never trust client numbers for live orders.
+    const LEG1_REPRICE_MS = input.edgeCheckMs != null
+      ? Math.min(30_000, Math.max(500, Math.round(input.edgeCheckMs)))
+      : 2_500;
+    const LEG1_MAX_REPRICES = input.maxReprices != null
+      ? Math.min(10, Math.max(1, Math.round(input.maxReprices)))
+      : 4;
+    const LEG1_MAX_REST_MS = input.leg1RestMs != null
+      ? Math.min(120_000, Math.max(5_000, Math.round(input.leg1RestMs)))
+      : (input.makerTimeoutMs ?? (LEG1_MAX_REPRICES + 1) * LEG1_REPRICE_MS);
     const MAX_LEG_ATTEMPTS = 1;
     interface AggFill { volExec: number; cost: number; fee: number; txid: string }
     const isFinal = (s: string) => s === "closed" || s === "canceled" || s === "expired";
@@ -2800,6 +2813,10 @@ router.post("/arb/graph-execute", async (req, res): Promise<void> => {
           : parsed.data.makerTimeoutMs != null ? Math.min(30_000, Math.max(1_000, Math.round(parsed.data.makerTimeoutMs))) : undefined,
         // Clamp: 1..10 reprices — never trust client numbers for live orders.
         maxReprices: Math.min(10, Math.max(1, Math.round(parsed.data.maxReprices ?? 4))),
+        // Trader-tuned leg-1 rest window + edge-check interval (re-clamped
+        // inside runKrakenTriangle: 5000–120000ms / 500–30000ms).
+        leg1RestMs: parsed.data.leg1RestMs,
+        edgeCheckMs: parsed.data.edgeCheckMs,
         alwaysTakerFallback: parsed.data.alwaysTakerFallback === true,
         partialFillTolerancePct: parsed.data.partialFillTolerancePct,
         // TAKER path (requested or adaptive-chosen): market/IOC all 3 legs,

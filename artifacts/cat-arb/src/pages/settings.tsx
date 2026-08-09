@@ -682,6 +682,54 @@ export default function Settings() {
               />
             </div>
 
+            <div className="space-y-3">
+              <div className="flex flex-col gap-1">
+                <Label>Leg-1 Maker Rest Window (s)</Label>
+                <span className="text-xs text-muted-foreground font-mono">How long the leg-1 post-only order may rest waiting for a fill before the route is abandoned (5–120s, default 30s). The edge re-check can still cancel it early.</span>
+              </div>
+              <Input
+                type="number"
+                step="1"
+                min="5"
+                max="120"
+                data-testid="input-leg1-rest-sec"
+                value={localSettings.leg1RestSec}
+                onChange={(e) => setLocalSettings({ ...localSettings, leg1RestSec: Math.min(120, Math.max(5, parseFloat(e.target.value) || 30)) })}
+              />
+            </div>
+
+            <div className="space-y-3">
+              <div className="flex flex-col gap-1">
+                <Label>Edge Re-check Interval (s)</Label>
+                <span className="text-xs text-muted-foreground font-mono">While resting, re-verify the edge and the join price this often (0.5–30s, default 2.5s). Edge gone → cancel early; book moved → chase.</span>
+              </div>
+              <Input
+                type="number"
+                step="0.5"
+                min="0.5"
+                max="30"
+                data-testid="input-leg1-edge-check-sec"
+                value={localSettings.leg1EdgeCheckSec}
+                onChange={(e) => setLocalSettings({ ...localSettings, leg1EdgeCheckSec: Math.min(30, Math.max(0.5, parseFloat(e.target.value) || 2.5)) })}
+              />
+            </div>
+
+            <div className="space-y-3">
+              <div className="flex flex-col gap-1">
+                <Label>Max Book Chases</Label>
+                <span className="text-xs text-muted-foreground font-mono">Max cancel + re-join moves to follow a drifting book within the rest window (1–10, default 4). More chases = stays at the front of the queue longer.</span>
+              </div>
+              <Input
+                type="number"
+                step="1"
+                min="1"
+                max="10"
+                data-testid="input-leg1-max-chases"
+                value={localSettings.leg1MaxChases}
+                onChange={(e) => setLocalSettings({ ...localSettings, leg1MaxChases: Math.min(10, Math.max(1, Math.round(parseFloat(e.target.value) || 4))) })}
+              />
+            </div>
+
             <Button className="w-full mt-2" onClick={handleSaveSettings} data-testid="button-save-ob-settings">
               SAVE OB HUNTER SETTINGS
             </Button>

@@ -95,6 +95,10 @@ export interface BotSettings {
   // A leg filled to at least this fraction counts as complete; residual
   // inventory is swept back to USD at market instead of unwinding the cycle.
   partialFillTolerancePct: number;
+  // Leg-1 maker rest & chase tuning (Kraken triangles, graph/OB executes)
+  leg1RestSec: number;      // total rest window for the leg-1 post-only order (server clamps 5–120s)
+  leg1EdgeCheckSec: number; // edge re-check / reprice interval while resting (server clamps 0.5–30s)
+  leg1MaxChases: number;    // max cancel + re-join chases within the rest window (server clamps 1–10)
 }
 
 /**
@@ -232,6 +236,9 @@ const DEFAULT_SETTINGS: BotSettings = {
   inventoryTargetPct: 50,
   inventoryTradeSizeUsd: 10,
   partialFillTolerancePct: 99.9, // accept a leg as complete at ≥99.9% filled (near-exact by default)
+  leg1RestSec: 30,       // leg-1 maker order may rest up to 30s (tunable 5–120s)
+  leg1EdgeCheckSec: 2.5, // re-check the edge / reprice every 2.5s while resting
+  leg1MaxChases: 4,      // up to 4 cancel + re-join chases within the rest window
 };
 
 // Bump this when defaults change meaningfully — forces a one-time reset for existing users
@@ -603,6 +610,9 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
           feesPct: s.obFeesPct,
           minProfitUsd: s.obMinProfitUsd,
           isDryRun,
+          leg1RestMs: Math.round(s.leg1RestSec * 1000),
+          edgeCheckMs: Math.round(s.leg1EdgeCheckSec * 1000),
+          maxReprices: s.leg1MaxChases,
         },
       },
       {

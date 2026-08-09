@@ -434,6 +434,7 @@ export const obExecuteBodyTradeSizeUsdDefault = 10;
 export const obExecuteBodyFeesPctDefault = 0.5;
 export const obExecuteBodyMinProfitUsdDefault = 0.02;
 export const obExecuteBodyIsDryRunDefault = true;
+export const obExecuteBodyMaxRepricesDefault = 4;
 
 export const ObExecuteBody = zod.object({
   "krakenKey": zod.string(),
@@ -443,7 +444,10 @@ export const ObExecuteBody = zod.object({
   "tradeSizeUsd": zod.number().default(obExecuteBodyTradeSizeUsdDefault),
   "feesPct": zod.number().default(obExecuteBodyFeesPctDefault),
   "minProfitUsd": zod.number().default(obExecuteBodyMinProfitUsdDefault).describe('Min net profit ($) at $10; pre-flight gate scales it by size\/10'),
-  "isDryRun": zod.boolean().default(obExecuteBodyIsDryRunDefault)
+  "isDryRun": zod.boolean().default(obExecuteBodyIsDryRunDefault),
+  "leg1RestMs": zod.number().optional().describe('Total leg-1 maker rest window in ms (server clamps to 5000–120000). The post-only order may rest up to this long while the edge-recheck loop can cancel it early.\n'),
+  "edgeCheckMs": zod.number().optional().describe('Leg-1 edge re-check \/ reprice interval in ms while the maker order rests (server clamps to 500–30000; default 2500).\n'),
+  "maxReprices": zod.number().default(obExecuteBodyMaxRepricesDefault).describe('Max leg-1 chases (cancel + re-join at the fresh maker price) within the rest window (server clamps to 1–10).\n')
 })
 
 export const ObExecuteResponse = zod.object({
@@ -2158,6 +2162,8 @@ export const GraphExecuteBody = zod.object({
   "forceMode": zod.boolean().default(graphExecuteBodyForceModeDefault).describe('FORCE MODE — skip the fill-rate feedback gate, historical-shortfall penalty, and consecutive-failure blacklist entirely. Fresh pre-flight profit gates (net profit minus slippage buffer > minProfitUsd) still apply; this never authorizes a trade the live re-quote says is unprofitable. Requires valid Kraken credentials (operator proof, verified up front) — rejected with 403 otherwise.\n'),
   "maxReprices": zod.number().default(graphExecuteBodyMaxRepricesDefault).describe('Max leg-1 maker reprices (cancel + re-place at the freshest aggressive maker price, pre-flight re-run each time) before the route is abandoned so execution falls through to the next-best one.\n'),
   "makerTimeoutMs": zod.number().optional().describe('Per-leg maker fill window in ms (clamped 1000–30000 server-side). Lower = faster taker fallback; default derives from maxReprices.\n'),
+  "leg1RestMs": zod.number().optional().describe('Total leg-1 maker rest window in ms (server clamps to 5000–120000). Overrides the derived\/makerTimeoutMs rest window for leg 1 only.\n'),
+  "edgeCheckMs": zod.number().optional().describe('Leg-1 edge re-check \/ reprice interval in ms while the maker order rests (server clamps to 500–30000; default 2500).\n'),
   "partialFillTolerancePct": zod.number().optional().describe('Partial-fill acceptance in percent (server clamps to 50–100; default 99.9). A leg filled to at least this fraction counts as complete — the cycle proceeds sized to the actual fill and any residual inventory is swept back to USD at market instead of the whole cycle unwinding.\n'),
   "alwaysTakerFallback": zod.boolean().default(graphExecuteBodyAlwaysTakerFallbackDefault).describe('Trader-directed — when the leg-1 maker order doesn\'t fill in its window, fire the taker fallback immediately WITHOUT the taker-priced profit-floor gate. A decayed edge will execute at the fresh taker price, possibly at a loss. Still requires a readable fresh order book.\n'),
   "maxQuoteAgeMs": zod.number().default(graphExecuteBodyMaxQuoteAgeMsDefault).describe('Micro-check freshness threshold (ms, clamped 50–5000): the cached in-memory book snapshot used for the adaptive pre-fire decision must be at most this old, otherwise the fire is SKIPPED (stale data never executes blind).\n')

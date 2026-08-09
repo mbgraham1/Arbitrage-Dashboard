@@ -2120,6 +2120,23 @@ components:
         isDryRun:
           type: boolean
           default: true
+        leg1RestMs:
+          type: number
+          description: >
+            Total leg-1 maker rest window in ms (server clamps to 5000–120000).
+            The post-only order may rest up to this long while the edge-recheck
+            loop can cancel it early.
+        edgeCheckMs:
+          type: number
+          description: >
+            Leg-1 edge re-check / reprice interval in ms while the maker order
+            rests (server clamps to 500–30000; default 2500).
+        maxReprices:
+          type: number
+          default: 4
+          description: >
+            Max leg-1 chases (cancel + re-join at the fresh maker price) within
+            the rest window (server clamps to 1–10).
 
     CrossMmExecuteRequest:
       type: object
@@ -3608,6 +3625,16 @@ components:
           description: >
             Per-leg maker fill window in ms (clamped 1000–30000 server-side).
             Lower = faster taker fallback; default derives from maxReprices.
+        leg1RestMs:
+          type: number
+          description: >
+            Total leg-1 maker rest window in ms (server clamps to 5000–120000).
+            Overrides the derived/makerTimeoutMs rest window for leg 1 only.
+        edgeCheckMs:
+          type: number
+          description: >
+            Leg-1 edge re-check / reprice interval in ms while the maker order
+            rests (server clamps to 500–30000; default 2500).
         partialFillTolerancePct:
           type: number
           description: >

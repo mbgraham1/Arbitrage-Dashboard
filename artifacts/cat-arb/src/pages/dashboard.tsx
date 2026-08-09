@@ -2236,7 +2236,15 @@ function GraphEngineCard() {
             isDryRun: !liveMode,
             executionStyle: style,
             forceMode: forceMode && liveMode,
-            ...(fastTakerFallback ? { maxReprices: 1, makerTimeoutMs: 3_000, alwaysTakerFallback: true } : {}),
+            // Trader-tuned leg-1 rest & chase settings (Config page); fast
+            // taker fallback overrides them with a single short maker window.
+            ...(fastTakerFallback
+              ? { maxReprices: 1, makerTimeoutMs: 3_000, alwaysTakerFallback: true }
+              : {
+                  leg1RestMs: Math.round(settings.leg1RestSec * 1000),
+                  edgeCheckMs: Math.round(settings.leg1EdgeCheckSec * 1000),
+                  maxReprices: settings.leg1MaxChases,
+                }),
             partialFillTolerancePct: settings.partialFillTolerancePct,
           },
         });

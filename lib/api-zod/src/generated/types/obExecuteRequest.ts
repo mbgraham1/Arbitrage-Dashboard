@@ -17,4 +17,10 @@ export interface ObExecuteRequest {
   /** Min net profit ($) at $10; pre-flight gate scales it by size/10 */
   minProfitUsd?: number;
   isDryRun?: boolean;
+  /** Total leg-1 maker rest window in ms (server clamps to 5000–120000). The post-only order may rest up to this long while the edge-recheck loop can cancel it early. */
+  leg1RestMs?: number;
+  /** Leg-1 edge re-check / reprice interval in ms while the maker order rests (server clamps to 500–30000; default 2500). */
+  edgeCheckMs?: number;
+  /** Max leg-1 chases (cancel + re-join at the fresh maker price) within the rest window (server clamps to 1–10). */
+  maxReprices?: number;
 }
