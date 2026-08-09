@@ -458,16 +458,62 @@ export async function krakenAccountValueUsd(creds: KrakenCreds, fresh = false): 
   return { totalUsd: usdBalance + holdingsUsd, usdBalance, holdingsUsd, holdings, unpriced };
 }
 
+// ── Historical daily-close pricing for ledger cash flows ─────────────────────
+// Kraken's public OHLC endpoint (interval=1440) returns up to ~720 daily
+// candles per pair — enough to price ledger entries at their DEPOSIT-DAY
+// close instead of today's price. Cached per asset (candles are immutable
+// once the day closes; a short TTL keeps the current day's partial candle
+// from going stale).
+const DAY_SECS = 86_400;
+const ohlcDailyCache = new Map<string, { at: number; sinceUnix: number; closes: Map<number, number> }>(); // asset → dayStartUnix → close
+const OHLC_CACHE_MS = 15 * 60_000;
+
+/** Daily close map for `asset`USD, keyed by UTC day-start unix. Empty map on
+ *  failure — callers fall back to current-price approximation per entry.
+ *  Exported for tests only. */
+export async function krakenDailyCloses(asset: string, sinceUnix: number): Promise<Map<number, number>> {
+  const hit = ohlcDailyCache.get(asset);
+  // Reuse only when the cached fetch covered at least as far back as requested
+  // AND was taken during the current UTC day — a map cached before midnight
+  // holds the then-in-progress candle for the day that has since finalized,
+  // and its close would be stale (last pre-midnight price, not the real close).
+  const sameUtcDay = hit && Math.floor(hit.at / 1000 / DAY_SECS) === Math.floor(Date.now() / 1000 / DAY_SECS);
+  if (hit && sameUtcDay && Date.now() - hit.at < OHLC_CACHE_MS && hit.sinceUnix <= sinceUnix) return hit.closes;
+  try {
+    // `since` is exclusive of the candle containing it — back off one day so
+    // the entry's own day is always covered.
+    const result = await krakenPublicRequest<Record<string, unknown>>("/0/public/OHLC", {
+      pair: `${asset}USD`, interval: "1440", since: String(Math.max(0, sinceUnix - DAY_SECS)),
+    });
+    const candles = Object.entries(result).find(([k]) => k !== "last")?.[1];
+    const closes = new Map<number, number>();
+    if (Array.isArray(candles)) {
+      for (const c of candles) {
+        // Candle tuple: [time, open, high, low, close, vwap, volume, count]
+        const t = Number((c as unknown[])[0]);
+        const close = parseFloat(String((c as unknown[])[4]));
+        if (isFinite(t) && isFinite(close) && close > 0) closes.set(t, close);
+      }
+    }
+    ohlcDailyCache.set(asset, { at: Date.now(), sinceUnix, closes });
+    return closes;
+  } catch {
+    return new Map(); // no cache write — retry next call
+  }
+}
+
 /**
  * Net external cash flow (USD) into the Kraken account since `sinceUnix`:
  * deposits + incoming transfers − withdrawals − outgoing transfers, from the
- * private Ledgers API. Non-USD flows are valued at CURRENT ticker prices
- * (approximation — historical prices aren't fetched). Trades/fees excluded.
+ * private Ledgers API. Non-USD flows are valued at the daily OHLC close of
+ * each entry's own day (historical pricing); entries whose historical price
+ * is unavailable fall back to CURRENT ticker prices and set `approximated`.
+ * Trades/fees excluded.
  */
 export async function krakenNetCashFlowUsd(creds: KrakenCreds, sinceUnix: number): Promise<{ netUsd: number; entries: number; approximated: boolean; complete: boolean }> {
   type LedgerEntry = { refid: string; time: number; type: string; asset: string; amount: string; fee: string };
   let ofs = 0, entries = 0, approximated = false, complete = false;
-  const flows = new Map<string, number>(); // asset → net amount
+  const flowEntries: { asset: string; amount: number; time: number }[] = [];
   const MAX_PAGES = 40; // 40 × 50 = 2,000 ledger entries since baseline
   for (let page = 0; page < MAX_PAGES; page++) {
     const result = await krakenPrivateRequest<{ ledger: Record<string, LedgerEntry>; count: number }>(
@@ -477,7 +523,7 @@ export async function krakenNetCashFlowUsd(creds: KrakenCreds, sinceUnix: number
     for (const e of rows) {
       if (e.type !== "deposit" && e.type !== "withdrawal" && e.type !== "transfer") continue;
       entries++;
-      flows.set(e.asset, (flows.get(e.asset) ?? 0) + parseFloat(e.amount));
+      flowEntries.push({ asset: e.asset, amount: parseFloat(e.amount), time: e.time });
     }
     ofs += rows.length;
     if (ofs >= (result.count ?? 0)) { complete = true; break; }
@@ -487,17 +533,48 @@ export async function krakenNetCashFlowUsd(creds: KrakenCreds, sinceUnix: number
     const stripped = c.length >= 4 && (c.startsWith("X") || c.startsWith("Z")) ? c.slice(1) : c;
     return stripped.replace(/\.(HOLD|[SF])$/, "");
   };
-  for (const [rawAsset, amount] of flows) {
-    if (Math.abs(amount) < 1e-12) continue;
-    const asset = normalize(rawAsset);
-    if (asset === "USD" || asset === "USDT" || asset === "USDC") { netUsd += amount; continue; }
+  // Current-price fallback cache (one ticker fetch per asset at most).
+  const currentPrice = new Map<string, number | null>();
+  const getCurrentPrice = async (asset: string): Promise<number | null> => {
+    if (currentPrice.has(asset)) return currentPrice.get(asset)!;
+    let price: number | null = null;
     try {
       const t = await krakenPublicRequest<Record<string, { c: string[] }>>("/0/public/Ticker", { pair: `${asset}USD` });
       const first = Object.values(t)[0];
-      const price = first ? parseFloat(first.c[0]!) : NaN;
-      if (isFinite(price)) { netUsd += amount * price; approximated = true; }
-      else approximated = true;
-    } catch { approximated = true; }
+      const p = first ? parseFloat(first.c[0]!) : NaN;
+      if (isFinite(p)) price = p;
+    } catch { /* stays null */ }
+    currentPrice.set(asset, price);
+    return price;
+  };
+  // Earliest entry time per asset — one OHLC fetch per asset covers all its entries.
+  const earliest = new Map<string, number>();
+  for (const f of flowEntries) {
+    const asset = normalize(f.asset);
+    if (asset === "USD" || asset === "USDT" || asset === "USDC") continue;
+    if (Math.abs(f.amount) < 1e-12) continue;
+    const cur = earliest.get(asset);
+    if (cur == null || f.time < cur) earliest.set(asset, f.time);
+  }
+  const closesByAsset = new Map<string, Map<number, number>>();
+  for (const [asset, t] of earliest) {
+    closesByAsset.set(asset, await krakenDailyCloses(asset, Math.floor(t)));
+  }
+  for (const f of flowEntries) {
+    if (Math.abs(f.amount) < 1e-12) continue;
+    const asset = normalize(f.asset);
+    if (asset === "USD" || asset === "USDT" || asset === "USDC") { netUsd += f.amount; continue; }
+    const dayStart = Math.floor(f.time / DAY_SECS) * DAY_SECS;
+    // Only FINALIZED daily candles count as historical closes. Kraken's OHLC
+    // response includes the current, still-forming candle whose close is just
+    // a live price — today's entries use the flagged current-price fallback.
+    const todayStart = Math.floor(Date.now() / 1000 / DAY_SECS) * DAY_SECS;
+    const histPrice = dayStart < todayStart ? closesByAsset.get(asset)?.get(dayStart) : undefined;
+    if (histPrice != null) { netUsd += f.amount * histPrice; continue; }
+    // Historical price unavailable → current-price approximation (flagged).
+    approximated = true;
+    const p = await getCurrentPrice(asset);
+    if (p != null) netUsd += f.amount * p;
   }
   return { netUsd, entries, approximated, complete };
 }

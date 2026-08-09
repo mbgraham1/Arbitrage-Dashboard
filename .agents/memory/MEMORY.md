@@ -19,3 +19,4 @@
 - [Read-only service token gate](service-token-gate.md) — external agents get a hashed X-Service-Token with a GET allowlist; GET ≠ read-only here, audit handlers for side effects before allowlisting.
 - [Graph limitPrice contract](graph-limitprice-contract.md) — edges stamp taker-side top-of-book (buy→ask, sell→bid) on every venue; maker executors derive fresh join prices, never rest at limitPrice.
 - [Paged list atomicity](paged-list-atomicity.md) — {items,total} envelopes need ONE SQL statement (CTE+COUNT subquery); Promise.all(select,count) drifts across snapshots and fails review.
+- [Kraken OHLC pricing](kraken-ohlc-pricing.md) — in-progress daily candle is not a close; caches must expire at UTC rollover; since is exclusive.
