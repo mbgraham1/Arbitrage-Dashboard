@@ -15,6 +15,11 @@ export interface TriExecuteResult {
      * @nullable
      */
   estimatedProfitUsd: number | null;
+  /**
+     * Actual USD trade size used for the loop — $10 for dry/force runs, 20% of USD balance capped at $50 for the auto-loop. Null when the request is rejected before the size is determined. Lets the client compute thin-edge warnings against the real executed size.
+     * @nullable
+     */
+  tradeUsd?: number | null;
   /** @nullable */
   leg1OrderId?: string | null;
   /** @nullable */

@@ -4058,7 +4058,7 @@ router.post("/arb/execute-triangular", async (req, res): Promise<void> => {
     const triPriceSource = isBtc ? "direct" : ethSolSource;
     req.log.info({ loop, tradeUsd, grossPct, estimatedProfitUsd, orderType, triPriceSource }, "Triangular dry run");
     res.json({
-      success: true, isDryRun: true, estimatedProfitUsd,
+      success: true, isDryRun: true, estimatedProfitUsd, tradeUsd,
       priceSource: triPriceSource, synthetic: triPriceSource === "synthetic",
       leg1OrderId: null, leg2OrderId: null, leg3OrderId: null,
     });
@@ -4411,7 +4411,7 @@ router.post("/arb/execute-triangular", async (req, res): Promise<void> => {
     } catch (e) { req.log.error({ e }, "tri ledger row failed"); }
     await snapshotAccountValue(creds, "post_trade", req.log);
     res.json({
-      success: true, isDryRun: false, estimatedProfitUsd,
+      success: true, isDryRun: false, estimatedProfitUsd, tradeUsd,
       priceSource: triPriceSource, synthetic: triPriceSource === "synthetic",
       leg1OrderId: leg1Id, leg2OrderId: leg2Id, leg3OrderId: leg3Id,
     });

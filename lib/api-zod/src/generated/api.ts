@@ -2308,6 +2308,7 @@ export const ExecuteTriangularResponse = zod.object({
   "success": zod.boolean(),
   "isDryRun": zod.boolean(),
   "estimatedProfitUsd": zod.number().nullable().describe('Estimated (dry-run) or expected net profit in USD. Null when the request is rejected before an estimate is computed, e.g. live ETH loops blocked because the ETH\/SOL rate is synthetic.\n'),
+  "tradeUsd": zod.number().nullish().describe('Actual USD trade size used for the loop — $10 for dry\/force runs, 20% of USD balance capped at $50 for the auto-loop. Null when the request is rejected before the size is determined. Lets the client compute thin-edge warnings against the real executed size.\n'),
   "leg1OrderId": zod.string().nullish(),
   "leg2OrderId": zod.string().nullish(),
   "leg3OrderId": zod.string().nullish(),

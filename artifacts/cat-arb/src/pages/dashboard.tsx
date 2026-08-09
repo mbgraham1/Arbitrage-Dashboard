@@ -1443,7 +1443,7 @@ function useActualKrakenFees(): { taker: number | null; maker: number | null } {
 }
 
 function OrderBookHunterCard() {
-  const { credentials, liveMode, addLog, settings, isRunning, isAutoExecutingOb, lastObAutoTrade } = useBotContext();
+  const { credentials, liveMode, addLog, settings, isRunning, isAutoExecutingOb, lastObAutoTrade, obAutoThinFire, setObAutoThinFire } = useBotContext();
   const executeMutation = useObExecute();
   const [execResult, setExecResult] = useState<string | null>(null);
   const [thinEdgePending, setThinEdgePending] = useState(false);
@@ -1702,6 +1702,37 @@ function OrderBookHunterCard() {
             {topCycle && !execResult.startsWith("✅") && ` · Current best: ${topCycle.route} | $${topCycle.estimatedProfitUsd.toFixed(4)}`}
           </div>
         )}
+        {/* OB AUTO thin-edge warning — non-blocking, shown after the fire completes.
+            Only set for LIVE fires (never dry runs); mirrors the graph card's banner. */}
+        {obAutoThinFire && !isAutoExecutingOb && (
+          <div className="px-3 py-3 border-b-2 border-amber-500 bg-amber-500/10 flex flex-col gap-2" data-testid="banner-ob-auto-thin-edge">
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2 text-amber-500 font-bold text-[11px] font-mono uppercase">
+                ⚠ AUTO fired on a thin edge ({format(obAutoThinFire.at, "HH:mm:ss")})
+              </div>
+              <button
+                onClick={() => setObAutoThinFire(null)}
+                className="text-[10px] font-mono text-muted-foreground hover:text-foreground border border-border px-1.5 py-0.5"
+                aria-label="Dismiss thin-edge warning"
+              >
+                DISMISS
+              </button>
+            </div>
+            <div className="grid grid-cols-3 gap-x-4 gap-y-0.5 text-[10px] font-mono">
+              <span className="text-muted-foreground">Expected profit</span>
+              <span className="text-muted-foreground">Trade size</span>
+              <span className="text-muted-foreground">Break-even move</span>
+              <span className="font-bold text-amber-500">${obAutoThinFire.profitUsd.toFixed(4)}</span>
+              <span className="font-bold">${obAutoThinFire.tradeSizeUsd.toFixed(2)}</span>
+              <span className="font-bold text-destructive">
+                {((obAutoThinFire.profitUsd / obAutoThinFire.tradeSizeUsd) * 100).toFixed(3)}% of price
+              </span>
+            </div>
+            <p className="text-[10px] font-mono text-muted-foreground">
+              {obAutoThinFire.description} — edge was below your {settings.thinEdgeWarnPct}% warning threshold. AUTO executed without confirmation; consider raising your profit floor if this keeps happening.
+            </p>
+          </div>
+        )}
         {!execResult && topBelowThreshold && topCycle && (
           <div className="px-3 py-1.5 text-[10px] font-mono text-muted-foreground border-b border-border/50">
             ⚠ Top route {topCycle.route} profit ${topCycle.estimatedProfitUsd.toFixed(4)} is below your ${minProfit.toFixed(2)} minimum — pre-flight will reject unless the edge improves.
@@ -1870,7 +1901,7 @@ function TriangularCard({
   // event is also written to the persistent System Log — a toast is transient
   // and traders on another tab/page would otherwise miss it entirely.
   const { toast } = useToast();
-  const { addLog } = useBotContext();
+  const { addLog, settings, triAutoThinFire, setTriAutoThinFire } = useBotContext();
   const prevKrakenSource = useRef<"direct" | "synthetic" | undefined>(undefined);
   const upgradeToastFired = useRef(false);
   const [justUpgraded, setJustUpgraded] = useState(false);
@@ -1956,6 +1987,37 @@ function TriangularCard({
         )}
       </CardHeader>
       <CardContent className="p-0">
+        {/* TRI AUTO thin-edge warning — non-blocking, shown after the fire completes.
+            Only set for LIVE fires (never dry runs); mirrors the graph card's banner. */}
+        {triAutoThinFire && !isExecutingTri && (
+          <div className="px-3 py-3 border-b-2 border-amber-500 bg-amber-500/10 flex flex-col gap-2" data-testid="banner-tri-auto-thin-edge">
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2 text-amber-500 font-bold text-[11px] font-mono uppercase">
+                ⚠ AUTO fired on a thin edge ({format(triAutoThinFire.at, "HH:mm:ss")})
+              </div>
+              <button
+                onClick={() => setTriAutoThinFire(null)}
+                className="text-[10px] font-mono text-muted-foreground hover:text-foreground border border-border px-1.5 py-0.5"
+                aria-label="Dismiss thin-edge warning"
+              >
+                DISMISS
+              </button>
+            </div>
+            <div className="grid grid-cols-3 gap-x-4 gap-y-0.5 text-[10px] font-mono">
+              <span className="text-muted-foreground">Expected profit</span>
+              <span className="text-muted-foreground">Trade size</span>
+              <span className="text-muted-foreground">Break-even move</span>
+              <span className="font-bold text-amber-500">${triAutoThinFire.profitUsd.toFixed(4)}</span>
+              <span className="font-bold">${triAutoThinFire.tradeSizeUsd.toFixed(2)}</span>
+              <span className="font-bold text-destructive">
+                {((triAutoThinFire.profitUsd / triAutoThinFire.tradeSizeUsd) * 100).toFixed(3)}% of price
+              </span>
+            </div>
+            <p className="text-[10px] font-mono text-muted-foreground">
+              {triAutoThinFire.description} — edge was below your {settings.thinEdgeWarnPct}% warning threshold. AUTO executed without confirmation; consider raising your profit floor if this keeps happening.
+            </p>
+          </div>
+        )}
         {ethSolCrossCheck?.warning && (
           <div
             className="flex items-start gap-2 px-3 py-2 border-b border-orange-500/50 bg-orange-500/10"

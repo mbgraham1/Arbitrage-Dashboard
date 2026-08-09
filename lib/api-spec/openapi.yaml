@@ -3932,6 +3932,13 @@ components:
             Estimated (dry-run) or expected net profit in USD. Null when the
             request is rejected before an estimate is computed, e.g. live ETH
             loops blocked because the ETH/SOL rate is synthetic.
+        tradeUsd:
+          type: ["number", "null"]
+          description: >
+            Actual USD trade size used for the loop — $10 for dry/force runs,
+            20% of USD balance capped at $50 for the auto-loop. Null when the
+            request is rejected before the size is determined. Lets the client
+            compute thin-edge warnings against the real executed size.
         leg1OrderId:
           type: ["string", "null"]
         leg2OrderId:

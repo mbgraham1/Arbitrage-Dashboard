@@ -27,6 +27,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { maybeAutoExecuteOb } from "./ob-auto-execute";
 import { withExecutionLock } from "./execution-locks";
 import { selectTriAutoOpportunity } from "./tri-auto-select";
+import { thinFireFromExecResult } from "./auto-thin-fire";
 
 export interface LogEntry {
   id: string;
@@ -192,6 +193,22 @@ export interface BotContextType {
   /** Route and timestamp of the last successfully auto-executed OB cycle */
   lastObAutoTrade: { route: string; timestamp: string; profitUsd: number | null } | null;
   /**
+   * Snapshot of the last OB AUTO fire that went out on a razor-thin edge in
+   * LIVE mode (profit below settings.thinEdgeWarnPct % of trade size). Never
+   * set for dry runs. Drives the non-blocking amber warning row in the Order
+   * Book Hunter card; dismissed via setObAutoThinFire(null).
+   */
+  obAutoThinFire: { profitUsd: number; tradeSizeUsd: number; description: string; at: number } | null;
+  setObAutoThinFire: (v: { profitUsd: number; tradeSizeUsd: number; description: string; at: number } | null) => void;
+  /**
+   * Snapshot of the last triangular AUTO fire that went out on a razor-thin
+   * edge in LIVE mode. Set from the execute response (the auto-loop trade size
+   * is decided server-side: 20% of USD balance, max $50). Never set for dry
+   * runs. Drives the amber warning row in the Triangular Arbitrage card.
+   */
+  triAutoThinFire: { profitUsd: number; tradeSizeUsd: number; description: string; at: number } | null;
+  setTriAutoThinFire: (v: { profitUsd: number; tradeSizeUsd: number; description: string; at: number } | null) => void;
+  /**
    * Fee model used for Force Scan & Trade (market orders → taker fees).
    * Taker-based when the Kraken tier is detected, else configured totalFees.
    */
@@ -340,6 +357,8 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
   const [isAutoExecutingCross, setIsAutoExecutingCross] = useState(false);
   const [obCycles, setObCycles] = useState<ObCycleEntry[]>([]);
   const [lastObAutoTrade, setLastObAutoTrade] = useState<{ route: string; timestamp: string; profitUsd: number | null } | null>(null);
+  const [obAutoThinFire, setObAutoThinFire] = useState<{ profitUsd: number; tradeSizeUsd: number; description: string; at: number } | null>(null);
+  const [triAutoThinFire, setTriAutoThinFire] = useState<{ profitUsd: number; tradeSizeUsd: number; description: string; at: number } | null>(null);
 
   // ── Refs that give poll() always-current values without re-triggering effects ──
   const credentialsRef = useRef(credentials);
@@ -505,11 +524,37 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
                 if (r.success) {
                   const synthWarn = r.synthetic ? " ⚠ synthetic ETH/SOL rate" : "";
                   addLog("success", `[${tag}] Done — est. $${(r.estimatedProfitUsd ?? 0).toFixed(2)}${synthWarn}`);
-                } else addLog("error", `[${tag}] Failed: ${r.error}`);
+                  // Same thin-edge threshold as the manual confirm gates — AUTO
+                  // didn't block, so surface a non-blocking warning row after the
+                  // fact. LIVE fires only (this path always sends isDryRun:false,
+                  // but guard anyway); trade size comes from the server response
+                  // since the auto-loop sizes trades server-side.
+                  const sNow = settingsRef.current;
+                  const triThin = thinFireFromExecResult({
+                    success: r.success,
+                    executed: true, // r.success on this endpoint means orders were placed
+                    isDryRun: r.isDryRun,
+                    profitUsd: r.estimatedProfitUsd,
+                    tradeSizeUsd: r.tradeUsd,
+                    thinEdgeWarnPct: sNow.thinEdgeWarnPct,
+                    description: best.loop,
+                    at: Date.now(),
+                  });
+                  setTriAutoThinFire(triThin);
+                  if (triThin) {
+                    addLog("warning", `[${tag}] ⚠ Thin edge — $${triThin.profitUsd.toFixed(4)} on $${triThin.tradeSizeUsd.toFixed(2)} trade is below your ${sNow.thinEdgeWarnPct}% warning threshold; fired anyway (AUTO).`);
+                  }
+                } else {
+                  // Rejected — no orders placed: clear any prior snapshot so an
+                  // old warning can't be read as belonging to this attempt.
+                  setTriAutoThinFire(null);
+                  addLog("error", `[${tag}] Failed: ${r.error}`);
+                }
               },
               onError: (e) => {
                 isAutoExecutingTriRef.current = false;
                 setIsAutoExecutingTri(false);
+                setTriAutoThinFire(null);
                 addLog("error", `[${tag}] Exception: ${e instanceof Error ? e.message : "Unknown"}`);
               },
             }
@@ -598,7 +643,6 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
       "trade",
       `[${tag}] ${top.route} | profit $${top.estimatedProfitUsd.toFixed(4)} | slippage ${top.slippagePct.toFixed(2)}% — firing`,
     );
-
     obExecuteMutation.mutate(
       {
         data: {
@@ -634,10 +678,32 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
           } else {
             addLog("warning", `[${tag}] ❌ ${r.error ?? "Pre-flight failed — edge disappeared."}`);
           }
+          // Thin-edge warning is evaluated POST-execution from the result so a
+          // preflight-rejected attempt (no orders placed) can never show an
+          // "AUTO fired" banner. Uses the fresh preflight profit, not the
+          // stale scan value. LIVE fires only; dry runs never warn. Rejected
+          // outcomes clear any prior snapshot so an old warning is never read
+          // as belonging to this attempt.
+          const sNow = settingsRef.current;
+          const obThin = thinFireFromExecResult({
+            success: r.success,
+            executed: !!r.executed,
+            isDryRun: r.isDryRun,
+            profitUsd: r.preflightProfitUsd ?? null,
+            tradeSizeUsd: sNow.obTradeSize,
+            thinEdgeWarnPct: sNow.thinEdgeWarnPct,
+            description: r.route ?? top.route,
+            at: Date.now(),
+          });
+          setObAutoThinFire(obThin);
+          if (obThin) {
+            addLog("warning", `[${tag}] ⚠ Thin edge — $${obThin.profitUsd.toFixed(4)} on $${obThin.tradeSizeUsd.toFixed(2)} trade was below your ${sNow.thinEdgeWarnPct}% warning threshold; AUTO fired without confirmation.`);
+          }
         },
         onError: (e) => {
           isAutoExecutingObRef.current = false;
           setIsAutoExecutingOb(false);
+          setObAutoThinFire(null);
           addLog("error", `[${tag}] Exception: ${e instanceof Error ? e.message : "Unknown"}`);
         },
       },
@@ -1194,6 +1260,10 @@ export function BotProvider({ children }: { children: React.ReactNode }) {
     isAutoExecutingTri,
     isExecutingCross,
     lastObAutoTrade,
+    obAutoThinFire,
+    setObAutoThinFire,
+    triAutoThinFire,
+    setTriAutoThinFire,
     forceFeeModel,
     kellyGauge,
   };

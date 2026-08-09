@@ -26,3 +26,4 @@
 - [Fake-Date poll bounds](fake-date-poll-bounds.md) — tests fake only Date, so Date.now() deadlines in poll loops never expire; bound exchange confirm/unwind polls by iteration count.
 - [OB test cache poisoning](ob-test-cache-poisoning.md) — 1h discovery cache outlives the per-test clock jump; suites must clear it explicitly or later scans silently lose cross pairs.
 - [OB path-based execution](ob-path-execution.md) — executor/pre-flight are asset-path generic (max 4 legs); edit the cross-hop loop, never special-case; tests adapt via factory-level preflightObPath.
+- [Post-fire warning banners](post-fire-banners.md) — “AUTO fired” banners must come from the execute result (success && executed), never pre-mutate scan values; clear on rejection.
