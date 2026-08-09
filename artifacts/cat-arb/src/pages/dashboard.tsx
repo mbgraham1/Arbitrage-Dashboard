@@ -1669,6 +1669,9 @@ function OrderBookHunterCard() {
                 {((topCycle.estimatedProfitUsd / tradeSize) * 100).toFixed(3)}% of price
               </span>
             </div>
+            <p className="text-[10px] font-mono text-muted-foreground" data-testid="text-ob-thin-edge-threshold">
+              Profit is below your {settings.thinEdgeWarnPct}% thin-edge threshold (${((settings.thinEdgeWarnPct / 100) * tradeSize).toFixed(4)} at this trade size) — tunable in Config → Thin-Edge Warning Threshold.
+            </p>
             <p className="text-[10px] font-mono text-muted-foreground">
               A {((topCycle.estimatedProfitUsd / tradeSize) * 100).toFixed(3)}% adverse price move or worse fill will erase this profit before orders settle.
             </p>
@@ -2585,6 +2588,9 @@ function GraphEngineCard() {
               {((topRoute.netProfitUsd / tradeSize) * 100).toFixed(3)}% of price
             </span>
           </div>
+          <p className="text-[10px] font-mono text-muted-foreground" data-testid="text-graph-thin-edge-threshold">
+            Profit is below your {settings.thinEdgeWarnPct}% thin-edge threshold (${((settings.thinEdgeWarnPct / 100) * tradeSize).toFixed(4)} at this trade size) — tunable in Config → Thin-Edge Warning Threshold.
+          </p>
           <p className="text-[10px] font-mono text-muted-foreground">
             A {((topRoute.netProfitUsd / tradeSize) * 100).toFixed(3)}% adverse price move or worse fill will erase this profit before orders settle.
           </p>
