@@ -1,0 +1,90 @@
+add_get("/api",lambda r:web.json_response(LATEST))
+    runner=web.AppRunner(app); await runner.setup(); await web.TCPSite(runner,"0.0.0.0",8080).start()
+    print("🚀 :8080"); await engine()
+
+if __name__=="__main__": asyncio.run(main())
+"""
+
+ORCHESTRATOR_CODE = """#!/usr/bin/env python3
+\"\"\"Orchestrator — Self-healing, auto-tuning, venue-switching\"\"\"
+import os,asyncio,time,json,sqlite3; from datetime import datetime,timezone; import aiohttp
+EXECUTOR_URL="http://localhost:8080/api"; HB=int(os.getenv("HEARTBEAT_MAX_S","180"))
+HOOK=os.getenv("REPLIT_RESTART_HOOK",""); WR=float(os.getenv("WIN_RATE_MIN","0.55"))
+ZS=float(os.getenv("Z_STEP","0.2")); QS=float(os.getenv("QTY_STEP","1.1"))
+QM=float(os.getenv("QTY_MAX_ETH","1.0")); ET=int(os.getenv("ERROR_THRESH","3"))
+DB="orch.db"; LP="orch.log"
+def init():
+    with sqlite3.connect(DB) as db:
+        db.execute("CREATE TABLE IF NOT EXISTS actions(id INTEGER PRIMARY KEY AUTOINCREMENT,ts,action,reason,detail)"); db.execute("CREATE TABLE IF NOT EXISTS params(key PRIMARY KEY,value,updated_ts)"); db.commit()
+def log(a,r,d=""): ts=datetime.now(timezone.utc).isoformat(); [sqlite3.connect(DB).execute("INSERT INTO actions VALUES(NULL,?,?,?,?)",(ts,a,r,d)),open(LP,"a").write(f"{ts}|{a}|{r}|{d}\\n")]; print(f"[orch] {a} — {r}")
+def gp(k,d): r=sqlite3.connect(DB).execute("SELECT value FROM params WHERE key=?",(k,)).fetchone(); return r[0] if r else str(d)
+def sp(k,v): ts=datetime.now(timezone.utc).isoformat(); sqlite3.connect(DB).execute("INSERT OR REPLACE INTO params VALUES(?,?,?)",(k,str(v),ts)).connection.commit()
+init(); lh=0; ce=0
+async def run():
+    global lh,ce; v=gp("CEX_VENUE","kraken")
+    async with aiohttp.ClientSession() as s:
+        while True:
+            try:
+                async with s.get(EXECUTOR_URL,timeout=5) as r:
+                    if r.status==200: st=await r.json(); lh=time.time(); ce=0
+                    else: st=None
+            except: st=None; ce+=1
+            if ce>=ET: nv="coinbase" if v=="kraken" else "kraken"; log("SWITCH",f"{v}→{nv}","API errors"); sp("CEX_VENUE",nv); v=nv; ce=0
+            print(json.dumps({"ts":datetime.now(timezone.utc).isoformat(),"alive":st is not None,"lag":round(time.time()-lh,1),"errs":ce,"venue":v}))
+            await asyncio.sleep(30)
+asyncio.run(run())
+"""
+
+# Upload via Replit API — uses the REST files endpoint
+def upload_file(repl_id: str, filename: str, content: str):
+    """Upload a file to the repl using Replit's REST API."""
+    url = f"https://replit.com/data/repls/@{repl_id}/fs/{filename}"
+    # Encode content as base64 for upload
+    payload = {"content": content}
+    r = requests.put(url, json=payload, headers=HEADERS, timeout=30)
+    if r.status_code not in (200, 201, 204):
+        raise RuntimeError(f"Upload {filename} failed: {r.status_code} {r.text}")
+    print(f"   ✅ {filename} uploaded")
+
+print("\n📤 Uploading files...")
+repl_id = repl["id"]
+upload_file(repl_id, "main.py", EXECUTOR_CODE)
+upload_file(repl_id, "orchestrator.py", ORCHESTRATOR_CODE)
+
+# ── Step 4: Set Secrets ─────────────────────────────────────────────────────
+print("\n🔐 Setting Secrets...")
+for key, value in SECRETS.items():
+    mutation = """
+        mutation($replId: String!, $key: String!, $value: String!) {
+            setSecret(replId: $replId, key: $key, value: $value)
+        }
+    """
+    try:
+        gql(mutation, {"replId": repl_id, "key": key, "value": value})
+    except Exception as e:
+        print(f"   ⚠ {key}: {e}")
+    else:
+        print(f"   🔒 {key} set")
+        time.sleep(0.3)  # rate-limit
+
+
+# ── Step 5: Set up .replit for multi‑process ────────────────────────────────
+REPLIT_CONFIG = """
+
+(4/5)
+run = "python3 main.py & python3 orchestrator.py & wait"
+
+[nix]
+channel = "stable-24_05"
+
+[deployment]
+run = ["sh", "-c", "python3 main.py & python3 orchestrator.py & wait"]
+
+[[ports]]
+localPort = 8080
+externalPort = 80
+"""
+upload_file(repl_id, ".replit", REPLIT_CONFIG)
+
+# ── Step 6: Install requirements ────────────────────────────────────────────
+upload_file(repl_id, "requirements.txt",

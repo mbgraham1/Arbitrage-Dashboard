@@ -1,0 +1,71 @@
+GEMINI_KEY = os.getenv("GEMINI_API_KEY",""); GEMINI_SEC = os.getenv("GEMINI_SECRET","")
+Z_ENTRY = float(os.getenv("Z_ENTRY","2.0")); Z_EXIT = float(os.getenv("Z_EXIT","0.5"))
+TRADE_QTY = float(os.getenv("TRADE_QTY_ETH","0.1"))
+CVD_WINDOW_S = int(os.getenv("CVD_WINDOW_S","300")); TIMEOUT_MIN = int(os.getenv("TIMEOUT_MIN","15"))
+CEX_VENUE = os.getenv("CEX_VENUE","kraken").lower()
+
+spread_hist = deque(maxlen=60); cvd_hist = deque(maxlen=60)
+position = {"active":False,"dir":0,"entry_z":0.0,"entry_ts":0.0,"entry_px":0.0,"eth_qty":0.0}
+trade_log = []; uptime_start = time.time()
+signals_today = 0; reversions_today = 0; LATEST = {}
+
+KRAKEN = "https://api.kraken.com"
+
+def kraken_sig(endpoint, data):
+    nonce = str(int(time.time()*1000)); post_data = urlencode(data) if data else ""
+    encoded = (nonce+post_data).encode()
+    msg = endpoint.encode()+hashlib.sha256(encoded).digest()
+    sig = base64.b64encode(hmac.new(base64.b64decode(KRAKEN_SEC),msg,hashlib.sha512).digest()).decode()
+    return {"API-Key":KRAKEN_KEY,"API-Sign":sig}
+
+async def kraken_price(session):
+    async with session.get(f"{KRAKEN}/0/public/Ticker?pair=ETHUSD",timeout=5) as r:
+        return float((await r.json())["result"]["XETHZUSD"]["c"][0])
+
+async def kraken_cvd(session):
+    async with session.get(f"{KRAKEN}/0/public/Trades?pair=ETHUSD",timeout=5) as r:
+        data = await r.json()
+    trades = data.get("result",{}).get("XETHZUSD",[]); cutoff = time.time()-CVD_WINDOW_S
+    cvd = 0.0
+    for t in (trades if isinstance(trades,list) else list(trades.values())):
+        if isinstance(t,list) and len(t)>=4:
+            ts,vol,side = t[2],float(t[1]),t[3]
+            if ts>=cutoff: cvd += vol*(1 if side=="b" else -1)
+    return cvd
+
+async def kraken_order(side,vol,session):
+    async with session.get(f"{KRAKEN}/0/public/Ticker?pair=ETHUSD",timeout=5) as r:
+        px = float((await r.json())["result"]["XETHZUSD"]["c"][0])
+    ep="/0/private/AddOrder"; d={"pair":"XETHZUSD","type":side,"ordertype":"limit","price":f"{px:.2f}","volume":f"{vol:.6f}","oflags":"post","nonce":str(int(time.time()*1000))}
+    h=kraken_sig(ep,d); h["Content-Type"]="application/x-www-form-urlencoded"
+    async with session.post(f"{KRAKEN}{ep}",data=urlencode(d),headers=h,timeout=10) as r:
+        res=await r.json()
+    return (res["result"]["txid"][0],px) if not res.get("error") else (None,0)
+
+async def coinbase_price(session):
+    async with session.get("https://api.coinbase.com/v2/prices/ETH-USD/spot",timeout=5) as r:
+        return float((await r.json())["data"]["amount"])
+
+async def uniswap_price(session):
+    data=("0xf7729d43"+"00000000000000000000000082aF49447D8a07e3bd95BD0d56f35241523fBab1"+"000000000000000000000000af88d065e77c8cC2239327C5EDb3A432268e5831"+"00000000000000000000000000000000000000000000000000000000000001f4"+"0000000000000000000000000000000000000000000000000de0b6b3a7640000"+"0000000000000000000000000000000000000000000000000000000000000000")
+    try:
+        async with session.post("https://arb1.arbitrum.io/rpc",json={"jsonrpc":"2.0","method":"eth_call","params":[{"to":"0xb27308f9F90D607463bb33eA1BeBb41C27CE5AB6","data":data},"latest"],"id":1},timeout=10) as r:
+            return int((await r.json()).get("result","0x0"),16)/1e6
+    except: return 0.0
+
+async def gemini_price(session):
+    async with session.get("https://api.gemini.com/v1/pubticker/ethusd",timeout=5) as r:
+        return float((await r.json())["last"])
+
+def z_score(arr):
+    a=np.array(arr,dtype=float)
+    if len(a)<10: return 0.0
+    s=np.std(a,ddof=1); return (a[-1]-a.mean())/s if s>1e-9 else 0.0
+
+async def dashboard(request):
+    z=LATEST.get("z",0.0); pos=LATEST.get("pos",position)
+    klass="green" if abs(z)<Z_EXIT else "yellow" if abs(z)<Z_ENTRY else "red"
+    pl = ("▶ "+("LONG" if pos["dir"]>0 else "SHORT")) if pos["active"] else "⚬ FLAT"
+
+(2/5)
+html=f\"\"\"<!DOCTYPE html><html><head><meta charset=utf-8><meta http-equiv=refresh content=10><title>CVD Executor</title><style>body{{font-family:monospace;background:#0D1117;color:#C9D1D9;padding:20px;max-width:900px;margin:auto}}h1{{color:#58A6FF}} .
