@@ -1,10 +1,27 @@
 import * as React from "react"
 import { Link, useLocation } from "wouter"
-import { Activity, Settings, LayoutDashboard, Terminal, Zap, RotateCcw, Skull, Eraser } from "lucide-react"
+import { Activity, Settings, LayoutDashboard, Terminal, Zap, RotateCcw, Skull, Eraser, LogOut } from "lucide-react"
+import { useClerk } from "@clerk/react"
 import { useClearExecLock, useClearRouteHistory } from "@workspace/api-client-react"
 import { cn } from "@/lib/utils"
 import { BotProvider, useBotContext, ALL_PAIRS } from "@/store/bot-context"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
+
+function SignOutButton() {
+  const { signOut } = useClerk()
+  const basePath = import.meta.env.BASE_URL.replace(/\/$/, "")
+  return (
+    <button
+      type="button"
+      onClick={() => signOut({ redirectUrl: basePath || "/" })}
+      className="flex items-center gap-1.5 px-3 py-2 text-xs font-bold uppercase tracking-wider text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
+      data-testid="button-sign-out"
+    >
+      <LogOut className="h-3.5 w-3.5" />
+      <span className="hidden sm:inline">Sign out</span>
+    </button>
+  )
+}
 
 function NavItem({ href, icon: Icon, label }: { href: string; icon: any; label: string }) {
   const [location] = useLocation()
@@ -215,8 +232,11 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
               <NavItem href="/settings" icon={Settings} label="Config" />
             </nav>
             
-            <div className="hidden md:flex">
-              <StatusIndicator />
+            <div className="flex items-center gap-3">
+              <div className="hidden md:flex">
+                <StatusIndicator />
+              </div>
+              <SignOutButton />
             </div>
           </div>
         </header>
