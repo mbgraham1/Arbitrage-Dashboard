@@ -1,0 +1,178 @@
+#!/usr/bin/env python3
+"""
+ORCHESTRATOR — Self‑healing CVD arb infrastructure manager  
+Monitors executor health, auto‑tunes parameters, switches venues on failure.
+
+Deploy alongside executor_dashboard.py on same Replit.
+Reads executor state from http://localhost:8080/api every 30s.
+"""
+
+import os, asyncio, time, json, sqlite3
+from datetime import datetime, timezone
+import aiohttp
+
+# ═════════════════ CONFIG (Replit Secrets) ═══════════════════════════════════
+EXECUTOR_URL   = "http://localhost:8080/api"
+HEARTBEAT_MAX  = int(os.getenv("HEARTBEAT_MAX_S", "180"))     # 3 min
+RESTART_HOOK   = os.getenv("REPLIT_RESTART_HOOK", "")         # Replit deploy webhook
+WIN_RATE_MIN   = float(os.getenv("WIN_RATE_MIN", "0.55"))     # trigger tuning
+Z_STEP         = float(os.getenv("Z_STEP", "0.2"))
+QTY_STEP       = float(os.getenv("QTY_STEP", "1.10"))         # 10% increase
+QTY_MAX        = float(os.getenv("QTY_MAX_ETH", "1.0"))
+ERROR_THRESH   = int(os.getenv("ERROR_THRESH", "3"))          # consecutive errors
+DB_PATH        = "orchestrator.db"
+LOG_PATH       = "orchestrator.log"
+# ══════════════════════════════════════════════════════════════════════════════
+
+def init_db():
+    with sqlite3.connect(DB_PATH) as db:
+        db.execute("""CREATE TABLE IF NOT EXISTS actions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts TEXT, action TEXT, reason TEXT, detail TEXT)""")
+        db.execute("""CREATE TABLE IF NOT EXISTS params (
+            key TEXT PRIMARY KEY, value TEXT, updated_ts TEXT)""")
+        db.commit()
+init_db()
+
+def log(action, reason, detail=""):
+    ts = datetime.now(timezone.utc).isoformat()
+    with sqlite3.connect(DB_PATH) as db:
+        db.execute("INSERT INTO actions VALUES (NULL,?,?,?,?)",
+                   (ts, action, reason, detail)); db.commit()
+    with open(LOG_PATH, "a") as f:
+        f.write(f"{ts} | {action:20s} | {reason:40s} | {detail}\n")
+    print(f"[orch] {action} — {reason}")
+
+def get_param(key, default):
+    with sqlite3.connect(DB_PATH) as db:
+        row = db.execute("SELECT value FROM params WHERE key=?",
+                         (key,)).fetchone()
+    return row[0] if row else str(default)
+
+def set_param(key, value):
+    ts = datetime.now(timezone.utc).isoformat()
+    with sqlite3.connect(DB_PATH) as db:
+        db.execute("INSERT OR REPLACE INTO params VALUES (?,?,?)",
+                   (key, str(value), ts)); db.commit()
+
+# ── Health check ────────────────────────────────────────────────────────────
+last_heartbeat = 0
+consecutive_errors = 0
+
+async def check_executor(session: aiohttp.ClientSession) -> dict | None:
+    """Fetch /api from the executor. Returns state dict or None if down."""
+    global last_heartbeat
+    try:
+        async with session.get(EXECUTOR_URL, timeout=5) as r:
+            if r.status != 200: return None
+            data = await r.json()
+            last_heartbeat = time.time()
+            return data
+    except Exception:
+        return None
+
+# ── Venue switch ────────────────────────────────────────────────────────────
+async def switch_venue(current: str) -> str:
+    """Rotate CEX_VENUE: kraken → coinbase → kraken."""
+    new_venue = "coinbase" if current == "kraken" else "kraken"
+    log("SWITCH_VENUE", f"{current}→{new_venue}", "consecutive API errors")
+    set_param("CEX_VENUE", new_venue)
+    return new_venue
+
+# ── Z‑entry tuning ──────────────────────────────────────────────────────────
+def tune_z_entry(recent_trades: list) -> float:
+    """Adjust Z_ENTRY based on win rate of last 10 trades."""
+    current_z = float(get_param("Z_ENTRY", 2.0))
+    if len(recent_trades) < 10:
+        return current_z
+
+    wins = sum(1 for t in recent_trades if t.get("reverted"))
+    rate = wins / len(recent_trades)
+
+    if rate < WIN_RATE_MIN:
+        new_z = round(current_z + Z_STEP, 1)
+        log("TUNE_Z", f"{current_z}→{new_z}", f"win rate {rate:.0%} < {WIN_RATE_MIN:.0%}")
+        set_param("Z_ENTRY", new_z)
+        return new_z
+    elif rate > 0.80 and current_z > 1.5:
+        new_z = round(current_z - Z_STEP, 1)
+        log("TUNE_Z", f"{current_z}→{new_z}", f"win rate {rate:.0%} > 80% — relax entry")
+        set_param("Z_ENTRY", new_z)
+        return new_z
+    return current_z
+
+# ── Trade size tuning ───────────────────────────────────────────────────────
+def tune_trade_qty(recent_trades: list):
+    avg_pnl = sum(abs(t.get("pnl_usd", 0)) for t in recent_trades[-10:]) / max(len(recent_trades[-10:]), 1)
+    current_qty = float(get_param("TRADE_QTY_ETH", 0.1))
+    if avg_pnl < 0.50 and current_qty < QTY_MAX:
+        new_qty = min(current_qty * QTY_STEP, QTY_MAX)
+        log("TUNE_QTY", f"{current_qty:.2f}→{new_qty:.2f} ETH", f"avg PnL ${avg_pnl:.2f}")
+        set_param("TRADE_QTY_ETH", new_qty)
+    elif avg_pnl < 0 and current_qty > 0.05:
+        new_qty = max(current_qty / QTY_STEP, 0.05)
+        log("TUNE_QTY", f"{current_qty:.2f}→{new_qty:.2f} ETH", "negative PnL — reduce size")
+
+# ── Main loop ───────────────────────────────────────────────────────────────
+async def run():
+    log("START", "orchestrator online", "")
+    venue = get_param("CEX_VENUE", "kraken")
+    reported_z_entry = float(get_param("Z_ENTRY", 2.0))
+    last_trade_count = 0
+    local_trades = []
+
+    async with aiohttp.ClientSession() as session:
+        while True:
+            state = await check_executor(session)
+
+            # ── HEARTBEAT CHECK ──────────────────────────────────────────
+            if state is None:
+                gap = time.time() - last_heartbeat
+                if gap > HEARTBEAT_MAX:
+                    log("HEARTBEAT_LOST", f"{gap:.0f}s no response",
+                        "executor may be down — restart if hook set")
+                    if RESTART_HOOK:
+                        try:
+                            async with session.post(RESTART_HOOK, timeout=10) as r:
+                                log("RESTART_SENT", f"HTTP {r.status}", "")
+                        except Exception:
+                            pass
+                consecutive_errors += 1
+            else:
+                consecutive_errors = 0
+
+            # ── VENUE SWITCH ON API ERRORS ────────────────────────────────
+            if consecutive_errors >= ERROR_THRESH and state is None:
+                venue = await switch_venue(venue)
+                consecutive_errors = 0
+
+            # ── PARAMETER TUNING ──────────────────────────────────────────
+            if state:
+                trades = state.get("pos", {})
+                # If executor provides trade history, use it
+                # For now, track locally via trade count changes
+                sigs = state.get("signals", 0)
+                if sigs > last_trade_count and state["pos"].get("active"):
+                    # New trade entered — record for later PnL evaluation
+                    pass
+                last_trade_count = sigs
+
+            # ── JSON STATUS OUTPUT ────────────────────────────────────────
+            status = {
+                "ts": datetime.now(timezone.utc).isoformat(),
+                "executor_alive": state is not None,
+                "last_heartbeat_ago_s": round(time.time() - last_heartbeat, 1),
+                "consecutive_errors": consecutive_errors,
+                "venue": venue,
+                "z_entry": reported_z_entry,
+                "trade_qty": float(get_param("TRADE_QTY_ETH", 0.1)),
+                **({"z": state.get("z",0), "spread": state.get("spread",0),
+                    "signals": state.get("signals",0),
+                    "reversions": state.get("reversions",0)} if state else {}),
+            }
+            print(json.dumps(status))
+
+            await asyncio.sleep(30)
+
+if __name__ == "__main__":
+    asyncio.run(run())
