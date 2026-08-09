@@ -2978,6 +2978,12 @@ function RealizedPnlCard() {
 // Per-route feedback loop: fill rate + expected vs realized profit from every
 // recorded execution attempt. This is what separates routes that LOOK
 // profitable from routes that actually PAY.
+// Shared color scale for leg fill / conditional completion rates.
+function legRateColor(rate: number | null | undefined): string {
+  if (rate == null) return "text-muted-foreground";
+  return rate >= 0.8 ? "text-success" : rate >= 0.5 ? "text-yellow-500" : "text-destructive";
+}
+
 function ExecutionQualityCard() {
   const { data } = useGetExecutionQuality({ query: { queryKey: getGetExecutionQualityQueryKey(), refetchInterval: 30_000, staleTime: 25_000 } });
   const rows = data?.routes ?? [];
@@ -2998,7 +3004,7 @@ function ExecutionQualityCard() {
           <table className="w-full text-xs font-mono border-collapse">
             <thead>
               <tr className="border-b-2 border-border bg-muted/50">
-                {["Route", "Style", "Attempts", "Live", "Expected", "Realized", "Fill Rate", "Slippage", "Net P&L"].map(h => (
+                {["Route", "Style", "Attempts", "Live", "Expected", "Realized", "Fill Rate", "Leg1", "Leg2|1", "Leg3|1·2", "Unwind Loss", "Slippage", "Net P&L", "Risk P&L"].map(h => (
                   <th key={h} className="text-left px-3 py-2 text-[10px] uppercase font-bold text-muted-foreground whitespace-nowrap">{h}</th>
                 ))}
               </tr>
@@ -3018,11 +3024,33 @@ function ExecutionQualityCard() {
                   <td className={cn("px-3 py-1.5 font-bold", r.liveFillRate == null ? "text-muted-foreground" : r.liveFillRate >= 0.8 ? "text-success" : r.liveFillRate >= 0.5 ? "text-yellow-500" : "text-destructive")}>
                     {r.liveFillRate == null ? "—" : `${(r.liveFillRate * 100).toFixed(0)}%`}
                   </td>
+                  {/* Per-leg diagnostics: WHERE do live runs die? Conditional
+                      rates expose the loss pattern (leg 1 fills, leg 2 dies)
+                      that the full-cycle rate alone hides. */}
+                  <td className={cn("px-3 py-1.5", legRateColor(r.leg1FillRate))} title={`Leg 1 fill rate over ${r.legsTracked} tracked live attempts`}>
+                    {r.leg1FillRate == null ? "—" : `${(r.leg1FillRate * 100).toFixed(0)}%`}
+                  </td>
+                  <td className={cn("px-3 py-1.5", legRateColor(r.leg2GivenLeg1Rate))} title="Leg 2 completion GIVEN leg 1 filled — low means unwind risk">
+                    {r.leg2GivenLeg1Rate == null ? "—" : `${(r.leg2GivenLeg1Rate * 100).toFixed(0)}%`}
+                  </td>
+                  <td className={cn("px-3 py-1.5", legRateColor(r.leg3GivenLeg12Rate))} title="Leg 3 completion GIVEN legs 1–2 filled">
+                    {r.leg3GivenLeg12Rate == null ? "—" : `${(r.leg3GivenLeg12Rate * 100).toFixed(0)}%`}
+                  </td>
+                  <td className={cn("px-3 py-1.5", r.avgUnwindLossUsd == null ? "text-muted-foreground" : r.avgUnwindLossUsd > 0 ? "text-destructive font-bold" : "text-muted-foreground")}
+                    title="Average realized loss on attempts that filled leg 1 but failed the cycle and unwound">
+                    {r.avgUnwindLossUsd == null ? "—" : `-$${r.avgUnwindLossUsd.toFixed(4)}`}
+                  </td>
                   <td className="px-3 py-1.5 text-muted-foreground">
                     {r.avgSlippagePct == null ? "—" : `${r.avgSlippagePct.toFixed(3)}%`}
                   </td>
                   <td className={cn("px-3 py-1.5 font-bold", r.totalRealizedProfitUsd == null ? "text-muted-foreground" : r.totalRealizedProfitUsd > 0 ? "text-success" : "text-destructive")}>
                     {r.totalRealizedProfitUsd == null ? "—" : `$${r.totalRealizedProfitUsd.toFixed(4)}`}
+                  </td>
+                  {/* Risk-adjusted: includes unwind losses from FAILED attempts,
+                      which Net P&L (filled cycles only) never sees. */}
+                  <td className={cn("px-3 py-1.5 font-bold", r.realizedPnlUsd == null ? "text-muted-foreground" : r.realizedPnlUsd > 0 ? "text-success" : "text-destructive")}
+                    title="Risk-adjusted realized P&L across ALL live attempts — wins and unwind losses">
+                    {r.realizedPnlUsd == null ? "—" : `${r.realizedPnlUsd >= 0 ? "" : ""}$${r.realizedPnlUsd.toFixed(4)}`}
                   </td>
                 </tr>
               ))}
@@ -3030,7 +3058,7 @@ function ExecutionQualityCard() {
           </table>
         </div>
         <div className="px-3 py-1.5 text-[9px] font-mono text-muted-foreground border-t border-border/50">
-          Shortfall = scanner expectation − realized fills. Routes with ≥10 live attempts and &lt;50% fill rate are blocked from live execution (block decays 1h after the last attempt, earning a fresh probe); persistent shortfalls raise the edge a route must clear. When the top route is gated, AUTO immediately falls through to the next-best viable route.
+          Leg1/Leg2|1/Leg3|1·2 = per-leg fill rate and conditional completion rates over tracked live attempts — low Leg2|1 means leg 1 fills then the cycle dies (unwind risk). Risk P&amp;L includes unwind losses from failed attempts; Net P&amp;L counts filled cycles only. Shortfall = scanner expectation − realized fills. Routes with ≥10 live attempts and &lt;50% fill rate are blocked from live execution (block decays 1h after the last attempt, earning a fresh probe); persistent shortfalls raise the edge a route must clear. When the top route is gated, AUTO immediately falls through to the next-best viable route.
         </div>
       </CardContent>
     </Card>

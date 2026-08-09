@@ -3411,6 +3411,10 @@ components:
         leg1FillRate: { type: number, nullable: true, description: "Share of tracked live attempts where leg 1 confirmed filled; null when no per-leg data yet." }
         leg2FillRate: { type: number, nullable: true, description: "Share of tracked live attempts where legs 1–2 confirmed filled." }
         leg3FillRate: { type: number, nullable: true, description: "Share of tracked live attempts where the FULL 3-leg cycle confirmed filled." }
+        leg2GivenLeg1Rate: { type: number, nullable: true, description: "Conditional completion: share of attempts that filled leg 2 GIVEN leg 1 filled; null when leg 1 never filled." }
+        leg3GivenLeg12Rate: { type: number, nullable: true, description: "Conditional completion: share of attempts that filled leg 3 GIVEN legs 1–2 filled; null when legs 1–2 never both filled." }
+        avgUnwindLossUsd: { type: number, nullable: true, description: "Average realized loss (USD, ≥0) on live attempts that filled leg 1 but failed the full cycle and had to unwind; null when none recorded." }
+        realizedPnlUsd: { type: number, nullable: true, description: "Risk-adjusted total realized P&L (USD) across ALL live attempts with realized data — wins AND unwind losses; null when no realized data." }
     ExecutionQualityResult:
       type: object
       required: [routes, totalRecords]

@@ -485,7 +485,11 @@ export const GetExecutionQualityResponse = zod.object({
   "legsTracked": zod.number().optional().describe('Live attempts with per-leg diagnostics recorded (denominator for the leg fill rates).'),
   "leg1FillRate": zod.number().nullish().describe('Share of tracked live attempts where leg 1 confirmed filled; null when no per-leg data yet.'),
   "leg2FillRate": zod.number().nullish().describe('Share of tracked live attempts where legs 1–2 confirmed filled.'),
-  "leg3FillRate": zod.number().nullish().describe('Share of tracked live attempts where the FULL 3-leg cycle confirmed filled.')
+  "leg3FillRate": zod.number().nullish().describe('Share of tracked live attempts where the FULL 3-leg cycle confirmed filled.'),
+  "leg2GivenLeg1Rate": zod.number().nullish().describe('Conditional completion: share of attempts that filled leg 2 GIVEN leg 1 filled; null when leg 1 never filled.'),
+  "leg3GivenLeg12Rate": zod.number().nullish().describe('Conditional completion: share of attempts that filled leg 3 GIVEN legs 1–2 filled; null when legs 1–2 never both filled.'),
+  "avgUnwindLossUsd": zod.number().nullish().describe('Average realized loss (USD, ≥0) on live attempts that filled leg 1 but failed the full cycle and had to unwind; null when none recorded.'),
+  "realizedPnlUsd": zod.number().nullish().describe('Risk-adjusted total realized P&L (USD) across ALL live attempts with realized data — wins AND unwind losses; null when no realized data.')
 })),
   "totalRecords": zod.number()
 })
