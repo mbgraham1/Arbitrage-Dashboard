@@ -18,6 +18,7 @@ import { CbMmCard } from "@/components/cb-mm-card";
 import { DiscoveryCard } from "@/components/discovery-card";
 import { ProfitHunterCard } from "@/components/profit-hunter-card";
 import { cn } from "@/lib/utils";
+import { ErrorBoundary } from "@/components/error-boundary";
 import { useToast } from "@/hooks/use-toast";
 import { useLocalStorage } from "@/hooks/use-local-storage";
 import { deriveAccountId } from "@/lib/account-id";
@@ -522,8 +523,11 @@ export default function Dashboard() {
         blockedBy={isAutoExecutingOb ? "OB" : isExecutingCross ? "CROSS" : null}
       />
 
-      {/* Trade History — verified vs SIM/EST labels preserved; stays in the live block. */}
-      <TradeHistoryTable />
+      {/* Trade History — verified vs SIM/EST labels preserved; stays in the live block.
+          Own error boundary: one malformed ledger row must never blank the page. */}
+      <ErrorBoundary label="Trade History">
+        <TradeHistoryTable />
+      </ErrorBoundary>
 
       {/* ══ 3. RESEARCH & SCAN-ONLY ════════════════════════════════════════════
           Live data, NO execution. Collapsed by default. */}

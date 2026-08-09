@@ -5,6 +5,7 @@ import { TooltipProvider } from '@/components/ui/tooltip';
 import NotFound from '@/pages/not-found';
 import { Route, Switch, Router as WouterRouter, useLocation, Redirect } from 'wouter';
 import { AppLayout } from '@/components/layout/app-layout';
+import { ErrorBoundary } from '@/components/error-boundary';
 import { ClerkProvider, SignIn, SignUp, Show, useClerk } from '@clerk/react';
 import { publishableKeyFromHost } from '@clerk/react/internal';
 
@@ -132,7 +133,9 @@ function HomeGate() {
     <>
       <Show when="signed-in">
         <AppLayout>
-          <Dashboard />
+          <ErrorBoundary label="Dashboard">
+            <Dashboard />
+          </ErrorBoundary>
         </AppLayout>
       </Show>
       <Show when="signed-out">
