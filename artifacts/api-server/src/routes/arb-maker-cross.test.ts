@@ -122,6 +122,7 @@ const FRESH_CROSS_BD = () => ({
 });
 vi.mock("../lib/cross-pricing.js", () => ({
   crossTakerBreakdown: vi.fn(),
+  crossTakerBreakdownRest: vi.fn(() => Promise.resolve(null)),
 }));
 
 vi.mock("../lib/graph-engine.js", () => ({
@@ -500,7 +501,7 @@ describe("POST /arb/graph-execute — cross pre-fire gates bypassed shapes", () 
 
     const { body } = await graphExecute({ ...BASE_BODY, forceMode: true });
     expect(body["success"]).toBe(false);
-    expect(String(body["error"])).toMatch(/live depth books unavailable/);
+    expect(String(body["error"])).toMatch(/depth books unavailable/);
     NO_ORDERS();
   });
 

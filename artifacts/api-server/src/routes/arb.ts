@@ -61,7 +61,7 @@ import {
 import { getBestPairPrices, getTriPrices, getBtcTriPrices, scanAllPairs, getPairPrices, getAllPairSnapshots } from "../lib/price-cache";
 import { scanOrderBookCycles, preflightObCycle, discoverCrossPairs, freshJoinPrice, makerQuote, takerCycleBreakdown, cachedTakerCycleBreakdown, getEventScan, krakenStreamStats, getStreamBook, waitForBookTouch, formatLegAges, OB_ASSETS, OB_USD_PAIRS, CROSS_LOOKUP, type ObAsset } from "../lib/order-book";
 import { scanGraphOpportunities, type GeminiScanInput, type GeminiEdgeBook, type BookLevels } from "../lib/graph-engine";
-import { crossTakerBreakdown } from "../lib/cross-pricing";
+import { crossTakerBreakdown, crossTakerBreakdownRest } from "../lib/cross-pricing";
 import { routeSanityError } from "../lib/route-sanity";
 import { projectMakerHedge, bestMakerHedgeProjection, projectTakerTaker, type MmProjection, type MmDirection } from "../lib/cross-mm";
 import { detectFees as detectRealFees } from "../lib/fees";
@@ -2968,14 +2968,29 @@ router.post("/arb/graph-execute", async (req, res): Promise<void> => {
         if (crossBd && crossBd.quoteAgeMs <= maxQuoteAgeMs) break;
       }
     }
+    let crossPricedFrom: "stream" | "rest" = "stream";
+    if (!crossBd || crossBd.quoteAgeMs > maxQuoteAgeMs) {
+      // Stream books still unavailable/stale — re-price BOTH legs from
+      // cache-bypassed REST level-2 books at the ACTUAL trade size (the
+      // Coinbase leg uses the SAME level-2 endpoint the graph scan prices
+      // from). Same depth-walked VWAP + drop-if-too-thin rules: a book that
+      // can't absorb the size returns null and the trade ABORTS — the route
+      // is never re-priced from top-of-book.
+      const restBd = await crossTakerBreakdownRest(crossShape.asset, crossShape.buyVenue, tradeSizeUsd, crossKFee, coinbaseFeesPct, maxQuoteAgeMs).catch(() => null);
+      if (restBd && restBd.quoteAgeMs <= maxQuoteAgeMs) {
+        crossBd = restBd;
+        crossPricedFrom = "rest";
+        req.log.info({ route: route.description, netUsd: restBd.netProfitUsd, legs: restBd.legDiag }, "Cross pre-fire re-priced from REST level-2 books (stream unavailable) — depth-walked at trade size");
+      }
+    }
     if (!crossBd || crossBd.quoteAgeMs > maxQuoteAgeMs) {
       req.log.info({ route: route.description, oldestAgeMs: crossBd?.quoteAgeMs ?? null, maxQuoteAgeMs }, `[FRESHNESS] ${formatLegAges(crossBd?.legAges)} | STALE — SKIP`);
       res.json({ success: false, isDryRun: false, executed: false, route: route.description, preflightProfitUsd: crossBd?.netProfitUsd ?? route.netProfitUsd, error: crossBd
         ? `Pre-flight failed — cross SKIP: quotes are still ${crossBd.quoteAgeMs}ms old (max ${maxQuoteAgeMs}ms) after waiting for fresh WebSocket updates on both venues.`
-        : "Pre-flight failed — cross SKIP: live depth books unavailable on one or both venues (stream only; estimates never execute)." });
+        : "Pre-flight failed — cross SKIP: level-2 depth books unavailable (or too thin to absorb the trade size) on one or both venues — refusing to price from top-of-book." });
       return;
     }
-    req.log.info({ route: route.description }, `[FRESHNESS] ${formatLegAges(crossBd.legAges)} | FRESH — evaluating`);
+    req.log.info({ route: route.description, pricedFrom: crossPricedFrom }, `[FRESHNESS] ${formatLegAges(crossBd.legAges)} | FRESH — evaluating`);
     // Consistency gate: scanner and pre-fire priced the SAME snapshot →
     // numbers must agree within tolerance; disagreement = pricing bug, block.
     if (route.pricedFrom === "stream" && route.marketUpdateMs != null && route.marketUpdateMs === crossBd.marketUpdateMs) {

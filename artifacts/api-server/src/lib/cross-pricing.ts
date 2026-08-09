@@ -13,7 +13,8 @@
  */
 
 import { getStreamBook, getCoinbaseStreamBook } from "./book-stream";
-import { OB_USD_PAIRS, type ObAsset, type LegAge } from "./order-book";
+import { OB_USD_PAIRS, bookSnapshot, type ObAsset, type LegAge } from "./order-book";
+import { getCoinbaseOrderBook, PAIRS, type Pair } from "./exchange";
 
 type Level = [number, number];
 
@@ -77,12 +78,57 @@ export function crossTakerBreakdown(
   krakenFeePct: number,
   coinbaseFeePct: number,
 ): CrossBreakdown | null {
+  const kBook = getStreamBook(OB_USD_PAIRS[asset]);
+  const cBook = getCoinbaseStreamBook(`${asset}-USD`);
+  if (!kBook || !cBook) return null;
+  return breakdownFromBooks(asset, buyVenue, sizeUsd, krakenFeePct, coinbaseFeePct, kBook, cBook);
+}
+
+/**
+ * REST-fallback variant for the execution pre-fire: when the live stream
+ * books are unavailable or stale, re-price BOTH legs from cache-bypassed
+ * REST level-2 books at the ACTUAL trade size — the same depth-walked VWAP
+ * and drop-if-too-thin rules as the stream path (Coinbase leg uses the same
+ * level-2 endpoint the graph scan prices from). Returns null when either
+ * book can't be fetched or can't absorb the size — the caller must ABORT,
+ * never fall back to top-of-book.
+ */
+export async function crossTakerBreakdownRest(
+  asset: ObAsset,
+  buyVenue: "kraken" | "coinbase",
+  sizeUsd: number,
+  krakenFeePct: number,
+  coinbaseFeePct: number,
+  krakenStreamMaxAgeMs: number,
+): Promise<CrossBreakdown | null> {
+  const pair = `${asset}/USD`;
+  if (!(PAIRS as readonly string[]).includes(pair)) return null; // no Coinbase product mapping — refuse
+  const fetchedAt = Date.now();
+  const [kSnap, cbBook] = await Promise.all([
+    bookSnapshot(OB_USD_PAIRS[asset], krakenStreamMaxAgeMs, true).catch(() => null),
+    getCoinbaseOrderBook(pair as Pair).catch(() => null),
+  ]);
+  if (!kSnap || !cbBook) return null;
+  const now = Date.now();
+  return breakdownFromBooks(asset, buyVenue, sizeUsd, krakenFeePct, coinbaseFeePct,
+    { asks: kSnap.book.asks as Level[], bids: kSnap.book.bids as Level[], ageMs: kSnap.ageMs, updatedAtMs: kSnap.updatedAtMs },
+    { asks: cbBook.asks, bids: cbBook.bids, ageMs: now - fetchedAt, updatedAtMs: fetchedAt });
+}
+
+interface VenueBook { asks: Level[]; bids: Level[]; ageMs: number; updatedAtMs: number; }
+
+/** Shared depth-walked breakdown over one Kraken book and one Coinbase book. */
+function breakdownFromBooks(
+  asset: ObAsset,
+  buyVenue: "kraken" | "coinbase",
+  sizeUsd: number,
+  krakenFeePct: number,
+  coinbaseFeePct: number,
+  kBook: VenueBook,
+  cBook: VenueBook,
+): CrossBreakdown | null {
   const kPair = OB_USD_PAIRS[asset];
   const cbProduct = `${asset}-USD`;
-  const kBook = getStreamBook(kPair);
-  const cBook = getCoinbaseStreamBook(cbProduct);
-  if (!kBook || !cBook) return null;
-
   const sellVenue = buyVenue === "kraken" ? "coinbase" as const : "kraken" as const;
   const buyBook  = buyVenue === "kraken" ? kBook : cBook;
   const sellBook = buyVenue === "kraken" ? cBook : kBook;
@@ -115,7 +161,7 @@ export function crossTakerBreakdown(
       { venue: sellVenue, pair: sellPairName, side: "sell", topPx: sell.top, vwapPx: sell.vwap, feePct: sellFeePct },
     ],
     legAges,
-    quoteAgeMs: Math.max(buyBook.ageMs, cBook === buyBook ? kBook.ageMs : sellBook.ageMs),
+    quoteAgeMs: Math.max(kBook.ageMs, cBook.ageMs),
     marketUpdateMs: Math.max(buyBook.updatedAtMs, sellBook.updatedAtMs),
   };
 }

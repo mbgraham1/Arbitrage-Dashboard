@@ -131,6 +131,7 @@ vi.mock("../lib/order-book.js", () => ({
 // Fresh, profitable, depth-walked cross breakdown: the executor-grade cross
 // pre-fire requires live stream books on both venues before any order.
 vi.mock("../lib/cross-pricing.js", () => ({
+  crossTakerBreakdownRest: vi.fn(() => Promise.resolve(null)),
   crossTakerBreakdown: vi.fn(() => ({
     netProfitUsd: 0.05, rawEdgeUsd: 0.06, feesUsd: 0.01, slippageUsd: 0,
     baseQty: 0.0666,

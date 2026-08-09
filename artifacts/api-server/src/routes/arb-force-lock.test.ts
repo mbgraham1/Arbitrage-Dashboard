@@ -150,6 +150,7 @@ vi.mock("../lib/tri-fill.js", () => ({
 
 vi.mock("../lib/cross-pricing.js", () => ({
   crossTakerBreakdown: vi.fn(() => null),
+  crossTakerBreakdownRest: vi.fn(() => Promise.resolve(null)),
 }));
 
 vi.mock("../lib/book-stream.js", () => ({
