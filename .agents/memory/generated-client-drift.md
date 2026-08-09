@@ -7,3 +7,5 @@ The spec chain is lib/api-spec/openapi.yaml → codegen → lib/api-zod + lib/ap
 **Why:** Running codegen after such a merge silently reverted their fields (request bodies, response fields, POST-as-query hooks) and broke both artifacts even though `pnpm tsc --build` passed (composite build can be stale).
 
 **How to apply:** Before/after running codegen, diff the generated files; port any drifted fields INTO openapi.yaml (and orval.config.ts `operations: { <op>: { query: { useQuery: true } } }` for POST endpoints used as polling queries). Always verify with per-artifact `pnpm --filter <pkg> exec tsc --noEmit`, not just the workspace build.
+
+**Stale dist gotcha:** `lib/api-zod/dist` is committed/built separately from `src/generated`. If tsc reports a request-body field "does not exist" that IS in `src/generated/api.ts` and openapi.yaml, the dist build is just stale — rebuild api-zod (`npx tsc -b` in lib/api-zod) before assuming spec drift.

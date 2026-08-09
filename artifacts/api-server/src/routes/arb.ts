@@ -1353,6 +1353,15 @@ async function runKrakenTriangle(input: TriangleExecInput, reqLog: ReqLog): Prom
       const agg: AggFill = { volExec: 0, cost: 0, fee: 0, txid: "" };
       const pctOf = (v: number) => Math.min(100, (v / spec.volume) * 100);
       for (let attempt = 1; attempt <= MAX_LEG_ATTEMPTS; attempt++) {
+        // A revoked run (KILL / HARD RESET / FORCE eviction) must never place
+        // ANOTHER order — not even a chase re-join at a fresh price. The
+        // resting poll loop catches revocation while an order rests, but a
+        // revoke landing during the cancel-confirm window of a reprice would
+        // otherwise slip through to the re-placement here. Confirmed fills
+        // ride on the error so the caller unwinds ACTUAL inventory only.
+        if (lockGen != null && !liveLockOwned(lockGen)) {
+          throw new LockRevokedError(label, `aborted before ${chases > 0 ? "chase re-join" : "order placement"} — lock revoked, no new orders placed.`, agg.volExec > 0 ? agg : undefined);
+        }
         setExecStatus({
           active: true, route, leg: legIndex, legLabel: `${label}: ${spec.side} ${spec.pair}`,
           pair: spec.pair, orderId: null, attempt, maxAttempts: MAX_LEG_ATTEMPTS,
