@@ -68,13 +68,15 @@ export default function Trades() {
     { refetchInterval: 30_000, enabled: tab === "triangular" },
   );
 
-  const trades = tradesQuery.data || [];
+  const trades = tradesQuery.data?.items ?? [];
   const summary = summaryQuery.data;
   const triItems = triHistoryQuery.data?.items ?? [];
   const triTotal = triHistoryQuery.data?.total ?? 0;
   const triSummary = triSummaryQuery.data;
 
-  const execTotal = summary?.totalTrades ?? 0;
+  // Total comes from the same response as the page — atomic with the rows, so
+  // "Showing X–Y of Z" can never drift when a trade lands between fetches.
+  const execTotal = tradesQuery.data?.total ?? 0;
   const execTotalPages = Math.max(1, Math.ceil(execTotal / EXEC_PAGE_SIZE));
   const execRangeStart = execTotal === 0 ? 0 : execPage * EXEC_PAGE_SIZE + 1;
   const execRangeEnd = execPage * EXEC_PAGE_SIZE + trades.length;

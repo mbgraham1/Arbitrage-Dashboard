@@ -221,7 +221,8 @@ export const ListTradesQueryParams = zod.object({
   "offset": zod.coerce.number().default(listTradesQueryOffsetDefault)
 })
 
-export const ListTradesResponseItem = zod.object({
+export const ListTradesResponse = zod.object({
+  "items": zod.array(zod.object({
   "id": zod.number(),
   "createdAt": zod.string(),
   "pair": zod.string().nullish().describe('Trading pair symbol (e.g. SOL\/USD, BTC\/USD). Null for records before multi-pair support.'),
@@ -250,8 +251,9 @@ export const ListTradesResponseItem = zod.object({
   "taker": zod.boolean().optional(),
   "unwind": zod.boolean().optional()
 })).nullish().describe('Per-leg confirmed fill evidence (actual price, volume, fee, exchange order ID).')
+})),
+  "total": zod.number().describe('Total trade rows in the ledger, counted in the same request as the page')
 })
-export const ListTradesResponse = zod.array(ListTradesResponseItem)
 
 
 /**

@@ -228,13 +228,11 @@ paths:
             default: 0
       responses:
         "200":
-          description: Trade history list
+          description: Trade history page with total row count (atomic with the page)
           content:
             application/json:
               schema:
-                type: array
-                items:
-                  $ref: "#/components/schemas/TradeRecord"
+                $ref: "#/components/schemas/TradeListResult"
 
   /prices/all-pairs:
     get:
@@ -1818,6 +1816,18 @@ components:
           type: ["string", "null"]
         error:
           type: ["string", "null"]
+
+    TradeListResult:
+      type: object
+      required: [items, total]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/TradeRecord"
+        total:
+          type: integer
+          description: Total trade rows in the ledger, counted in the same request as the page
 
     TradeRecord:
       type: object

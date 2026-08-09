@@ -239,6 +239,12 @@ export interface TradeRecord {
   legFills?: TradeRecordLegFillsItem[] | null;
 }
 
+export interface TradeListResult {
+  items: TradeRecord[];
+  /** Total trade rows in the ledger, counted in the same request as the page */
+  total: number;
+}
+
 export interface AllPairSnapshot {
   /** Canonical pair, e.g. BTC/USD */
   pair: string;

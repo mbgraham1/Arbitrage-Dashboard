@@ -87,7 +87,7 @@ import type {
   RebalanceStatus,
   RouteHistoryClearResult,
   ScanAllPairsParams,
-  TradeRecord,
+  TradeListResult,
   TradeRequest,
   TradeResult,
   TradeSummary,
@@ -743,9 +743,9 @@ export const getListTradesUrl = (params?: ListTradesParams,) => {
 /**
  * @summary Get trade history
  */
-export const listTrades = async (params?: ListTradesParams, options?: RequestInit): Promise<TradeRecord[]> => {
+export const listTrades = async (params?: ListTradesParams, options?: RequestInit): Promise<TradeListResult> => {
 
-  return customFetch<TradeRecord[]>(getListTradesUrl(params),
+  return customFetch<TradeListResult>(getListTradesUrl(params),
   {
     ...options,
     method: 'GET'

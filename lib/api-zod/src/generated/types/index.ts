@@ -131,6 +131,7 @@ export * from './rebalanceVenueCaps';
 export * from './rebalanceWhitelistKey';
 export * from './routeHistoryClearResult';
 export * from './scanAllPairsParams';
+export * from './tradeListResult';
 export * from './tradeRecord';
 export * from './tradeRecordLegFillsItem';
 export * from './tradeRequest';

@@ -2811,7 +2811,7 @@ function ExecutionQualityCard() {
 
 function TradeHistoryTable() {
   const tradesQuery = useListTrades({ limit: 50 });
-  const trades: TradeRecord[] = tradesQuery.data ?? [];
+  const trades: TradeRecord[] = tradesQuery.data?.items ?? [];
 
   return (
     <Card className="mt-6">

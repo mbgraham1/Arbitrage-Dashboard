@@ -70,6 +70,7 @@ import { geminiSymbols, geminiSymbolDetails } from "../lib/gemini-exec";
 import { geminiVerify, type GeminiCreds } from "../lib/gemini";
 import { createPairHistory, updatePairHistory, type PairHistory } from "../lib/kalman";
 import { waitForTriLimitFill } from "../lib/tri-fill.js";
+import { listTradesPage } from "../lib/trades-page.js";
 
 // ── Cointegration pairs-trading state (in-process memory) ─────────────────────
 // Pairs: SOL/ETH, BTC/ETH, AVAX/DOT
@@ -4939,24 +4940,9 @@ router.get("/trades", async (req, res): Promise<void> => {
   const limit = parsed.success ? (parsed.data.limit ?? 50) : 50;
   const offset = parsed.success ? (parsed.data.offset ?? 0) : 0;
 
-  const trades = await db
-    .select()
-    .from(tradesTable)
-    .orderBy(desc(tradesTable.createdAt))
-    .limit(limit)
-    .offset(offset);
-
-  res.json(trades.map(t => ({
-    ...t,
-    pair: t.pair ?? "SOL/USD",
-    volume: parseFloat(t.volume),
-    estimatedProfitUsd: parseFloat(t.estimatedProfitUsd),
-    netEdgePct: parseFloat(t.netEdgePct),
-    krakenPrice: parseFloat(t.krakenPrice),
-    coinbasePrice: parseFloat(t.coinbasePrice),
-    realizedProfitUsd: t.realizedProfitUsd != null ? parseFloat(t.realizedProfitUsd) : null,
-    createdAt: t.createdAt.toISOString(),
-  })));
+  // Single-statement page + total (one PostgreSQL snapshot) — the total can
+  // never drift from the page rows even when a trade lands mid-request.
+  res.json(await listTradesPage(limit, offset));
 });
 
 // ── GET /trades/summary ───────────────────────────────────────────────────────
