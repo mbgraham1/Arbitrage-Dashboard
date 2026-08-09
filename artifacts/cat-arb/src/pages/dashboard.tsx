@@ -2566,6 +2566,13 @@ function GraphEngineCard() {
           >
             {executeMutation.isPending ? "EXECUTING…" : `🔴 EXECUTE TOP ROUTE${liveMode ? "" : " (DRY)"}`}
           </Button>
+          {!canExecute && !executeMutation.isPending && (
+            <span data-testid="text-execute-blocked-reason" className="basis-full text-[10px] font-mono text-muted-foreground">
+              {!topRoute
+                ? "⚠ Disabled — no executable route right now (nothing clears fees + your profit floor)."
+                : `⚠ Disabled — missing inventory: ${topRouteMissingInv.map(m => `${m.amount >= 1 ? m.amount.toFixed(4) : m.amount.toPrecision(3)} ${m.asset} on ${EX_LABEL[m.exchange]}`).join(", ")}.`}
+            </span>
+          )}
         </div>
       </CardHeader>
 
