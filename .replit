@@ -21,3 +21,8 @@ timeoutMs = 20000
 
 [nix]
 channel = "stable-25_05"
+
+[userenv]
+
+[userenv.shared]
+HERMES_TOKEN_SHA256 = "4d2cd679c249b557e53d5c6ee766601c679710a252596bec6af0ea2edd4567e3"
