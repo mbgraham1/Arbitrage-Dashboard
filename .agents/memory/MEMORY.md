@@ -24,4 +24,5 @@
 - [Scratch-schema SQL tests](scratch-schema-sql-tests.md) — never run global retention DELETEs against the shared DB in tests; use a search_path-scoped scratch schema, race concurrency before any serial run.
 - [Legacy trade verification](legacy-trade-verification.md) — only two-order same-pair USD round trips upgrade to verified; triangles store just leg1/leg3 IDs and must be excluded outright.
 - [Fake-Date poll bounds](fake-date-poll-bounds.md) — tests fake only Date, so Date.now() deadlines in poll loops never expire; bound exchange confirm/unwind polls by iteration count.
+- [OB test cache poisoning](ob-test-cache-poisoning.md) — 1h discovery cache outlives the per-test clock jump; suites must clear it explicitly or later scans silently lose cross pairs.
 - [OB path-based execution](ob-path-execution.md) — executor/pre-flight are asset-path generic (max 4 legs); edit the cross-hop loop, never special-case; tests adapt via factory-level preflightObPath.

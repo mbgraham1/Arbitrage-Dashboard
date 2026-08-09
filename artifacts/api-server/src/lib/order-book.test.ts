@@ -768,3 +768,219 @@ describe("v19 — dynamic AssetPairs discovery", () => {
     expect(result.crossPairsDiscovered).toBeGreaterThan(0);
   });
 });
+
+// ── v20: 4-leg routes (USD→A→M1→M2→USD) — simulatePath math ─────────────────
+//
+// Fixture (SOL as asset A, deep single-level books, all fills at best price):
+//   SOLUSD   ask 100 USD/SOL      → $100 buys 1 SOL
+//   SOLXBT   bid 0.002 BTC/SOL    → 1 SOL sells for 0.002 BTC   (SOL→BTC: aIsQuote=false, walk BIDS)
+//   ETHXBT   ask 0.05 BTC/ETH     → 0.002 BTC buys 0.04 ETH     (BTC→ETH: aIsQuote=true, walk ASKS)
+//   ETHUSD   bid 3 000 USD/ETH    → 0.04 ETH sells for 120 USD
+//
+// USD→SOL→BTC→ETH→USD @ $100:
+//   grossProfit = 120 − 100 = 20
+//   legs = 4 → feeUsd (0.40%) = 0.004 × (100×3 + 120) = 0.004 × 420 = 1.68
+//   netProfit = 20 − 1.68 = 18.32
+//   slippagePct = 0, confidencePct = 100
+//
+// Alternate mid order USD→SOL→ETH→BTC→USD (same books + SOLETH):
+//   SOLETH   bid 0.04 ETH/SOL     → 1 SOL sells for 0.04 ETH    (SOL→ETH: aIsQuote=false, walk BIDS)
+//   ETHXBT   bid 0.049 BTC/ETH    → 0.04 ETH sells for 0.00196 BTC (ETH→BTC: aIsQuote=false, walk BIDS)
+//   XXBTZUSD bid 55 000 USD/BTC   → 0.00196 BTC sells for 107.8 USD
+//   grossProfit = 7.8; feeUsd = 0.004 × (300 + 107.8) = 1.6312; net = 6.1688
+
+describe("v20 — 4-leg routes: fee, slippage, and confidence math", () => {
+  // The v19 discovery suite above caches an INJ-only cross lookup (1h TTL
+  // outlives the 5-min per-test clock jump) — clear it so the hardcoded map is used.
+  beforeEach(() => { _testOnly_clearCrossCache(); });
+
+  function setupFourLegFetch() {
+    vi.stubGlobal(
+      "fetch",
+      mockFetch({
+        SOLUSD:   depthResponse("SOLUSD",   [[100, 100]],      [[99, 100]]),
+        SOLXBT:   depthResponse("SOLXBT",   [[0.0021, 1000]],  [[0.002, 1000]]),
+        SOLETH:   depthResponse("SOLETH",   [[0.041, 1000]],   [[0.04, 1000]]),
+        ETHXBT:   depthResponse("ETHXBT",   [[0.05, 1000]],    [[0.049, 1000]]),
+        ETHUSD:   depthResponse("ETHUSD",   [[3_010, 1000]],   [[3_000, 1000]]),
+        XXBTZUSD: depthResponse("XXBTZUSD", [[60_000, 10]],    [[55_000, 10]]),
+      }),
+    );
+  }
+
+  it("USD→SOL→BTC→ETH→USD: exact net profit after 4 per-leg fees on notional", async () => {
+    setupFourLegFetch();
+    const result = await scanOrderBookCycles(100, 0.40, 0.02, 1.0, false);
+    const cycle = result.cycles.find(c => c.route === "USD→SOL→BTC→ETH→USD");
+    expect(cycle).toBeDefined();
+    expect(cycle!.legs).toBe(4);
+    expect(cycle!.path).toEqual(["SOL", "BTC", "ETH"]);
+    expect(cycle!.grossProfitUsd).toBeCloseTo(20, 6);
+    // 4 legs, fee on each leg's notional: 0.004 × (100 + 100 + 100 + 120)
+    expect(cycle!.feeUsd).toBeCloseTo(1.68, 6);
+    expect(cycle!.estimatedProfitUsd).toBeCloseTo(18.32, 5);
+    // Fee must be strictly larger than the 3-leg fee on the same edge —
+    // 4-leg fees can never be understated to a 3-leg drag (1.28).
+    expect(cycle!.feeUsd).toBeGreaterThan(0.004 * (100 + 100 + 120));
+  });
+
+  it("USD→SOL→ETH→BTC→USD (other mid order): exact net profit after 4 per-leg fees", async () => {
+    setupFourLegFetch();
+    const result = await scanOrderBookCycles(100, 0.40, 0.02, 1.0, false);
+    const cycle = result.cycles.find(c => c.route === "USD→SOL→ETH→BTC→USD");
+    expect(cycle).toBeDefined();
+    expect(cycle!.legs).toBe(4);
+    expect(cycle!.path).toEqual(["SOL", "ETH", "BTC"]);
+    // 1 SOL → 0.04 ETH (SOLETH bid) → 0.04 × 0.049 = 0.00196 BTC (ETHXBT bid) → × 55 000 = 107.8 USD
+    expect(cycle!.grossProfitUsd).toBeCloseTo(7.8, 6);
+    expect(cycle!.feeUsd).toBeCloseTo(0.004 * (300 + 107.8), 6);
+    expect(cycle!.estimatedProfitUsd).toBeCloseTo(7.8 - 0.004 * (300 + 107.8), 5);
+  });
+
+  it("reports zero slippage and 100% confidence when all 4 legs fill at best price", async () => {
+    setupFourLegFetch();
+    const result = await scanOrderBookCycles(100, 0.40, 0.02, 1.0, false);
+    const cycle = result.cycles.find(c => c.route === "USD→SOL→BTC→ETH→USD");
+    expect(cycle!.slippagePct).toBeCloseTo(0, 10);
+    expect(cycle!.confidencePct).toBe(100);
+  });
+
+  it("accumulates slippage across multiple legs of a 4-leg route (legs 1 and 4 multi-level)", async () => {
+    // Leg 1 (SOLUSD asks): [100, 0.5] then [101, 10] — $100 fill spans 2 levels
+    // Leg 4 (ETHUSD bids): [3000, 0.02] then [2990, 10] — ETH sell spans 2 levels
+    // Legs 2 & 3 stay single-level (zero slippage) to isolate the accumulation.
+    vi.stubGlobal(
+      "fetch",
+      mockFetch({
+        SOLUSD:   depthResponse("SOLUSD",   [[100, 0.5], [101, 10]], [[99, 100]]),
+        SOLXBT:   depthResponse("SOLXBT",   [[0.0021, 1000]],        [[0.002, 1000]]),
+        ETHXBT:   depthResponse("ETHXBT",   [[0.05, 1000]],          [[0.049, 1000]]),
+        ETHUSD:   depthResponse("ETHUSD",   [[3_010, 1000]],         [[3_000, 0.02], [2_990, 10]]),
+      }),
+    );
+
+    const result = await scanOrderBookCycles(100, 0, 0.02, 10, false); // fee=0 to isolate slippage
+    const cycle = result.cycles.find(c => c.route === "USD→SOL→BTC→ETH→USD");
+    expect(cycle).toBeDefined();
+
+    // Leg 1: 0.5 SOL @100 ($50) + $50/101 SOL @101
+    const solLvl2 = 50 / 101;
+    const totalSol = 0.5 + solLvl2;
+    const avg1 = 100 / totalSol;
+    const slip1 = Math.abs(avg1 - 100) / 100 * 100;
+
+    // Legs 2–3 at best: totalSol SOL → ×0.002 BTC → /0.05 ETH
+    const eth = (totalSol * 0.002) / 0.05;
+
+    // Leg 4: 0.02 ETH @3000 + remainder @2990
+    const usdFinal = 0.02 * 3_000 + (eth - 0.02) * 2_990;
+    const avg4 = usdFinal / eth;
+    const slip4 = Math.abs(avg4 - 3_000) / 3_000 * 100;
+
+    expect(cycle!.avgPriceA).toBeCloseTo(avg1, 6);
+    expect(cycle!.slippagePct).toBeCloseTo(slip1 + slip4, 6);
+    expect(cycle!.grossProfitUsd).toBeCloseTo(usdFinal - 100, 6);
+    // With fee=0, net must equal gross exactly — never higher.
+    expect(cycle!.estimatedProfitUsd).toBeCloseTo(usdFinal - 100, 6);
+  });
+});
+
+// ── v20: 4-leg shallow-book rejection on each leg ────────────────────────────
+//
+// Base fixture fills: $100 → 1 SOL → 0.002 BTC → 0.04 ETH → USD.
+// Each test starves exactly one leg's book below the required volume; the
+// cycle must be OMITTED (never a partial-fill phantom edge).
+
+describe("v20 — 4-leg full-fill rejection on shallow books", () => {
+  // The v19 discovery suite above caches an INJ-only cross lookup (1h TTL
+  // outlives the 5-min per-test clock jump) — clear it so the hardcoded map is used.
+  beforeEach(() => { _testOnly_clearCrossCache(); });
+
+  function books(overrides: Partial<Record<string, object>> = {}) {
+    return {
+      SOLUSD:   depthResponse("SOLUSD",   [[100, 100]],     [[99, 100]]),
+      SOLXBT:   depthResponse("SOLXBT",   [[0.0021, 1000]], [[0.002, 1000]]),
+      ETHXBT:   depthResponse("ETHXBT",   [[0.05, 1000]],   [[0.049, 1000]]),
+      ETHUSD:   depthResponse("ETHUSD",   [[3_010, 1000]],  [[3_000, 1000]]),
+      ...overrides,
+    } as Record<string, object>;
+  }
+
+  async function scanRoute(overrides: Record<string, object>) {
+    vi.stubGlobal("fetch", mockFetch(books(overrides)));
+    const result = await scanOrderBookCycles(100, 0.40, 0.02, 1.0, false);
+    return result.cycles.find(c => c.route === "USD→SOL→BTC→ETH→USD");
+  }
+
+  it("sanity: full-depth fixture produces the 4-leg cycle", async () => {
+    expect(await scanRoute({})).toBeDefined();
+  });
+
+  it("omits the route when leg 1 (SOLUSD asks) cannot absorb $100", async () => {
+    // Only 0.5 SOL at 100 = $50 depth — cannot fill $100
+    expect(await scanRoute({ SOLUSD: depthResponse("SOLUSD", [[100, 0.5]], [[99, 100]]) })).toBeUndefined();
+  });
+
+  it("omits the route when leg 2 (SOLXBT bids) cannot absorb 1 SOL", async () => {
+    expect(await scanRoute({ SOLXBT: depthResponse("SOLXBT", [[0.0021, 1000]], [[0.002, 0.5]]) })).toBeUndefined();
+  });
+
+  it("omits the route when leg 3 (ETHXBT asks) cannot supply 0.04 ETH", async () => {
+    expect(await scanRoute({ ETHXBT: depthResponse("ETHXBT", [[0.05, 0.02]], [[0.049, 1000]]) })).toBeUndefined();
+  });
+
+  it("omits the route when leg 4 (ETHUSD bids) cannot absorb 0.04 ETH", async () => {
+    expect(await scanRoute({ ETHUSD: depthResponse("ETHUSD", [[3_010, 1000]], [[3_000, 0.01]]) })).toBeUndefined();
+  });
+});
+
+// ── v20: maxLegs=3 gate and 4-leg scaling-table re-simulation ────────────────
+
+describe("v20 — maxLegs gate and scaling table on a 4-leg top route", () => {
+  // The v19 discovery suite above caches an INJ-only cross lookup (1h TTL
+  // outlives the 5-min per-test clock jump) — clear it so the hardcoded map is used.
+  beforeEach(() => { _testOnly_clearCrossCache(); });
+
+  // Fixture with ONLY the pairs needed for USD→SOL→BTC→ETH→USD, deep enough
+  // to absorb $1 000. No SOLETH / XXBTZUSD books → no competing 3-leg or
+  // alternate-mid cycle can simulate, so the 4-leg route is the unique top.
+  function setupFourLegOnlyFetch() {
+    vi.stubGlobal(
+      "fetch",
+      mockFetch({
+        SOLUSD: depthResponse("SOLUSD", [[100, 100]],     [[99, 100]]),
+        SOLXBT: depthResponse("SOLXBT", [[0.0021, 1000]], [[0.002, 1000]]),
+        ETHXBT: depthResponse("ETHXBT", [[0.05, 1000]],   [[0.049, 1000]]),
+        ETHUSD: depthResponse("ETHUSD", [[3_010, 1000]],  [[3_000, 1000]]),
+      }),
+    );
+  }
+
+  it("maxLegs=3 returns no 4-leg cycles at all", async () => {
+    setupFourLegOnlyFetch();
+    const result = await scanOrderBookCycles(100, 0.40, 0.02, 1.0, false, 3);
+    expect(result.cycles.find(c => c.route === "USD→SOL→BTC→ETH→USD")).toBeUndefined();
+    expect(result.cycles.every(c => c.legs === 3)).toBe(true);
+  });
+
+  it("re-simulates the 4-leg top route in the scaling table with 4-leg math (not a bogus A→B triangle)", async () => {
+    setupFourLegOnlyFetch();
+    const result = await scanOrderBookCycles(10, 0.40, 0.001, 1.0, false);
+    expect(result.scalingRoute).toBe("USD→SOL→BTC→ETH→USD");
+    expect(result.scaling.length).toBeGreaterThan(0);
+
+    // With deep single-level books the fills are linear in size:
+    // usdFinal = 1.2 × size, gross = 0.2 × size,
+    // 4-leg fee = 0.004 × (3×size + 1.2×size) = 0.0168 × size,
+    // net = 0.2×size − 0.0168×size = 0.1832 × size.
+    // A bogus SOL→ETH 3-leg re-simulation could not even run here (no SOLETH
+    // book), and a 3-leg fee model would give 0.1872 × size — higher profit.
+    for (const size of [10, 50, 100, 500, 1000]) {
+      const row = result.scaling.find(r => r.sizeUsd === size);
+      expect(row, `scaling row for $${size}`).toBeDefined();
+      expect(row!.profitUsd).toBeCloseTo(0.1832 * size, 5);
+      expect(row!.slippagePct).toBeCloseTo(0, 10);
+      expect(row!.status).toBe("VIABLE");
+    }
+  });
+});
