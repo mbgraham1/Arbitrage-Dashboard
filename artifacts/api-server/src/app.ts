@@ -10,6 +10,7 @@ import {
   getClerkProxyHost,
 } from "./middlewares/clerkProxyMiddleware";
 import router from "./routes";
+import { hermesSpikeHandler } from "./routes/hermes";
 import { logger } from "./lib/logger";
 
 const app: Express = express();
@@ -123,6 +124,11 @@ function requireAuth(req: Request, res: Response, next: NextFunction): void {
   if (!userId) { res.status(401).json({ error: "Unauthorized" }); return; }
   next();
 }
+
+// Hermes spike webhook: its OWN execution token (X-Exec-Token, separate from
+// the read-only service token), coin-name-only body, full 2X gates inside.
+// Mounted before the operator gate on purpose — auth lives in the handler.
+app.post("/api/hermes/spike", hermesSpikeHandler);
 
 app.use("/api", requireAuth, router);
 

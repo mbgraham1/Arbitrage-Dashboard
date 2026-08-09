@@ -47,7 +47,7 @@ const router: IRouter = Router();
 
 // Full shared Kraken∩Coinbase liquid universe (same list the hunter tracks) —
 // every asset here has verified order routing on both venues via PAIRS.
-const SCAN_ASSETS: ObAsset[] = ["ETH", "BTC", "SOL", "XRP", "LINK", "DOGE", "AVAX", "LTC", "ADA", "DOT", "UNI", "AAVE", "ATOM", "BCH", "FIL"];
+export const SCAN_ASSETS: ObAsset[] = ["ETH", "BTC", "SOL", "XRP", "LINK", "DOGE", "AVAX", "LTC", "ADA", "DOT", "UNI", "AAVE", "ATOM", "BCH", "FIL"];
 const POLL_MS = 600;
 const TERMINAL_WAIT_MS = 25_000;
 const DEFAULT_MIN_NET_USD = 0.01;     // profit floor AFTER all costs
@@ -216,12 +216,23 @@ async function ledgerIndeterminate(asset: string, dirTag: string, note: string, 
   } catch (e) { log.error({ err: e }, "[2X] indeterminate ledger write failed"); }
 }
 
+type Execute2xInput = ReturnType<typeof Execute2xBody.parse>;
+type ExecLog = { info: (o: object, m: string) => void; error: (o: object, m: string) => void };
+export type ExecResult = { status: number; body: Record<string, unknown> };
+
 router.post("/arb/2x-execute", async (req, res): Promise<void> => {
   const parsed = Execute2xBody.safeParse(req.body);
   if (!parsed.success) { res.status(400).json({ error: parsed.error.message }); return; }
-  const b = parsed.data;
+  const out = await run2xExecute(parsed.data, req.log);
+  res.status(out.status).json(out.body);
+});
+
+/** The full gated 2X execution flow, reusable outside the HTTP route (e.g.
+ *  the Hermes spike webhook). Identical gates, shared live lock, same
+ *  ledger — behavior must never diverge from POST /arb/2x-execute. */
+export async function run2xExecute(b: Execute2xInput, log: ExecLog): Promise<ExecResult> {
   const asset = b.asset as ObAsset;
-  if (!SCAN_ASSETS.includes(asset)) { res.status(400).json({ error: `asset must be one of ${SCAN_ASSETS.join(", ")}` }); return; }
+  if (!SCAN_ASSETS.includes(asset)) { return { status: 400, body: { error: `asset must be one of ${SCAN_ASSETS.join(", ")}` } }; }
   const buyVenue = b.buyVenue as "kraken" | "coinbase";
   const sizeUsd = Math.min(10, Math.max(1, b.sizeUsd ?? 10)); // HARD $10 cap until realized track record is positive
   const minNetUsd = b.minNetUsd ?? DEFAULT_MIN_NET_USD;
@@ -233,14 +244,14 @@ router.post("/arb/2x-execute", async (req, res): Promise<void> => {
   const kPairRaw = OB_USD_PAIRS[asset];
   const cbPair = `${asset}/USD` as Pair; // every SCAN_ASSETS entry is in PAIRS
 
-  const skip = (reason: string, extra?: object) => {
-    req.log.info({ asset, buyVenue, reason }, "[2X] SKIP");
-    res.json({ executed: false, outcome: "skipped", reason, asset, buyVenue, startedAt, finishedAt: new Date().toISOString(), buyLeg: null, sellLeg: null, realizedProfitUsd: null, projection: null, ...extra });
+  const skip = (reason: string, extra?: object): ExecResult => {
+    log.info({ asset, buyVenue, reason }, "[2X] SKIP");
+    return { status: 200, body: { executed: false, outcome: "skipped", reason, asset, buyVenue, startedAt, finishedAt: new Date().toISOString(), buyLeg: null, sellLeg: null, realizedProfitUsd: null, projection: null, ...extra } };
   };
 
-  if (!b.krakenKey || !b.krakenSecret || !b.coinbaseKey || !b.coinbaseSecret) { skip("missing API credentials"); return; }
-  if (liveNeedsReconcile) { skip(`live runs locked pending manual reconciliation: ${liveNeedsReconcile}. Verify on the exchange, then restart the server.`); return; }
-  if (execInFlight) { skip("an execution is already in flight"); return; }
+  if (!b.krakenKey || !b.krakenSecret || !b.coinbaseKey || !b.coinbaseSecret) { return skip("missing API credentials"); }
+  if (liveNeedsReconcile) { return skip(`live runs locked pending manual reconciliation: ${liveNeedsReconcile}. Verify on the exchange, then restart the server.`); }
+  if (execInFlight) { return skip("an execution is already in flight"); }
   execInFlight = true;
   let lockGen: number | null = null;
   try {
@@ -251,7 +262,7 @@ router.post("/arb/2x-execute", async (req, res): Promise<void> => {
       if (!kTier) throw new Error("Kraken fee tier unavailable");
       kFeePct = kTier.takerFeePct; cbFeePct = cbTier.takerFeePct;
     } catch (e) {
-      skip(`could not detect REAL fee tiers (never guessing for live): ${(e as Error).message}`); return;
+      return skip(`could not detect REAL fee tiers (never guessing for live): ${(e as Error).message}`);
     }
 
     // 2. Inventory precheck on both venues BEFORE locking anything.
@@ -268,17 +279,17 @@ router.post("/arb/2x-execute", async (req, res): Promise<void> => {
       kAsset = kBals.filter(x => kCodes.includes(x.currency)).reduce((a, x) => a + x.amount, 0);
       cbUsd = cbUsdDetail.available; cbAsset = cbAssetDetail.available;
     } catch (e) {
-      skip(`balance check failed: ${(e as Error).message}`); return;
+      return skip(`balance check failed: ${(e as Error).message}`);
     }
     const buyUsdAvail = buyVenue === "kraken" ? kUsd : cbUsd;
     const sellAssetAvail = sellVenue === "kraken" ? kAsset : cbAsset;
-    if (buyUsdAvail < sizeUsd * 1.01) { skip(`insufficient USD on ${buyVenue}: need ~$${(sizeUsd * 1.01).toFixed(2)}, have $${buyUsdAvail.toFixed(2)}`); return; }
+    if (buyUsdAvail < sizeUsd * 1.01) { return skip(`insufficient USD on ${buyVenue}: need ~$${(sizeUsd * 1.01).toFixed(2)}, have $${buyUsdAvail.toFixed(2)}`); }
 
     // 3. Re-project on CURRENT books with REAL fees; all gates re-checked.
     const d = decide(asset, buyVenue, sizeUsd, kFeePct, cbFeePct, minNetUsd, bufferUsd, maxQuoteAgeMs);
-    if (d.decision !== "FIRE") { skip(d.reason, { projection: d }); return; }
+    if (d.decision !== "FIRE") { return skip(d.reason, { projection: d }); }
     const estQty = d.baseQty!;
-    if (sellAssetAvail < estQty * 1.02) { skip(`insufficient pre-positioned ${asset} on ${sellVenue} for the sell leg: need ~${(estQty * 1.02).toFixed(8)}, tradable ${sellAssetAvail.toFixed(8)}`, { projection: d }); return; }
+    if (sellAssetAvail < estQty * 1.02) { return skip(`insufficient pre-positioned ${asset} on ${sellVenue} for the sell leg: need ~${(estQty * 1.02).toFixed(8)}, tradable ${sellAssetAvail.toFixed(8)}`, { projection: d }); }
 
     // 3.5 Coinbase increment metadata is MANDATORY before any order — never
     // fall back to guessed precision on a live venue.
@@ -286,12 +297,12 @@ router.post("/arb/2x-execute", async (req, res): Promise<void> => {
     try {
       cbIncs = await getCoinbaseProductIncrements(cbPair);
     } catch (e) {
-      skip(`Coinbase product increments unavailable — refusing to guess order precision: ${(e as Error).message}`, { projection: d }); return;
+      return skip(`Coinbase product increments unavailable — refusing to guess order precision: ${(e as Error).message}`, { projection: d });
     }
 
     // 4. Shared live lock — same lock every other executor gates on.
     lockGen = tryAcquireSharedLiveLock();
-    if (lockGen == null) { skip("another live executor holds the execution lock", { projection: d }); return; }
+    if (lockGen == null) { return skip("another live executor holds the execution lock", { projection: d }); }
     bindLockHeartbeat(liveLockHeartbeat(lockGen));
 
     // 5. Leg 1: BUY on the cheap venue. Confirmed actual fill = only truth.
@@ -306,12 +317,11 @@ router.post("/arb/2x-execute", async (req, res): Promise<void> => {
         if (!buyId) throw new Error("Kraken returned no txid");
       } catch (e) {
         const msg = (e as Error).message;
-        if (isExplicitKrakenReject(msg)) { skip(`Kraken buy rejected by the exchange — nothing traded: ${msg}`); return; }
+        if (isExplicitKrakenReject(msg)) { return skip(`Kraken buy rejected by the exchange — nothing traded: ${msg}`); }
         // Transport/response ambiguity AFTER submission — the order may exist.
         liveNeedsReconcile = `Kraken BUY (txid unknown) unconfirmed: ${msg}`;
-        await ledgerIndeterminate(asset, "K-buy→CB-sell", `buy submit unconfirmed: ${msg}`, null, req.log);
-        res.json({ executed: true, outcome: "indeterminate", reason: `Kraken buy outcome UNCONFIRMED (${msg}) — check Kraken order history before trading again. Live runs locked.`, asset, buyVenue, startedAt, finishedAt: new Date().toISOString(), buyLeg: { venue: "kraken", orderId: null, status: "unknown", filledQty: null, avgPrice: null, notionalUsd: null, feeUsd: null, latencyMs: Date.now() - t0 }, sellLeg: null, realizedProfitUsd: null, projection: d });
-        return;
+        await ledgerIndeterminate(asset, "K-buy→CB-sell", `buy submit unconfirmed: ${msg}`, null, log);
+        return { status: 200, body: { executed: true, outcome: "indeterminate", reason: `Kraken buy outcome UNCONFIRMED (${msg}) — check Kraken order history before trading again. Live runs locked.`, asset, buyVenue, startedAt, finishedAt: new Date().toISOString(), buyLeg: { venue: "kraken", orderId: null, status: "unknown", filledQty: null, avgPrice: null, notionalUsd: null, feeUsd: null, latencyMs: Date.now() - t0 }, sellLeg: null, realizedProfitUsd: null, projection: d } };
       }
       let info = { status: "unknown", volExec: 0, price: 0, cost: 0, fee: 0 };
       const dl = Date.now() + TERMINAL_WAIT_MS;
@@ -323,9 +333,8 @@ router.post("/arb/2x-execute", async (req, res): Promise<void> => {
       }
       if (!["closed", "canceled", "expired"].includes(info.status)) {
         liveNeedsReconcile = `Kraken BUY ${buyId} not terminal after ${TERMINAL_WAIT_MS / 1000}s`;
-        await ledgerIndeterminate(asset, "K-buy→CB-sell", liveNeedsReconcile, buyId, req.log);
-        res.json({ executed: true, outcome: "indeterminate", reason: liveNeedsReconcile, asset, buyVenue, startedAt, finishedAt: new Date().toISOString(), buyLeg: { venue: "kraken", orderId: buyId, status: info.status, filledQty: info.volExec, avgPrice: info.price || null, notionalUsd: info.cost || null, feeUsd: info.fee || null, latencyMs: Date.now() - t0 }, sellLeg: null, realizedProfitUsd: null, projection: d });
-        return;
+        await ledgerIndeterminate(asset, "K-buy→CB-sell", liveNeedsReconcile, buyId, log);
+        return { status: 200, body: { executed: true, outcome: "indeterminate", reason: liveNeedsReconcile, asset, buyVenue, startedAt, finishedAt: new Date().toISOString(), buyLeg: { venue: "kraken", orderId: buyId, status: info.status, filledQty: info.volExec, avgPrice: info.price || null, notionalUsd: info.cost || null, feeUsd: info.fee || null, latencyMs: Date.now() - t0 }, sellLeg: null, realizedProfitUsd: null, projection: d } };
       }
       buyQty = info.volExec || 0; buyCostUsd = info.cost || 0; buyFeeUsd = info.fee || 0; buyAvgPx = info.price || 0; buyStatus = info.status;
     } else {
@@ -348,27 +357,24 @@ router.post("/arb/2x-execute", async (req, res): Promise<void> => {
         if (!det) det = await coinbaseOrderDetails(cbCreds, buyId);
         if (!["FILLED", "CANCELLED", "EXPIRED", "FAILED"].includes(det.status)) {
           liveNeedsReconcile = `Coinbase BUY ${buyId} not terminal after ${TERMINAL_WAIT_MS / 1000}s`;
-          await ledgerIndeterminate(asset, "CB-buy→K-sell", liveNeedsReconcile, buyId, req.log);
-          res.json({ executed: true, outcome: "indeterminate", reason: liveNeedsReconcile, asset, buyVenue, startedAt, finishedAt: new Date().toISOString(), buyLeg: { venue: "coinbase", orderId: buyId, status: det.status, filledQty: det.filledSize, avgPrice: det.avgPrice || null, notionalUsd: det.filledValue || null, feeUsd: det.totalFees, latencyMs: Date.now() - t0 }, sellLeg: null, realizedProfitUsd: null, projection: d });
-          return;
+          await ledgerIndeterminate(asset, "CB-buy→K-sell", liveNeedsReconcile, buyId, log);
+          return { status: 200, body: { executed: true, outcome: "indeterminate", reason: liveNeedsReconcile, asset, buyVenue, startedAt, finishedAt: new Date().toISOString(), buyLeg: { venue: "coinbase", orderId: buyId, status: det.status, filledQty: det.filledSize, avgPrice: det.avgPrice || null, notionalUsd: det.filledValue || null, feeUsd: det.totalFees, latencyMs: Date.now() - t0 }, sellLeg: null, realizedProfitUsd: null, projection: d } };
         }
         buyQty = det.filledSize; buyCostUsd = det.filledValue; buyFeeUsd = det.totalFees; buyAvgPx = det.avgPrice; buyStatus = det.status;
       } catch (e) {
         // Post-submit ambiguity: order may exist. Latch; never claim untraded.
         liveNeedsReconcile = `Coinbase BUY ${buyId ?? "(id unknown)"} unconfirmed: ${(e as Error).message}`;
-        await ledgerIndeterminate(asset, "CB-buy→K-sell", liveNeedsReconcile, buyId, req.log);
-        res.json({ executed: true, outcome: "indeterminate", reason: liveNeedsReconcile, asset, buyVenue, startedAt, finishedAt: new Date().toISOString(), buyLeg: { venue: "coinbase", orderId: buyId, status: "unknown", filledQty: null, avgPrice: null, notionalUsd: null, feeUsd: null, latencyMs: Date.now() - t0 }, sellLeg: null, realizedProfitUsd: null, projection: d });
-        return;
+        await ledgerIndeterminate(asset, "CB-buy→K-sell", liveNeedsReconcile, buyId, log);
+        return { status: 200, body: { executed: true, outcome: "indeterminate", reason: liveNeedsReconcile, asset, buyVenue, startedAt, finishedAt: new Date().toISOString(), buyLeg: { venue: "coinbase", orderId: buyId, status: "unknown", filledQty: null, avgPrice: null, notionalUsd: null, feeUsd: null, latencyMs: Date.now() - t0 }, sellLeg: null, realizedProfitUsd: null, projection: d } };
       }
     }
     const buyLatencyMs = Date.now() - t0;
     const buyLeg = { venue: buyVenue, orderId: buyId, status: buyStatus, filledQty: buyQty, avgPrice: buyAvgPx || null, notionalUsd: buyCostUsd || null, feeUsd: buyFeeUsd, latencyMs: buyLatencyMs };
-    if (buyQty <= 1e-12) { skip(`buy leg terminal with zero fill (${buyStatus}) — nothing traded`, { projection: d, buyLeg }); return; }
+    if (buyQty <= 1e-12) { return skip(`buy leg terminal with zero fill (${buyStatus}) — nothing traded`, { projection: d, buyLeg }); }
     if (!liveLockOwned(lockGen)) {
       // Evicted mid-flight (KILL/HARD RESET) — do not place the sell.
       liveNeedsReconcile = `${buyVenue} BUY ${buyId} filled ${buyQty.toFixed(8)} ${asset} but execution was killed before the sell`;
-      res.json({ executed: true, outcome: "unhedged", reason: liveNeedsReconcile, asset, buyVenue, startedAt, finishedAt: new Date().toISOString(), buyLeg, sellLeg: null, realizedProfitUsd: null, projection: d });
-      return;
+      return { status: 200, body: { executed: true, outcome: "unhedged", reason: liveNeedsReconcile, asset, buyVenue, startedAt, finishedAt: new Date().toISOString(), buyLeg, sellLeg: null, realizedProfitUsd: null, projection: d } };
     }
 
     // 6. Leg 2: SELL the CONFIRMED quantity on the other venue, immediately.
@@ -398,7 +404,7 @@ router.post("/arb/2x-execute", async (req, res): Promise<void> => {
         if (!isExplicitKrakenReject(sellError)) {
           // Ambiguous submit — the sell may exist. Latch; audit.
           liveNeedsReconcile = `Kraken SELL ${txid ?? "(txid unknown)"} unconfirmed: ${sellError}`;
-          await ledgerIndeterminate(asset, dirTagFor(buyVenue), liveNeedsReconcile, buyId, req.log);
+          await ledgerIndeterminate(asset, dirTagFor(buyVenue), liveNeedsReconcile, buyId, log);
         }
       }
       const indeterminate = (txid && !sellError && !["closed", "canceled", "expired"].includes(info.status)) || (!!sellError && !isExplicitKrakenReject(sellError));
@@ -454,20 +460,20 @@ router.post("/arb/2x-execute", async (req, res): Promise<void> => {
         realizedProfitUsd: realized != null ? realized.toFixed(6) : null,
       });
     } catch (e) {
-      req.log.error({ err: e }, "[2X] ledger write failed");
+      log.error({ err: e }, "[2X] ledger write failed");
     }
-    req.log.info({ asset, buyVenue, outcome, realized, expected: d.netProfitUsd, buyLatencyMs, sellLatencyMs: sellLeg.latencyMs }, "[2X] execution finished");
-    res.json({
+    log.info({ asset, buyVenue, outcome, realized, expected: d.netProfitUsd, buyLatencyMs, sellLatencyMs: sellLeg.latencyMs }, "[2X] execution finished");
+    return { status: 200, body: {
       executed: true, outcome, reason: outcome === "completed" ? `expected $${d.netProfitUsd!.toFixed(4)}, realized $${realized!.toFixed(4)}` : `sell leg ${sellLeg.status}${sellError ? `: ${sellError}` : ""} — residual ${residual.toFixed(8)} ${asset} remains long${liveNeedsReconcile ? `; live runs locked pending reconciliation` : ""}`,
       asset, buyVenue, startedAt, finishedAt: new Date().toISOString(),
       buyLeg, sellLeg, realizedProfitUsd: realized, projection: d,
-    });
+    } };
   } catch (err) {
-    res.json({ executed: false, outcome: "skipped", reason: (err as Error).message, asset, buyVenue, startedAt, finishedAt: new Date().toISOString(), buyLeg: null, sellLeg: null, realizedProfitUsd: null, projection: null });
+    return { status: 200, body: { executed: false, outcome: "skipped", reason: (err as Error).message, asset, buyVenue, startedAt, finishedAt: new Date().toISOString(), buyLeg: null, sellLeg: null, realizedProfitUsd: null, projection: null } };
   } finally {
     if (lockGen != null) releaseLiveLock(lockGen);
     execInFlight = false;
   }
-});
+}
 
 export default router;
