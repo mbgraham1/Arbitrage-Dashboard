@@ -71,7 +71,7 @@ import { coinbaseBookKey, coinbaseStreamStats, getCoinbaseStreamBook, getGeminiS
 import { geminiSymbols, geminiSymbolDetails } from "../lib/gemini-exec";
 import { geminiVerify, type GeminiCreds } from "../lib/gemini";
 import { createPairHistory, updatePairHistory, type PairHistory } from "../lib/kalman";
-import { waitForTriLimitFill } from "../lib/tri-fill.js";
+import { waitForTriLimitFill, TriIndeterminateOrderError as TriIndetErr } from "../lib/tri-fill.js";
 import { listTradesPage } from "../lib/trades-page.js";
 import { pruneAccountSnapshots } from "../lib/snapshot-prune.js";
 
@@ -1144,6 +1144,126 @@ async function resolvePendingIndeterminate(
   }
   return { cleared: false, message: pendingIndeterminateMsg() };
 }
+
+// ── Triangular indeterminate-order reconciliation gate ────────────────────────
+// Mirror of the cross-exchange gate above, for the legacy triangular executor:
+// when waitForTriLimitFill throws TriIndeterminateOrderError, the order may
+// still be resting on Kraken and could fill later. Persist it so the trader
+// gets a durable dashboard alert (and live triangular execution is blocked)
+// until the order is confirmed terminal.
+interface PendingTriIndeterminate {
+  txid: string;
+  pair: string;      // Kraken pair the order was placed on (e.g. SOLXBT)
+  legLabel: string;  // e.g. "leg2 SOL buy"
+  loop: string;      // e.g. "USD→BTC→SOL→USD"
+  sinceMs: number;
+}
+
+const TRI_PENDING_STATE_FILE = nodePath.join(process.cwd(), ".state", "pending-tri-indeterminate-order.json");
+function loadPendingTriIndeterminate(): PendingTriIndeterminate | null {
+  try {
+    const raw = JSON.parse(nodeFs.readFileSync(TRI_PENDING_STATE_FILE, "utf8")) as PendingTriIndeterminate;
+    if (typeof raw.txid === "string" && raw.txid) {
+      return {
+        txid: raw.txid,
+        pair: typeof raw.pair === "string" ? raw.pair : "",
+        legLabel: typeof raw.legLabel === "string" ? raw.legLabel : "",
+        loop: typeof raw.loop === "string" ? raw.loop : "",
+        sinceMs: typeof raw.sinceMs === "number" ? raw.sinceMs : 0,
+      };
+    }
+  } catch { /* no persisted gate */ }
+  return null;
+}
+let pendingTriIndeterminate: PendingTriIndeterminate | null = loadPendingTriIndeterminate();
+function setPendingTriIndeterminate(p: PendingTriIndeterminate | null): void {
+  pendingTriIndeterminate = p;
+  try {
+    if (p) {
+      nodeFs.mkdirSync(nodePath.dirname(TRI_PENDING_STATE_FILE), { recursive: true });
+      nodeFs.writeFileSync(TRI_PENDING_STATE_FILE, JSON.stringify(p));
+    } else {
+      nodeFs.rmSync(TRI_PENDING_STATE_FILE, { force: true });
+    }
+  } catch (e) {
+    // Persisting is defense-in-depth; the in-memory gate still holds.
+    console.error(`Failed to persist tri indeterminate-order gate state: ${e instanceof Error ? e.message : String(e)}`);
+  }
+}
+function pendingTriIndeterminateMsg(): string | null {
+  if (!pendingTriIndeterminate) return null;
+  const p = pendingTriIndeterminate;
+  return `LIVE triangular execution blocked: order ${p.txid}${p.pair ? ` (${p.pair}` : ""}${p.pair && p.legLabel ? `, ${p.legLabel}` : p.legLabel ? ` (${p.legLabel}` : ""}${p.pair || p.legLabel ? ")" : ""} from loop ${p.loop || "unknown"} is in an INDETERMINATE cancel state — it may still be resting on Kraken and could fill later. Reconcile it manually (or use the dashboard re-check) before trading.`;
+}
+
+/**
+ * Try to drive the pending triangular indeterminate order to a TERMINAL
+ * Kraken status: re-issue the cancel, then poll. Clears the gate ONLY on a
+ * confirmed terminal state — a late fill is reported so the trader knows the
+ * position moved (the tri cycle was already abandoned; nothing was unwound
+ * for that fill).
+ */
+async function resolvePendingTriIndeterminate(
+  kCreds: { krakenKey: string; krakenSecret: string },
+  log: { info: (o: unknown, m?: string) => void; error: (o: unknown, m?: string) => void },
+): Promise<{ cleared: boolean; message: string | null }> {
+  const p = pendingTriIndeterminate;
+  if (!p) return { cleared: true, message: null };
+  try { await krakenCancelOrder(kCreds, p.txid); } catch { /* may already be terminal */ }
+  const deadline = Date.now() + CANCEL_CONFIRM_MS;
+  for (;;) {
+    try {
+      const info = await krakenOrderInfo(kCreds, p.txid);
+      if (info.status === "closed" || info.status === "canceled" || info.status === "expired") {
+        setPendingTriIndeterminate(null);
+        log.info({ txid: p.txid, status: info.status, volExec: info.volExec }, "Indeterminate triangular order resolved to terminal state");
+        return {
+          cleared: true,
+          message: info.volExec > 0
+            ? `Previously indeterminate triangular order ${p.txid} (${p.pair}, ${p.legLabel}) resolved ${info.status} with ${info.volExec.toFixed(8)} filled — that fill was never unwound by the abandoned cycle; verify balances and rebalance manually if needed.`
+            : `Previously indeterminate triangular order ${p.txid} (${p.pair}, ${p.legLabel}) resolved ${info.status} with no fill.`,
+        };
+      }
+    } catch { /* keep polling */ }
+    if (Date.now() >= deadline) break;
+    await new Promise(r => setTimeout(r, MAKER_POLL_MS));
+  }
+  return { cleared: false, message: pendingTriIndeterminateMsg() };
+}
+
+// ── GET /arb/tri-indeterminate ────────────────────────────────────────────────
+// Dashboard poll: is there a triangular order awaiting manual reconciliation?
+router.get("/arb/tri-indeterminate", (_req, res): void => {
+  const p = pendingTriIndeterminate;
+  res.json({
+    pending: p
+      ? { txid: p.txid, pair: p.pair, legLabel: p.legLabel, loop: p.loop, sinceMs: p.sinceMs }
+      : null,
+    message: pendingTriIndeterminateMsg(),
+  });
+});
+
+// ── POST /arb/tri-indeterminate/resolve ───────────────────────────────────────
+// Re-check the pending order on Kraken (re-cancel + poll for a terminal
+// status). Clears the gate ONLY when Kraken confirms terminal.
+router.post("/arb/tri-indeterminate/resolve", async (req, res): Promise<void> => {
+  const body = req.body as { krakenKey?: unknown; krakenSecret?: unknown } | undefined;
+  const krakenKey = typeof body?.krakenKey === "string" ? body.krakenKey : "";
+  const krakenSecret = typeof body?.krakenSecret === "string" ? body.krakenSecret : "";
+  if (!krakenKey || !krakenSecret) {
+    res.status(400).json({ error: "krakenKey and krakenSecret are required" });
+    return;
+  }
+  if (!pendingTriIndeterminate) {
+    res.json({ cleared: true, message: null });
+    return;
+  }
+  const out = await resolvePendingTriIndeterminate(
+    { krakenKey, krakenSecret },
+    { info: (o, m) => req.log.info(o as object, m), error: (o, m) => req.log.error(o as object, m) },
+  );
+  res.json({ cleared: out.cleared, message: out.message });
+});
 
 
 router.get("/arb/execution-status", (_req, res): void => {
@@ -4138,6 +4258,28 @@ router.post("/arb/execute-triangular", async (req, res): Promise<void> => {
     return;
   }
 
+  // Tri indeterminate-order gate: a previous triangular limit leg whose cancel
+  // was never confirmed terminal may still be resting on Kraken. Block new
+  // LIVE triangular executions until it is reconciled (mirrors the
+  // cross-exchange indeterminate gate). Try to auto-resolve with this
+  // request's credentials first — the order may have gone terminal since.
+  if (pendingTriIndeterminate) {
+    const out = await resolvePendingTriIndeterminate(creds, {
+      info: (o, m) => req.log.info(o as object, m),
+      error: (o, m) => req.log.error(o as object, m),
+    });
+    if (!out.cleared) {
+      req.log.warn({ pending: pendingTriIndeterminate }, "Live triangular execution blocked — indeterminate order unresolved");
+      res.json({
+        success: false, isDryRun: false, estimatedProfitUsd,
+        leg1OrderId: null, leg2OrderId: null, leg3OrderId: null,
+        error: out.message ?? pendingTriIndeterminateMsg() ?? "Indeterminate triangular order unresolved",
+      });
+      return;
+    }
+    if (out.message) req.log.warn({ note: out.message }, "Indeterminate triangular order auto-resolved before execution");
+  }
+
   // PROFITABILITY SAFEGUARD: legacy post-only (maker) triangular path must clear
   // the same raised maker floor as the safeguarded executor — thin maker edges
   // are proven realized losers. Market (force) path keeps its own gates.
@@ -4490,6 +4632,29 @@ router.post("/arb/execute-triangular", async (req, res): Promise<void> => {
     });
   } catch (err) {
     req.log.error({ err, loop, orderType, leg1Id, leg2Id }, "Triangular execution error — partial state logged");
+    // Indeterminate limit leg: the order may STILL be resting on Kraken and
+    // could fill later. Persist a reconciliation gate so the dashboard shows
+    // a durable alert and new live triangular executions are blocked until
+    // the order is confirmed terminal.
+    if (err instanceof TriIndetErr) {
+      // Map the indeterminate txid to the Kraken pair its leg trades on.
+      const LOOP_LEG_PAIRS: Record<string, [string, string, string]> = {
+        "USD→BTC→SOL→USD": ["XXBTZUSD", "SOLXBT", "SOLUSD"],
+        "USD→SOL→BTC→USD": ["SOLUSD", "SOLXBT", "XXBTZUSD"],
+        "USD→SOL→ETH→USD": ["SOLUSD", "ETHSOL", "XETHZUSD"],
+        "USD→ETH→SOL→USD": ["XETHZUSD", "ETHSOL", "SOLUSD"],
+      };
+      const legIdx: 0 | 1 | 2 | null = err.txid === leg1Id ? 0 : err.txid === leg2Id ? 1 : err.txid === leg3Id ? 2 : null;
+      const pair = legIdx != null ? (LOOP_LEG_PAIRS[loop]?.[legIdx] ?? "") : "";
+      setPendingTriIndeterminate({
+        txid: err.txid,
+        pair,
+        legLabel: err.label,
+        loop,
+        sinceMs: Date.now(),
+      });
+      req.log.error({ txid: err.txid, pair, legLabel: err.label, loop }, "Triangular order INDETERMINATE — reconciliation gate set; live tri execution blocked until resolved");
+    }
     // A leg may have been accepted before the failure — balances may have moved.
     if (leg1Id || leg2Id || leg3Id) {
       try {

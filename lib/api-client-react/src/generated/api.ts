@@ -94,6 +94,9 @@ import type {
   TradeSummary,
   TriExecuteRequest,
   TriExecuteResult,
+  TriIndeterminateResolveRequest,
+  TriIndeterminateResolveResult,
+  TriIndeterminateStatus,
   TriangularScanResult,
   TwoExchangeTestRequest,
   TwoExchangeTestResult,
@@ -1449,6 +1452,156 @@ export function useGetExecutionQuality<TData = Awaited<ReturnType<typeof getExec
 
 
 
+
+export const getGetTriIndeterminateUrl = () => {
+
+
+
+
+  return `/api/arb/tri-indeterminate`
+}
+
+/**
+ * When a triangular limit leg's post-timeout cancel is never confirmed terminal by Kraken, the order may still be resting and could fill later. The gate persists (in memory and on disk) until the order is confirmed terminal; while pending, live triangular executions are blocked. The dashboard polls this to show a durable reconciliation alert.
+ * @summary Pending triangular order awaiting manual reconciliation
+ */
+export const getTriIndeterminate = async ( options?: RequestInit): Promise<TriIndeterminateStatus> => {
+
+  return customFetch<TriIndeterminateStatus>(getGetTriIndeterminateUrl(),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getGetTriIndeterminateQueryKey = () => {
+    return [
+    `/api/arb/tri-indeterminate`
+    ] as const;
+    }
+
+
+export const getGetTriIndeterminateQueryOptions = <TData = Awaited<ReturnType<typeof getTriIndeterminate>>, TError = ErrorType<unknown>>( options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getTriIndeterminate>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getGetTriIndeterminateQueryKey();
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof getTriIndeterminate>>> = ({ signal }) => getTriIndeterminate({ signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof getTriIndeterminate>>, TError, TData> & { queryKey: QueryKey }
+}
+
+export type GetTriIndeterminateQueryResult = NonNullable<Awaited<ReturnType<typeof getTriIndeterminate>>>
+export type GetTriIndeterminateQueryError = ErrorType<unknown>
+
+
+/**
+ * @summary Pending triangular order awaiting manual reconciliation
+ */
+
+export function useGetTriIndeterminate<TData = Awaited<ReturnType<typeof getTriIndeterminate>>, TError = ErrorType<unknown>>(
+  options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getTriIndeterminate>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+
+ ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+
+  const queryOptions = getGetTriIndeterminateQueryOptions(options)
+
+  const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+
+export const getResolveTriIndeterminateUrl = () => {
+
+
+
+
+  return `/api/arb/tri-indeterminate/resolve`
+}
+
+/**
+ * Re-issues the cancel and polls Kraken for a terminal status (closed/canceled/expired). Clears the gate ONLY when Kraken confirms a terminal state; a late fill is reported in the message so the trader can rebalance manually (the abandoned cycle never unwound it).
+ * @summary Re-check the pending indeterminate triangular order on Kraken
+ */
+export const resolveTriIndeterminate = async (triIndeterminateResolveRequest: TriIndeterminateResolveRequest, options?: RequestInit): Promise<TriIndeterminateResolveResult> => {
+
+  return customFetch<TriIndeterminateResolveResult>(getResolveTriIndeterminateUrl(),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(triIndeterminateResolveRequest)
+  }
+);}
+
+
+
+
+
+export const getResolveTriIndeterminateMutationOptions = <TError = ErrorType<ErrorResponse>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof resolveTriIndeterminate>>, TError,{data: BodyType<TriIndeterminateResolveRequest>}, TContext>, request?: SecondParameter<typeof customFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof resolveTriIndeterminate>>, TError,{data: BodyType<TriIndeterminateResolveRequest>}, TContext> => {
+
+const mutationKey = ['resolveTriIndeterminate'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof resolveTriIndeterminate>>, {data: BodyType<TriIndeterminateResolveRequest>}> = (props) => {
+          const {data} = props ?? {};
+
+          return  resolveTriIndeterminate(data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type ResolveTriIndeterminateMutationResult = NonNullable<Awaited<ReturnType<typeof resolveTriIndeterminate>>>
+    export type ResolveTriIndeterminateMutationBody = BodyType<TriIndeterminateResolveRequest>
+    export type ResolveTriIndeterminateMutationError = ErrorType<ErrorResponse>
+
+    /**
+ * @summary Re-check the pending indeterminate triangular order on Kraken
+ */
+export const useResolveTriIndeterminate = <TError = ErrorType<ErrorResponse>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof resolveTriIndeterminate>>, TError,{data: BodyType<TriIndeterminateResolveRequest>}, TContext>, request?: SecondParameter<typeof customFetch>}
+ ): UseMutationResult<
+        Awaited<ReturnType<typeof resolveTriIndeterminate>>,
+        TError,
+        {data: BodyType<TriIndeterminateResolveRequest>},
+        TContext
+      > => {
+      return useMutation(getResolveTriIndeterminateMutationOptions(options));
+    }
 
 export const getGetExecutionStatusUrl = () => {
 

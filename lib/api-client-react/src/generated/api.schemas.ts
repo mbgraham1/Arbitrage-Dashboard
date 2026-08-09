@@ -1746,6 +1746,36 @@ export interface ExecutionQualityResult {
   totalRecords: number;
 }
 
+export interface TriIndeterminateOrder {
+  /** Kraken order txid needing manual reconciliation */
+  txid: string;
+  /** Kraken pair the order was placed on (e.g. SOLXBT); empty if unknown */
+  pair: string;
+  /** Leg label (e.g. 'leg2 SOL buy') */
+  legLabel: string;
+  /** Triangular loop (e.g. 'USD→BTC→SOL→USD') */
+  loop: string;
+  /** Epoch ms when the order went indeterminate */
+  sinceMs: number;
+}
+
+export interface TriIndeterminateStatus {
+  pending: TriIndeterminateOrder | null;
+  message: string | null;
+}
+
+export interface TriIndeterminateResolveRequest {
+  krakenKey: string;
+  krakenSecret: string;
+}
+
+export interface TriIndeterminateResolveResult {
+  /** true when Kraken confirmed a terminal status and the gate was cleared */
+  cleared: boolean;
+  /** Outcome detail — late-fill warning or the still-blocked message */
+  message: string | null;
+}
+
 /**
  * Kraken API-key nonce health for THIS server process. Repeated "EAPI:Invalid nonce" errors mean another process (e.g. the published app and the dev workspace) is using the same Kraken API key — the two interleave nonces and share one rate budget. Run the bot from one environment at a time or use a separate key per environment.
  */

@@ -487,6 +487,54 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ExecutionQualityResult"
+  /arb/tri-indeterminate:
+    get:
+      operationId: getTriIndeterminate
+      tags: [trades]
+      summary: Pending triangular order awaiting manual reconciliation
+      description: >
+        When a triangular limit leg's post-timeout cancel is never confirmed
+        terminal by Kraken, the order may still be resting and could fill
+        later. The gate persists (in memory and on disk) until the order is
+        confirmed terminal; while pending, live triangular executions are
+        blocked. The dashboard polls this to show a durable reconciliation
+        alert.
+      responses:
+        "200":
+          description: Current triangular indeterminate-order gate state
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TriIndeterminateStatus"
+  /arb/tri-indeterminate/resolve:
+    post:
+      operationId: resolveTriIndeterminate
+      tags: [trades]
+      summary: Re-check the pending indeterminate triangular order on Kraken
+      description: >
+        Re-issues the cancel and polls Kraken for a terminal status
+        (closed/canceled/expired). Clears the gate ONLY when Kraken confirms a
+        terminal state; a late fill is reported in the message so the trader
+        can rebalance manually (the abandoned cycle never unwound it).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TriIndeterminateResolveRequest"
+      responses:
+        "200":
+          description: Resolution attempt result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TriIndeterminateResolveResult"
+        "400":
+          description: Missing credentials
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
   /arb/execution-status:
     get:
       operationId: getExecutionStatus
@@ -3423,6 +3471,36 @@ components:
           type: array
           items: { $ref: "#/components/schemas/ExecutionQualityRoute" }
         totalRecords: { type: integer }
+    TriIndeterminateOrder:
+      type: object
+      required: [txid, pair, legLabel, loop, sinceMs]
+      properties:
+        txid: { type: string, description: "Kraken order txid needing manual reconciliation" }
+        pair: { type: string, description: "Kraken pair the order was placed on (e.g. SOLXBT); empty if unknown" }
+        legLabel: { type: string, description: "Leg label (e.g. 'leg2 SOL buy')" }
+        loop: { type: string, description: "Triangular loop (e.g. 'USD→BTC→SOL→USD')" }
+        sinceMs: { type: number, description: "Epoch ms when the order went indeterminate" }
+    TriIndeterminateStatus:
+      type: object
+      required: [pending, message]
+      properties:
+        pending:
+          nullable: true
+          allOf:
+            - $ref: "#/components/schemas/TriIndeterminateOrder"
+        message: { type: string, nullable: true }
+    TriIndeterminateResolveRequest:
+      type: object
+      required: [krakenKey, krakenSecret]
+      properties:
+        krakenKey: { type: string }
+        krakenSecret: { type: string }
+    TriIndeterminateResolveResult:
+      type: object
+      required: [cleared, message]
+      properties:
+        cleared: { type: boolean, description: "true when Kraken confirmed a terminal status and the gate was cleared" }
+        message: { type: string, nullable: true, description: "Outcome detail — late-fill warning or the still-blocked message" }
     ExecutionStatusResult:
       type: object
       required: [active, route, leg, legLabel, pair, orderId, attempt, maxAttempts, startedAtMs, timeoutMs, filledPct, phase, elapsedMs, updatedAtMs]

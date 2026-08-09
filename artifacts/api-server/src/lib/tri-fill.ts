@@ -25,7 +25,7 @@ export interface TriFillResult {
  * surface the txid for manual reconciliation.
  */
 export class TriIndeterminateOrderError extends Error {
-  constructor(public readonly txid: string, label: string) {
+  constructor(public readonly txid: string, public readonly label: string) {
     super(
       `${label} (${txid}) is INDETERMINATE: cancel was sent after the abort window but Kraken never confirmed a terminal status. ` +
       `The order may still be resting and could fill later — do not assume it was cancelled; reconcile ${txid} manually before trading.`,

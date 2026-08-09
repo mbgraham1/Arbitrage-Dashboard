@@ -496,6 +496,37 @@ export const GetExecutionQualityResponse = zod.object({
 
 
 /**
+ * When a triangular limit leg's post-timeout cancel is never confirmed terminal by Kraken, the order may still be resting and could fill later. The gate persists (in memory and on disk) until the order is confirmed terminal; while pending, live triangular executions are blocked. The dashboard polls this to show a durable reconciliation alert.
+ * @summary Pending triangular order awaiting manual reconciliation
+ */
+export const GetTriIndeterminateResponse = zod.object({
+  "pending": zod.object({
+  "txid": zod.string().describe('Kraken order txid needing manual reconciliation'),
+  "pair": zod.string().describe('Kraken pair the order was placed on (e.g. SOLXBT); empty if unknown'),
+  "legLabel": zod.string().describe('Leg label (e.g. \'leg2 SOL buy\')'),
+  "loop": zod.string().describe('Triangular loop (e.g. \'USD→BTC→SOL→USD\')'),
+  "sinceMs": zod.number().describe('Epoch ms when the order went indeterminate')
+}).nullable(),
+  "message": zod.string().nullable()
+})
+
+
+/**
+ * Re-issues the cancel and polls Kraken for a terminal status (closed/canceled/expired). Clears the gate ONLY when Kraken confirms a terminal state; a late fill is reported in the message so the trader can rebalance manually (the abandoned cycle never unwound it).
+ * @summary Re-check the pending indeterminate triangular order on Kraken
+ */
+export const ResolveTriIndeterminateBody = zod.object({
+  "krakenKey": zod.string(),
+  "krakenSecret": zod.string()
+})
+
+export const ResolveTriIndeterminateResponse = zod.object({
+  "cleared": zod.boolean().describe('true when Kraken confirmed a terminal status and the gate was cleared'),
+  "message": zod.string().nullable().describe('Outcome detail — late-fill warning or the still-blocked message')
+})
+
+
+/**
  * In-memory snapshot updated by the maker-leg fill machinery — current leg, order ID, elapsed time, filled percent, per-leg fill timer, and retry attempt. Idle (active=false) when nothing is executing.
  * @summary Live per-leg status of the currently executing triangle
  */

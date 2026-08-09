@@ -17,6 +17,7 @@ import { AutoRebalanceCard } from "@/components/auto-rebalance-card";
 import { CbMmCard } from "@/components/cb-mm-card";
 import { DiscoveryCard } from "@/components/discovery-card";
 import { ProfitHunterCard } from "@/components/profit-hunter-card";
+import { TriReconcileBanner } from "@/components/tri-reconcile-banner";
 import { cn } from "@/lib/utils";
 import { ErrorBoundary } from "@/components/error-boundary";
 import { useToast } from "@/hooks/use-toast";
@@ -478,6 +479,10 @@ export default function Dashboard() {
           </Button>
         </div>
       </div>
+
+      {/* Persistent alert: a triangular order whose cancel was never confirmed
+          terminal must be manually reconciled — live tri trading is blocked. */}
+      <TriReconcileBanner />
 
       {/* ══ 1. LIVE ACCOUNT & P&L ═══════════════════════════════════════════════
           Verified realized P&L (fills only) + balance-based account equity. */}
