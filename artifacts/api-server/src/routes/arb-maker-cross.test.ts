@@ -520,3 +520,53 @@ describe("POST /arb/graph-execute — cross pre-fire gates bypassed shapes", () 
   }, 30_000);
 
 });
+
+// ── Operator-proof gates (task: strangers must not flip safety overrides) ──────
+
+const getKrakenBalances = exchangeModule.getKrakenBalances as ReturnType<typeof vi.fn>;
+
+describe("operator proof on safety-loosening controls", () => {
+
+  it("forceMode with FAILING Kraken credential check: 403, no scan, no orders", async () => {
+    getKrakenBalances.mockRejectedValueOnce(new Error("EAPI:Invalid key"));
+    const { status, body } = await graphExecute({
+      ...BASE_BODY, krakenKey: "bogus-key-403", krakenSecret: "bogus-secret-403", forceMode: true,
+    });
+    expect(status).toBe(403);
+    expect(String(body["error"])).toMatch(/FORCE MODE requires valid Kraken credentials/);
+    expect(scanGraphOpportunities).not.toHaveBeenCalled();
+    expect(krakenRawMarketOrder).not.toHaveBeenCalled();
+    expect(krakenRawLimitOrder).not.toHaveBeenCalled();
+  });
+
+  it("route-history/clear without credentials: 400, nothing cleared", async () => {
+    const r = await fetch(`${baseUrl}/arb/route-history/clear`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({}),
+    });
+    expect(r.status).toBe(400);
+    const body = await r.json() as Record<string, unknown>;
+    expect(String(body["error"])).toMatch(/Kraken credentials required/);
+  });
+
+  it("route-history/clear with FAILING credential check: 403, nothing cleared", async () => {
+    getKrakenBalances.mockRejectedValueOnce(new Error("EAPI:Invalid key"));
+    const r = await fetch(`${baseUrl}/arb/route-history/clear`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ krakenKey: "bogus-key-bl", krakenSecret: "bogus-secret-bl" }),
+    });
+    expect(r.status).toBe(403);
+    const body = await r.json() as Record<string, unknown>;
+    expect(String(body["error"])).toMatch(/credential check failed/);
+  });
+
+  it("route-history/clear with VALID credentials: succeeds", async () => {
+    const r = await fetch(`${baseUrl}/arb/route-history/clear`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ krakenKey: "good-key-bl", krakenSecret: "good-secret-bl" }),
+    });
+    expect(r.status).toBe(200);
+    const body = await r.json() as Record<string, unknown>;
+    expect(typeof body["clearedRoutes"]).toBe("number");
+  });
+
+});

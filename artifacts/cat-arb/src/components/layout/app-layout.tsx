@@ -45,8 +45,12 @@ function ForceModeControls() {
   const clearLock = useClearExecLock();
   const clearHistory = useClearRouteHistory();
   const clearBlacklist = async () => {
+    if (!credentials.krakenKey || !credentials.krakenSecret) {
+      addLog("warning", "[CLEAR·BL] Add Kraken credentials in Config first — clearing the blacklist requires proof of account ownership.");
+      return;
+    }
     try {
-      const r = await clearHistory.mutateAsync();
+      const r = await clearHistory.mutateAsync({ data: { krakenKey: credentials.krakenKey, krakenSecret: credentials.krakenSecret } });
       addLog("warning", `[CLEAR·BL] Route blacklist wiped — ${r.clearedRoutes} route record(s) reset; all fill-rate streaks back to 0.`);
     } catch (e) {
       addLog("error", `[CLEAR·BL] Failed: ${e instanceof Error ? e.message : "unknown error"}`);

@@ -85,6 +85,7 @@ import type {
   RebalanceClearLatchResult,
   RebalancePlan,
   RebalanceStatus,
+  RouteHistoryClearRequest,
   RouteHistoryClearResult,
   ScanAllPairsParams,
   TradeListResult,
@@ -4220,17 +4221,17 @@ export const getClearRouteHistoryUrl = () => {
 }
 
 /**
- * Instantly resets all in-memory route failure streaks, removes every route from the blacklist, and clears probe cool-downs.
+ * Instantly resets all in-memory route failure streaks, removes every route from the blacklist, and clears probe cool-downs. Requires valid Kraken credentials (operator proof) — wiping the blacklist loosens money-safety behavior, so an anonymous caller must not be able to trigger it.
  * @summary Clear the route blacklist and consecutive-failure streaks
  */
-export const clearRouteHistory = async ( options?: RequestInit): Promise<RouteHistoryClearResult> => {
+export const clearRouteHistory = async (routeHistoryClearRequest: RouteHistoryClearRequest, options?: RequestInit): Promise<RouteHistoryClearResult> => {
 
   return customFetch<RouteHistoryClearResult>(getClearRouteHistoryUrl(),
   {
     ...options,
-    method: 'POST'
-
-
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(routeHistoryClearRequest)
   }
 );}
 
@@ -4238,9 +4239,9 @@ export const clearRouteHistory = async ( options?: RequestInit): Promise<RouteHi
 
 
 
-export const getClearRouteHistoryMutationOptions = <TError = ErrorType<unknown>,
-    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof clearRouteHistory>>, TError,void, TContext>, request?: SecondParameter<typeof customFetch>}
-): UseMutationOptions<Awaited<ReturnType<typeof clearRouteHistory>>, TError,void, TContext> => {
+export const getClearRouteHistoryMutationOptions = <TError = ErrorType<ErrorResponse>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof clearRouteHistory>>, TError,{data: BodyType<RouteHistoryClearRequest>}, TContext>, request?: SecondParameter<typeof customFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof clearRouteHistory>>, TError,{data: BodyType<RouteHistoryClearRequest>}, TContext> => {
 
 const mutationKey = ['clearRouteHistory'];
 const {mutation: mutationOptions, request: requestOptions} = options ?
@@ -4252,10 +4253,10 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
 
 
 
-      const mutationFn: MutationFunction<Awaited<ReturnType<typeof clearRouteHistory>>, void> = () => {
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof clearRouteHistory>>, {data: BodyType<RouteHistoryClearRequest>}> = (props) => {
+          const {data} = props ?? {};
 
-
-          return  clearRouteHistory(requestOptions)
+          return  clearRouteHistory(data,requestOptions)
         }
 
 
@@ -4266,18 +4267,18 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
   return  { mutationFn, ...mutationOptions }}
 
     export type ClearRouteHistoryMutationResult = NonNullable<Awaited<ReturnType<typeof clearRouteHistory>>>
-
-    export type ClearRouteHistoryMutationError = ErrorType<unknown>
+    export type ClearRouteHistoryMutationBody = BodyType<RouteHistoryClearRequest>
+    export type ClearRouteHistoryMutationError = ErrorType<ErrorResponse>
 
     /**
  * @summary Clear the route blacklist and consecutive-failure streaks
  */
-export const useClearRouteHistory = <TError = ErrorType<unknown>,
-    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof clearRouteHistory>>, TError,void, TContext>, request?: SecondParameter<typeof customFetch>}
+export const useClearRouteHistory = <TError = ErrorType<ErrorResponse>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof clearRouteHistory>>, TError,{data: BodyType<RouteHistoryClearRequest>}, TContext>, request?: SecondParameter<typeof customFetch>}
  ): UseMutationResult<
         Awaited<ReturnType<typeof clearRouteHistory>>,
         TError,
-        void,
+        {data: BodyType<RouteHistoryClearRequest>},
         TContext
       > => {
       return useMutation(getClearRouteHistoryMutationOptions(options));

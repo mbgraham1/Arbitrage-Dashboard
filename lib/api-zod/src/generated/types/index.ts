@@ -129,6 +129,7 @@ export * from './rebalanceReserves';
 export * from './rebalanceStatus';
 export * from './rebalanceVenueCaps';
 export * from './rebalanceWhitelistKey';
+export * from './routeHistoryClearRequest';
 export * from './routeHistoryClearResult';
 export * from './scanAllPairsParams';
 export * from './tradeListResult';

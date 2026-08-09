@@ -817,9 +817,40 @@ function routeBlacklistRemainingOf(gate: { blacklistedUntil: number }): number {
   return Math.max(0, gate.blacklistedUntil - Date.now());
 }
 
-// CLEAR BLACKLIST — reset all in-memory route history gates: consecutive-
-// failure streaks, blacklist bans, and probe cool-downs.
+// ── Operator proof ────────────────────────────────────────────────────────────
+// The server has no login, so every control that LOOSENS money-safety behavior
+// (blacklist wipe, FORCE MODE, lock clears) must prove account ownership with
+// valid Kraken credentials before it is honored. Successful verifications are
+// cached briefly by SHA-256 of the credential pair so repeated operator actions
+// don't hammer Kraken's private API — a failed or missing proof is never cached.
+const OPERATOR_PROOF_TTL_MS = 5 * 60_000;
+const operatorProofCache = new Map<string, number>(); // sha256(key␀secret) → verifiedAt ms
+
+async function verifyOperatorProof(krakenKey: unknown, krakenSecret: unknown): Promise<"ok" | "missing" | "failed"> {
+  const key = typeof krakenKey === "string" ? krakenKey.trim() : "";
+  const secret = typeof krakenSecret === "string" ? krakenSecret.trim() : "";
+  if (!key || !secret) return "missing";
+  const hash = createHash("sha256").update(`${key}\u0000${secret}`).digest("hex");
+  const verifiedAt = operatorProofCache.get(hash);
+  if (verifiedAt != null && Date.now() - verifiedAt < OPERATOR_PROOF_TTL_MS) return "ok";
+  try {
+    await getKrakenBalances({ krakenKey: key, krakenSecret: secret }); // proves account ownership
+    operatorProofCache.set(hash, Date.now());
+    return "ok";
+  } catch {
+    operatorProofCache.delete(hash);
+    return "failed";
+  }
+}
+
+// CLEAR BLACKLIST — reset all route history gates: consecutive-failure streaks,
+// blacklist bans, and probe cool-downs. Requires operator proof (valid Kraken
+// credentials): wiping the blacklist makes the bot trade MORE aggressively, so
+// an anonymous caller on the public URL must never be able to trigger it.
 router.post("/arb/route-history/clear", async (req, res): Promise<void> => {
+  const proof = await verifyOperatorProof(req.body?.krakenKey, req.body?.krakenSecret);
+  if (proof === "missing") { res.status(400).json({ error: "Kraken credentials required to clear the route blacklist." }); return; }
+  if (proof === "failed")  { res.status(403).json({ error: "Kraken credential check failed — route blacklist not cleared." }); return; }
   let clearedRoutes = routeFailStreaks.size;
   routeFailStreaks.clear();
   routeProbeAt.clear();
@@ -2401,6 +2432,18 @@ router.post("/arb/graph-execute", async (req, res): Promise<void> => {
   }
   const { krakenKey, krakenSecret, coinbaseKey, coinbaseSecret, routeDescription, isDryRun } = parsed.data;
   const forceMode = parsed.data.forceMode === true;
+  // FORCE MODE loosens money-safety gates (fill-rate gate, blacklist, stale-lock
+  // eviction) — honor it only with operator proof. The credentials are already
+  // required by the schema, but a live-order call only exercises them later (or
+  // never, on dry-run), so an anonymous caller could otherwise pass garbage keys
+  // with forceMode=true. Verify ownership up front before any gate is bypassed.
+  if (forceMode) {
+    const proof = await verifyOperatorProof(krakenKey, krakenSecret);
+    if (proof !== "ok") {
+      res.status(403).json({ error: "FORCE MODE requires valid Kraken credentials — credential check failed, execution refused." });
+      return;
+    }
+  }
   const tRequestMs = Date.now(); // latency: request in (≈ opportunity handed to executor)
   // Micro-check freshness threshold — cached quotes older than this SKIP the
   // fire instead of executing blind. Clamped 50ms..5s; default 250ms.

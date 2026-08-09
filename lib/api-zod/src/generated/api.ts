@@ -2155,7 +2155,7 @@ export const GraphExecuteBody = zod.object({
   "minProfitUsd": zod.number().default(graphExecuteBodyMinProfitUsdDefault),
   "isDryRun": zod.boolean().default(graphExecuteBodyIsDryRunDefault),
   "executionStyle": zod.enum(['taker', 'maker', 'adaptive']).default(graphExecuteBodyExecutionStyleDefault).describe('maker = post-only limits with gated taker fallback. taker = market\/IOC on all 3 legs, gated by a fresh taker-priced pre-flight (actual taker fees + depth-walked slippage + safety buffer must leave net > floor). adaptive = choose per fire whichever path has the higher expected realized P&L (maker EV uses per-route historical fill probabilities).\n'),
-  "forceMode": zod.boolean().default(graphExecuteBodyForceModeDefault).describe('FORCE MODE — skip the fill-rate feedback gate, historical-shortfall penalty, and consecutive-failure blacklist entirely. Fresh pre-flight profit gates (net profit minus slippage buffer > minProfitUsd) still apply; this never authorizes a trade the live re-quote says is unprofitable.\n'),
+  "forceMode": zod.boolean().default(graphExecuteBodyForceModeDefault).describe('FORCE MODE — skip the fill-rate feedback gate, historical-shortfall penalty, and consecutive-failure blacklist entirely. Fresh pre-flight profit gates (net profit minus slippage buffer > minProfitUsd) still apply; this never authorizes a trade the live re-quote says is unprofitable. Requires valid Kraken credentials (operator proof, verified up front) — rejected with 403 otherwise.\n'),
   "maxReprices": zod.number().default(graphExecuteBodyMaxRepricesDefault).describe('Max leg-1 maker reprices (cancel + re-place at the freshest aggressive maker price, pre-flight re-run each time) before the route is abandoned so execution falls through to the next-best one.\n'),
   "makerTimeoutMs": zod.number().optional().describe('Per-leg maker fill window in ms (clamped 1000–30000 server-side). Lower = faster taker fallback; default derives from maxReprices.\n'),
   "partialFillTolerancePct": zod.number().optional().describe('Partial-fill acceptance in percent (server clamps to 50–100; default 99.9). A leg filled to at least this fraction counts as complete — the cycle proceeds sized to the actual fill and any residual inventory is swept back to USD at market instead of the whole cycle unwinding.\n'),
@@ -2185,9 +2185,14 @@ export const GraphExecuteResponse = zod.object({
 
 
 /**
- * Instantly resets all in-memory route failure streaks, removes every route from the blacklist, and clears probe cool-downs.
+ * Instantly resets all in-memory route failure streaks, removes every route from the blacklist, and clears probe cool-downs. Requires valid Kraken credentials (operator proof) — wiping the blacklist loosens money-safety behavior, so an anonymous caller must not be able to trigger it.
  * @summary Clear the route blacklist and consecutive-failure streaks
  */
+export const ClearRouteHistoryBody = zod.object({
+  "krakenKey": zod.string().describe('Kraken API key — operator proof of account ownership'),
+  "krakenSecret": zod.string().describe('Kraken API secret — operator proof of account ownership')
+})
+
 export const ClearRouteHistoryResponse = zod.object({
   "clearedRoutes": zod.number().describe('Route streak\/blacklist entries removed')
 })

@@ -1979,7 +1979,7 @@ export interface GraphExecuteRequest {
   isDryRun?: boolean;
   /** maker = post-only limits with gated taker fallback. taker = market/IOC on all 3 legs, gated by a fresh taker-priced pre-flight (actual taker fees + depth-walked slippage + safety buffer must leave net > floor). adaptive = choose per fire whichever path has the higher expected realized P&L (maker EV uses per-route historical fill probabilities). */
   executionStyle?: GraphExecuteRequestExecutionStyle;
-  /** FORCE MODE — skip the fill-rate feedback gate, historical-shortfall penalty, and consecutive-failure blacklist entirely. Fresh pre-flight profit gates (net profit minus slippage buffer > minProfitUsd) still apply; this never authorizes a trade the live re-quote says is unprofitable. */
+  /** FORCE MODE — skip the fill-rate feedback gate, historical-shortfall penalty, and consecutive-failure blacklist entirely. Fresh pre-flight profit gates (net profit minus slippage buffer > minProfitUsd) still apply; this never authorizes a trade the live re-quote says is unprofitable. Requires valid Kraken credentials (operator proof, verified up front) — rejected with 403 otherwise. */
   forceMode?: boolean;
   /** Max leg-1 maker reprices (cancel + re-place at the freshest aggressive maker price, pre-flight re-run each time) before the route is abandoned so execution falls through to the next-best one. */
   maxReprices?: number;
@@ -1991,6 +1991,13 @@ export interface GraphExecuteRequest {
   alwaysTakerFallback?: boolean;
   /** Micro-check freshness threshold (ms, clamped 50–5000): the cached in-memory book snapshot used for the adaptive pre-fire decision must be at most this old, otherwise the fire is SKIPPED (stale data never executes blind). */
   maxQuoteAgeMs?: number;
+}
+
+export interface RouteHistoryClearRequest {
+  /** Kraken API key — operator proof of account ownership */
+  krakenKey: string;
+  /** Kraken API secret — operator proof of account ownership */
+  krakenSecret: string;
 }
 
 export interface RouteHistoryClearResult {

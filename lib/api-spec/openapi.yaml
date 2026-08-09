@@ -1345,6 +1345,12 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: forceMode requested without valid operator proof (Kraken credential check failed)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
 
   /arb/route-history/clear:
     post:
@@ -1353,7 +1359,16 @@ paths:
       summary: Clear the route blacklist and consecutive-failure streaks
       description: >
         Instantly resets all in-memory route failure streaks, removes every
-        route from the blacklist, and clears probe cool-downs.
+        route from the blacklist, and clears probe cool-downs. Requires valid
+        Kraken credentials (operator proof) — wiping the blacklist loosens
+        money-safety behavior, so an anonymous caller must not be able to
+        trigger it.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RouteHistoryClearRequest"
       responses:
         "200":
           description: History cleared
@@ -1361,6 +1376,18 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/RouteHistoryClearResult"
+        "400":
+          description: Missing Kraken credentials
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: Credential check failed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
 
   /arb/exec-preview:
     post:
@@ -3567,6 +3594,8 @@ components:
             penalty, and consecutive-failure blacklist entirely. Fresh pre-flight
             profit gates (net profit minus slippage buffer > minProfitUsd) still
             apply; this never authorizes a trade the live re-quote says is unprofitable.
+            Requires valid Kraken credentials (operator proof, verified up front) —
+            rejected with 403 otherwise.
         maxReprices:
           type: number
           default: 4
@@ -3604,6 +3633,17 @@ components:
             in-memory book snapshot used for the adaptive pre-fire decision
             must be at most this old, otherwise the fire is SKIPPED (stale
             data never executes blind).
+
+    RouteHistoryClearRequest:
+      type: object
+      required: [krakenKey, krakenSecret]
+      properties:
+        krakenKey:
+          type: string
+          description: Kraken API key — operator proof of account ownership
+        krakenSecret:
+          type: string
+          description: Kraken API secret — operator proof of account ownership
 
     RouteHistoryClearResult:
       type: object
