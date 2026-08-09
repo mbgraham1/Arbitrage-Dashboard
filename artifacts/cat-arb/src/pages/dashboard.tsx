@@ -1751,8 +1751,11 @@ function TriangularCard({
 
   // ── SYNTH → DIRECT upgrade detection ────────────────────────────────────────
   // Fire a one-time toast + brief badge highlight the first time the Kraken
-  // ETH/SOL source flips from synthetic to direct in this session.
+  // ETH/SOL source flips from synthetic to direct in this session. The same
+  // event is also written to the persistent System Log — a toast is transient
+  // and traders on another tab/page would otherwise miss it entirely.
   const { toast } = useToast();
+  const { addLog } = useBotContext();
   const prevKrakenSource = useRef<"direct" | "synthetic" | undefined>(undefined);
   const upgradeToastFired = useRef(false);
   const [justUpgraded, setJustUpgraded] = useState(false);
@@ -1769,10 +1772,15 @@ function TriangularCard({
       title: "ETH/SOL upgraded to direct prices",
       description: "Kraken now lists a live ETH/SOL market — the triangular scanner switched from synthetic cross rates to direct order-book prices.",
     });
+    // Durable record alongside the transient toast (once per session, same gate).
+    addLog(
+      "info",
+      "[TRI] ETH/SOL price feed upgraded: Kraken now lists a direct ETH/SOL market — triangular scanner switched from synthetic cross rates (ETH/USD ÷ SOL/USD) to direct order-book prices.",
+    );
     setJustUpgraded(true);
     const id = setTimeout(() => setJustUpgraded(false), 8_000);
     return () => clearTimeout(id);
-  }, [krakenSource, toast]);
+  }, [krakenSource, toast, addLog]);
 
   return (
     <Card>
