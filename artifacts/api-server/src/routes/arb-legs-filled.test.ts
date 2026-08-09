@@ -48,6 +48,7 @@ vi.mock("../lib/exchange.js", () => ({
   krakenRawIocLimitOrder:   vi.fn(),
   krakenOrderFilled:        vi.fn(),
   krakenOrderInfo:          vi.fn(),
+  krakenOrdersDetail:      vi.fn(() => Promise.resolve(new Map())),
   krakenTakerFeePct:        vi.fn(() => Promise.resolve(null)),
   krakenFeeTiers:           vi.fn(() => Promise.resolve(null)),
   krakenFillPrice:          vi.fn(),

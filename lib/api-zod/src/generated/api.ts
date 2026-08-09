@@ -2207,6 +2207,31 @@ export const ClearRouteHistoryResponse = zod.object({
 
 
 /**
+ * One-time backfill: walks live trades with status "estimated" whose buy and sell order IDs are both Kraken txids, fetches actual fills via Kraken's private QueryOrders API, and upgrades provable rows to "verified" with a fee-inclusive realizedProfitUsd and per-leg fills. Rows that cannot be proven stay "estimated". Requires valid Kraken credentials (operator proof). Idempotent.
+ * @summary Verify legacy estimated live trades against Kraken order history
+ */
+export const VerifyLegacyTradesBody = zod.object({
+  "krakenKey": zod.string().describe('Kraken API key — operator proof + order-history access'),
+  "krakenSecret": zod.string().describe('Kraken API secret — operator proof + order-history access'),
+  "dryRun": zod.boolean().optional().describe('When true, report what would be verified without writing')
+})
+
+export const VerifyLegacyTradesResponse = zod.object({
+  "dryRun": zod.boolean(),
+  "scanned": zod.number().describe('Estimated live rows examined'),
+  "candidates": zod.number().describe('Rows with two Kraken order IDs eligible for proof'),
+  "verified": zod.number().describe('Rows upgraded to verified (or that would be, on dryRun)'),
+  "skipped": zod.number().describe('Rows left as estimated'),
+  "details": zod.array(zod.object({
+  "id": zod.number(),
+  "outcome": zod.enum(['verified', 'skipped']),
+  "reason": zod.string().optional(),
+  "realizedProfitUsd": zod.number().optional()
+}))
+})
+
+
+/**
  * Fresh order-book breakdown of what a taker fire would look like right now — raw top-of-book edge, taker fees at the account's real tier, depth-walked slippage for this size, safety buffer, final executable net edge, and expected dollar profit — plus the maker-priced net and risk-adjusted maker EV, and which path adaptive mode would choose.
  * @summary Pre-fire execution breakdown for a Kraken triangle route
  */

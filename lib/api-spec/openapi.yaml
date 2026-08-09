@@ -1389,6 +1389,44 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
 
+  /arb/trades/verify-legacy:
+    post:
+      operationId: verifyLegacyTrades
+      tags: [trades]
+      summary: Verify legacy estimated live trades against Kraken order history
+      description: >
+        One-time backfill: walks live trades with status "estimated" whose buy
+        and sell order IDs are both Kraken txids, fetches actual fills via
+        Kraken's private QueryOrders API, and upgrades provable rows to
+        "verified" with a fee-inclusive realizedProfitUsd and per-leg fills.
+        Rows that cannot be proven stay "estimated". Requires valid Kraken
+        credentials (operator proof). Idempotent.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/VerifyLegacyTradesRequest"
+      responses:
+        "200":
+          description: Backfill result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/VerifyLegacyTradesResult"
+        "400":
+          description: Missing Kraken credentials
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: Credential check failed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
   /arb/exec-preview:
     post:
       operationId: execPreview
@@ -3667,6 +3705,48 @@ components:
             in-memory book snapshot used for the adaptive pre-fire decision
             must be at most this old, otherwise the fire is SKIPPED (stale
             data never executes blind).
+
+    VerifyLegacyTradesRequest:
+      type: object
+      required: [krakenKey, krakenSecret]
+      properties:
+        krakenKey:
+          type: string
+          description: Kraken API key — operator proof + order-history access
+        krakenSecret:
+          type: string
+          description: Kraken API secret — operator proof + order-history access
+        dryRun:
+          type: boolean
+          description: When true, report what would be verified without writing
+
+    VerifyLegacyTradesResult:
+      type: object
+      required: [dryRun, scanned, candidates, verified, skipped, details]
+      properties:
+        dryRun: { type: boolean }
+        scanned:
+          type: integer
+          description: Estimated live rows examined
+        candidates:
+          type: integer
+          description: Rows with two Kraken order IDs eligible for proof
+        verified:
+          type: integer
+          description: Rows upgraded to verified (or that would be, on dryRun)
+        skipped:
+          type: integer
+          description: Rows left as estimated
+        details:
+          type: array
+          items:
+            type: object
+            required: [id, outcome]
+            properties:
+              id: { type: integer }
+              outcome: { type: string, enum: [verified, skipped] }
+              reason: { type: string }
+              realizedProfitUsd: { type: number }
 
     RouteHistoryClearRequest:
       type: object

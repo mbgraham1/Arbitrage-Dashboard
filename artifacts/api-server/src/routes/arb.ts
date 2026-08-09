@@ -35,6 +35,7 @@ import {
   krakenRawIocLimitOrder,
   krakenOrderFilled,
   krakenOrderInfo,
+  krakenOrdersDetail,
   krakenTakerFeePct,
   krakenFeeTiers,
   krakenFillPrice,
@@ -870,6 +871,108 @@ router.post("/arb/route-history/clear", async (req, res): Promise<void> => {
   }
   req.log.info({ clearedRoutes }, "Route blacklist + failure streaks cleared manually");
   res.json({ clearedRoutes });
+});
+
+// VERIFY LEGACY TRADES — one-time backfill for pre-existing live rows stuck in
+// "estimated": for rows where BOTH order IDs are Kraken txids, fetch actual
+// fills via QueryOrders and upgrade provable rows to "verified" with a
+// fee-inclusive realizedProfitUsd + legFills. Rows that can't be proven
+// (missing/Coinbase/unknown IDs, not fully closed, non-USD quote, volume
+// mismatch) stay "estimated". Idempotent — only touches estimated rows.
+const KRAKEN_TXID_RE = /^[A-Z0-9]{6}-[A-Z0-9]{5}-[A-Z0-9]{6}$/;
+
+export interface VerifyLegacyResult {
+  dryRun: boolean;
+  scanned: number;
+  candidates: number;
+  verified: number;
+  skipped: number;
+  details: Array<{ id: number; outcome: "verified" | "skipped"; reason?: string; realizedProfitUsd?: number }>;
+}
+
+/** Core backfill — shared by the admin endpoint and the one-shot script. */
+export async function verifyLegacyTrades(
+  creds: { krakenKey: string; krakenSecret: string },
+  dryRun: boolean,
+): Promise<VerifyLegacyResult> {
+  const rows = await db.select().from(tradesTable)
+    .where(dbAnd(dbEq(tradesTable.status, "estimated"), dbEq(tradesTable.isDryRun, false)))
+    .orderBy(tradesTable.id);
+
+  // Candidates: both legs must be Kraken-provable txids — a Coinbase leg
+  // (UUID order id) can't be proven with Kraken credentials.
+  const skipped: Array<{ id: number; reason: string }> = [];
+  const candidates: typeof rows = [];
+  for (const row of rows) {
+    // Multi-leg routes (triangular, e.g. "USD→ETH→XRP→USD") store only the
+    // first and last order IDs — two orders can NEVER prove the middle
+    // conversion leg's fees/cash flow, so they are excluded outright.
+    if (row.pair?.includes("→")) { skipped.push({ id: row.id, reason: `multi-leg route (${row.pair}) — two order IDs cannot prove all legs` }); continue; }
+    const buyOk  = !!row.buyOrderId  && KRAKEN_TXID_RE.test(row.buyOrderId);
+    const sellOk = !!row.sellOrderId && KRAKEN_TXID_RE.test(row.sellOrderId);
+    if (buyOk && sellOk) candidates.push(row);
+    else skipped.push({ id: row.id, reason: !row.buyOrderId || !row.sellOrderId ? "missing order id" : "non-Kraken order id (unprovable with Kraken credentials)" });
+  }
+
+  const txids = candidates.flatMap(r => [r.buyOrderId!, r.sellOrderId!]);
+  const orders = txids.length > 0 ? await krakenOrdersDetail(creds, txids) : new Map<string, never>();
+
+  let verified = 0;
+  const details: Array<{ id: number; outcome: "verified" | "skipped"; reason?: string; realizedProfitUsd?: number }> = [];
+  for (const row of candidates) {
+    const buy = orders.get(row.buyOrderId!);
+    const sell = orders.get(row.sellOrderId!);
+    const fail = (reason: string) => { details.push({ id: row.id, outcome: "skipped", reason }); skipped.push({ id: row.id, reason }); };
+    if (!buy || !sell) { fail("order not found in Kraken history"); continue; }
+    if (buy.status !== "closed" || sell.status !== "closed") { fail(`order not fully filled (buy=${buy.status}, sell=${sell.status})`); continue; }
+    if (buy.side !== "buy" || sell.side !== "sell") { fail(`leg side mismatch (buy leg=${buy.side || "?"}, sell leg=${sell.side || "?"})`); continue; }
+    // A two-order round trip must buy and sell the SAME asset — different
+    // pairs mean this was part of a longer route (unprovable with two orders).
+    if (buy.pair !== sell.pair) { fail(`leg pair mismatch (buy=${buy.pair || "?"}, sell=${sell.pair || "?"}) — not a two-order round trip`); continue; }
+    if (buy.volExec <= 0 || sell.volExec <= 0 || buy.cost <= 0 || sell.cost <= 0) { fail("zero executed volume or cost"); continue; }
+    // Realized P&L below is in QUOTE units — only trustworthy as USD when both
+    // legs are USD-quoted.
+    const usdQuoted = (p: string) => /(?:Z?USD)$/.test(p);
+    if (!usdQuoted(buy.pair) || !usdQuoted(sell.pair)) { fail(`non-USD quote (buy=${buy.pair || "?"}, sell=${sell.pair || "?"})`); continue; }
+    // A verified round trip needs matching leg volumes — a big mismatch means
+    // leftover inventory, so the cash-flow diff wouldn't be a closed P&L.
+    const volDiff = Math.abs(buy.volExec - sell.volExec) / Math.max(buy.volExec, sell.volExec);
+    if (volDiff > 0.02) { fail(`leg volume mismatch (buy=${buy.volExec}, sell=${sell.volExec})`); continue; }
+
+    // Fee-inclusive realized P&L from ACTUAL fills: spend = cost + fee on the
+    // buy, proceeds = cost − fee on the sell (fees are per-leg on notional).
+    const buySpendUsd = buy.cost + buy.fee;
+    const sellProceedsUsd = sell.cost - sell.fee;
+    const realizedProfitUsd = sellProceedsUsd - buySpendUsd;
+    const legFills = [
+      { leg: 1, pair: buy.pair,  side: "buy",  price: buy.price,  volume: buy.volExec,  costUsd: buy.cost,  fee: buy.fee,  txid: buy.txid },
+      { leg: 2, pair: sell.pair, side: "sell", price: sell.price, volume: sell.volExec, costUsd: sell.cost, fee: sell.fee, txid: sell.txid },
+    ];
+    if (!dryRun) {
+      await db.update(tradesTable)
+        .set({ status: "verified", realizedProfitUsd: String(realizedProfitUsd.toFixed(6)), legFills })
+        .where(dbAnd(dbEq(tradesTable.id, row.id), dbEq(tradesTable.status, "estimated")));
+    }
+    verified++;
+    details.push({ id: row.id, outcome: "verified", realizedProfitUsd: Number(realizedProfitUsd.toFixed(6)) });
+  }
+
+  for (const s of skipped) {
+    if (!details.some(d => d.id === s.id)) details.push({ id: s.id, outcome: "skipped", reason: s.reason });
+  }
+  details.sort((a, b) => a.id - b.id);
+  return { dryRun, scanned: rows.length, candidates: candidates.length, verified, skipped: skipped.length, details };
+}
+
+router.post("/arb/trades/verify-legacy", async (req, res): Promise<void> => {
+  const proof = await verifyOperatorProof(req.body?.krakenKey, req.body?.krakenSecret);
+  if (proof === "missing") { res.status(400).json({ error: "Kraken credentials required to verify legacy trades." }); return; }
+  if (proof === "failed")  { res.status(403).json({ error: "Kraken credential check failed — legacy trades not verified." }); return; }
+  const creds = { krakenKey: String(req.body.krakenKey).trim(), krakenSecret: String(req.body.krakenSecret).trim() };
+  const dryRun = req.body?.dryRun === true;
+  const result = await verifyLegacyTrades(creds, dryRun);
+  req.log.info({ scanned: result.scanned, candidates: result.candidates, verified: result.verified, skipped: result.skipped, dryRun }, "Legacy trade verification backfill completed");
+  res.json(result);
 });
 
 // HARD RESET — manual lock clear for a stuck/dead execution. Requires VALID

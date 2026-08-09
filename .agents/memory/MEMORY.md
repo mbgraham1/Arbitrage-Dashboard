@@ -22,4 +22,5 @@
 - [Kraken OHLC pricing](kraken-ohlc-pricing.md) — in-progress daily candle is not a close; caches must expire at UTC rollover; since is exclusive.
 - [Coinbase v2 API auth](coinbase-v2-jwt.md) — the Advanced Trade CDP JWT also authenticates /v2 (Coinbase App) endpoints; native_amount = USD spot at tx time; next_uri pagination.
 - [Scratch-schema SQL tests](scratch-schema-sql-tests.md) — never run global retention DELETEs against the shared DB in tests; use a search_path-scoped scratch schema, race concurrency before any serial run.
+- [Legacy trade verification](legacy-trade-verification.md) — only two-order same-pair USD round trips upgrade to verified; triangles store just leg1/leg3 IDs and must be excluded outright.
 - [Fake-Date poll bounds](fake-date-poll-bounds.md) — tests fake only Date, so Date.now() deadlines in poll loops never expire; bound exchange confirm/unwind polls by iteration count.

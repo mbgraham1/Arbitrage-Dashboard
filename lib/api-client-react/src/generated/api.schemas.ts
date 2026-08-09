@@ -2007,6 +2007,43 @@ export interface GraphExecuteRequest {
   maxQuoteAgeMs?: number;
 }
 
+export interface VerifyLegacyTradesRequest {
+  /** Kraken API key — operator proof + order-history access */
+  krakenKey: string;
+  /** Kraken API secret — operator proof + order-history access */
+  krakenSecret: string;
+  /** When true, report what would be verified without writing */
+  dryRun?: boolean;
+}
+
+export type VerifyLegacyTradesResultDetailsItemOutcome = typeof VerifyLegacyTradesResultDetailsItemOutcome[keyof typeof VerifyLegacyTradesResultDetailsItemOutcome];
+
+
+export const VerifyLegacyTradesResultDetailsItemOutcome = {
+  verified: 'verified',
+  skipped: 'skipped',
+} as const;
+
+export type VerifyLegacyTradesResultDetailsItem = {
+  id: number;
+  outcome: VerifyLegacyTradesResultDetailsItemOutcome;
+  reason?: string;
+  realizedProfitUsd?: number;
+};
+
+export interface VerifyLegacyTradesResult {
+  dryRun: boolean;
+  /** Estimated live rows examined */
+  scanned: number;
+  /** Rows with two Kraken order IDs eligible for proof */
+  candidates: number;
+  /** Rows upgraded to verified (or that would be, on dryRun) */
+  verified: number;
+  /** Rows left as estimated */
+  skipped: number;
+  details: VerifyLegacyTradesResultDetailsItem[];
+}
+
 export interface RouteHistoryClearRequest {
   /** Kraken API key — operator proof of account ownership */
   krakenKey: string;

@@ -987,6 +987,83 @@ export async function krakenOrderInfo(
   };
 }
 
+interface KrakenOrderDetailRaw {
+  status?: string;
+  price?: string;
+  vol?: string;
+  vol_exec?: string;
+  cost?: string;
+  fee?: string;
+  descr?: { pair?: string; type?: string };
+}
+
+export interface KrakenOrderDetail {
+  txid: string;
+  status: string;          // closed | canceled | expired | open | pending | unknown
+  pair: string;            // Kraken pair name from order descr (e.g. "SOLUSD")
+  side: string;            // "buy" | "sell"
+  vol: number;             // requested volume (base units)
+  volExec: number;         // executed volume (base units)
+  price: number;           // avg fill price (quote units)
+  cost: number;            // executed cost, ex-fees (quote units)
+  fee: number;             // fee (quote units)
+}
+
+/**
+ * Batch order lookup with full descr (pair + side) for historical
+ * verification. Chunks txids (QueryOrders accepts up to 50 per call, we use
+ * 20 to stay conservative). Txids Kraken doesn't recognize are simply absent
+ * from the returned map; if a whole chunk errors (e.g. one unknown txid fails
+ * the batch), each txid in it is retried individually so one bad ID can't
+ * hide the others.
+ */
+export async function krakenOrdersDetail(
+  creds: KrakenCreds,
+  txids: string[],
+): Promise<Map<string, KrakenOrderDetail>> {
+  const out = new Map<string, KrakenOrderDetail>();
+  const toDetail = (txid: string, o: KrakenOrderDetailRaw): KrakenOrderDetail => ({
+    txid,
+    status:  o.status ?? "unknown",
+    pair:    o.descr?.pair ?? "",
+    side:    o.descr?.type ?? "",
+    vol:     parseFloat(o.vol ?? "0") || 0,
+    volExec: parseFloat(o.vol_exec ?? "0") || 0,
+    price:   parseFloat(o.price ?? "0") || 0,
+    cost:    parseFloat(o.cost ?? "0") || 0,
+    fee:     parseFloat(o.fee ?? "0") || 0,
+  });
+  const unique = [...new Set(txids)];
+  for (let i = 0; i < unique.length; i += 20) {
+    const chunk = unique.slice(i, i + 20);
+    // Only an unknown-order error means "this txid isn't in the account's
+    // history" — anything else (invalid key, permissions, rate limit, network)
+    // must propagate, or a credential problem would masquerade as
+    // "order not found" and rows would be silently left unproven.
+    const isUnknownOrder = (e: unknown) => e instanceof Error && /unknown order/i.test(e.message);
+    try {
+      const result = await krakenPrivateRequest<Record<string, KrakenOrderDetailRaw>>(
+        "/0/private/QueryOrders", { txid: chunk.join(","), trades: "false" }, creds);
+      for (const [txid, o] of Object.entries(result)) out.set(txid, toDetail(txid, o));
+    } catch (batchErr) {
+      if (!isUnknownOrder(batchErr)) throw batchErr;
+      // One unknown txid can fail the whole batch — retry one by one.
+      for (const txid of chunk) {
+        try {
+          const result = await krakenPrivateRequest<Record<string, KrakenOrderDetailRaw>>(
+            "/0/private/QueryOrders", { txid, trades: "false" }, creds);
+          const o = result[txid];
+          if (o) out.set(txid, toDetail(txid, o));
+        } catch (err) {
+          if (!isUnknownOrder(err)) throw err;
+          // Genuinely unknown txid — leave absent; caller treats as unprovable.
+        }
+      }
+    }
+  }
+  return out;
+}
+
 /**
  * Actual taker fee (percent) for the given raw pairs from the account's real
  * fee tier (/0/private/TradeVolume). Returns the MAX across pairs, or null if

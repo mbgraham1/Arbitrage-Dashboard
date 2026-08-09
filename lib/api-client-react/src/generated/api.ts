@@ -103,6 +103,8 @@ import type {
   TwoXFeesResult,
   TwoXScanResult,
   TwoXStats,
+  VerifyLegacyTradesRequest,
+  VerifyLegacyTradesResult,
   XvAutoStartError,
   XvAutoStartRequest,
   XvAutoStartResult,
@@ -4282,6 +4284,78 @@ export const useClearRouteHistory = <TError = ErrorType<ErrorResponse>,
         TContext
       > => {
       return useMutation(getClearRouteHistoryMutationOptions(options));
+    }
+
+export const getVerifyLegacyTradesUrl = () => {
+
+
+
+
+  return `/api/arb/trades/verify-legacy`
+}
+
+/**
+ * One-time backfill: walks live trades with status "estimated" whose buy and sell order IDs are both Kraken txids, fetches actual fills via Kraken's private QueryOrders API, and upgrades provable rows to "verified" with a fee-inclusive realizedProfitUsd and per-leg fills. Rows that cannot be proven stay "estimated". Requires valid Kraken credentials (operator proof). Idempotent.
+ * @summary Verify legacy estimated live trades against Kraken order history
+ */
+export const verifyLegacyTrades = async (verifyLegacyTradesRequest: VerifyLegacyTradesRequest, options?: RequestInit): Promise<VerifyLegacyTradesResult> => {
+
+  return customFetch<VerifyLegacyTradesResult>(getVerifyLegacyTradesUrl(),
+  {
+    ...options,
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(verifyLegacyTradesRequest)
+  }
+);}
+
+
+
+
+
+export const getVerifyLegacyTradesMutationOptions = <TError = ErrorType<ErrorResponse>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof verifyLegacyTrades>>, TError,{data: BodyType<VerifyLegacyTradesRequest>}, TContext>, request?: SecondParameter<typeof customFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof verifyLegacyTrades>>, TError,{data: BodyType<VerifyLegacyTradesRequest>}, TContext> => {
+
+const mutationKey = ['verifyLegacyTrades'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof verifyLegacyTrades>>, {data: BodyType<VerifyLegacyTradesRequest>}> = (props) => {
+          const {data} = props ?? {};
+
+          return  verifyLegacyTrades(data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type VerifyLegacyTradesMutationResult = NonNullable<Awaited<ReturnType<typeof verifyLegacyTrades>>>
+    export type VerifyLegacyTradesMutationBody = BodyType<VerifyLegacyTradesRequest>
+    export type VerifyLegacyTradesMutationError = ErrorType<ErrorResponse>
+
+    /**
+ * @summary Verify legacy estimated live trades against Kraken order history
+ */
+export const useVerifyLegacyTrades = <TError = ErrorType<ErrorResponse>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof verifyLegacyTrades>>, TError,{data: BodyType<VerifyLegacyTradesRequest>}, TContext>, request?: SecondParameter<typeof customFetch>}
+ ): UseMutationResult<
+        Awaited<ReturnType<typeof verifyLegacyTrades>>,
+        TError,
+        {data: BodyType<VerifyLegacyTradesRequest>},
+        TContext
+      > => {
+      return useMutation(getVerifyLegacyTradesMutationOptions(options));
     }
 
 export const getExecPreviewUrl = () => {
