@@ -1,6 +1,6 @@
 import { Router, type IRouter } from "express";
 import { desc, sql, sum, count, max, avg } from "drizzle-orm";
-import { db, tradesTable, triScanTable, executionQualityTable, accountSnapshotsTable, routeGateStateTable } from "@workspace/db";
+import { db, tradesTable, triScanTable, triScanRollupTable, executionQualityTable, accountSnapshotsTable, routeGateStateTable } from "@workspace/db";
 import { desc as dbDesc, eq as dbEq, and as dbAnd, gte as dbGte, count as dbCount } from "drizzle-orm";
 import { createHash } from "node:crypto";
 import nodeFs from "node:fs";
@@ -3383,7 +3383,7 @@ router.post("/arb/graph-execute", async (req, res): Promise<void> => {
 });
 
 // ── GET /arb/triangular ────────────────────────────────────────────────────────
-router.get("/arb/triangular", async (_req, res): Promise<void> => {
+router.get("/arb/triangular", async (req, res): Promise<void> => {
   try {
     const tri = getTriPrices();
     const opportunities: TriOpp[] = [];
@@ -3425,6 +3425,10 @@ router.get("/arb/triangular", async (_req, res): Promise<void> => {
     // Sort all opportunities by profitPct descending
     opportunities.sort((a, b) => b.profitPct - a.profitPct);
 
+    // Opportunistic retention pass — throttled, fire-and-forget so a slow
+    // prune can never delay a scan response.
+    void pruneScanHistory(req.log);
+
     // Persist detected opportunities to DB (fire-and-forget — never fail the scan response)
     if (opportunities.length > 0) {
       db.insert(triScanTable)
@@ -3448,6 +3452,66 @@ router.get("/arb/triangular", async (_req, res): Promise<void> => {
     res.status(500).json({ error: (err as Error).message });
   }
 });
+
+// ── Scan-history retention (tri_scans + execution_quality) ───────────────────
+// tri_scans policy (summary-exact by construction):
+//   • rows younger than 7 days: kept in full (the dashboard chart reads the
+//     most recent scans only, so it is untouched).
+//   • rows older than 7 days: deleted, but their count/sum/best are folded
+//     into tri_scan_rollups (daily buckets) IN THE SAME SQL STATEMENT, so the
+//     history summary (total, avg, best, counterfactual P&L) reports the same
+//     numbers before and after pruning.
+// execution_quality policy:
+//   • real (non-dry-run) rows: NEVER deleted — they are the audit trail and
+//     feed fill-rate ranking and the route gates.
+//   • dry-run rows older than 30 days: deleted (gates/ranking read only the
+//     most recent non-dry-run rows, so nothing they need is touched).
+const SCAN_PRUNE_INTERVAL_MS = 6 * 60 * 60 * 1000; // at most every 6h
+let lastScanPruneMs = 0;
+
+async function pruneScanHistory(log: { error: (o: object, m: string) => void }): Promise<void> {
+  const nowMs = Date.now();
+  if (nowMs - lastScanPruneMs < SCAN_PRUNE_INTERVAL_MS) return;
+  lastScanPruneMs = nowMs; // set first — a failing prune must not retry every request
+  try {
+    // Atomic delete+rollup: the deleted rows' aggregates land in
+    // tri_scan_rollups in the same statement, so no scan is ever dropped
+    // from the summary totals even if the process dies mid-prune.
+    await db.execute(sql`
+      WITH pruned AS (
+        DELETE FROM tri_scans
+        WHERE created_at < now() - interval '7 days'
+        RETURNING created_at, profit_pct
+      ), agg AS (
+        SELECT date_trunc('day', created_at) AS bucket_day,
+               count(*)                      AS scan_count,
+               sum(profit_pct)               AS sum_profit_pct,
+               max(profit_pct)               AS best_profit_pct
+        FROM pruned
+        GROUP BY 1
+      )
+      INSERT INTO tri_scan_rollups (bucket_day, scan_count, sum_profit_pct, best_profit_pct)
+      SELECT bucket_day, scan_count, sum_profit_pct, best_profit_pct FROM agg
+      ON CONFLICT (bucket_day) DO UPDATE SET
+        scan_count      = tri_scan_rollups.scan_count + EXCLUDED.scan_count,
+        sum_profit_pct  = tri_scan_rollups.sum_profit_pct + EXCLUDED.sum_profit_pct,
+        best_profit_pct = GREATEST(tri_scan_rollups.best_profit_pct, EXCLUDED.best_profit_pct)
+    `);
+  } catch (err) {
+    log.error({ err }, "tri_scans prune failed");
+  }
+  try {
+    // Dry-run attempts only — real rows are the audit trail and feed the
+    // fill-rate ranking/gates, so they are never deleted here.
+    await db.execute(sql`
+      DELETE FROM execution_quality
+      WHERE is_dry_run = true
+        AND created_at < now() - interval '30 days'
+    `);
+  } catch (err) {
+    log.error({ err }, "execution_quality prune failed");
+  }
+}
 
 // ── GET /arb/triangular/history ───────────────────────────────────────────────
 router.get("/arb/triangular/history", async (req, res): Promise<void> => {
@@ -3482,19 +3546,33 @@ router.get("/arb/triangular/history", async (req, res): Promise<void> => {
 router.get("/arb/triangular/history/summary", async (req, res): Promise<void> => {
   const tradeSizeUsd = Math.max(1, parseFloat(String(req.query["tradeSizeUsd"] ?? "1000")) || 1000);
   try {
-    const [row] = await db
-      .select({
+    // Live rows + pruned-row rollups: retention folds deleted rows' aggregates
+    // into tri_scan_rollups, so these totals are exact across all history.
+    const [[row], [rollup]] = await Promise.all([
+      db.select({
         total:        count(),
-        avgProfitPct: sql<number>`AVG(CAST(${triScanTable.profitPct} AS NUMERIC))`,
         bestProfitPct: sql<number>`MAX(CAST(${triScanTable.profitPct} AS NUMERIC))`,
         sumProfitPct: sql<number>`SUM(CAST(${triScanTable.profitPct} AS NUMERIC))`,
-      })
-      .from(triScanTable);
+      }).from(triScanTable),
+      db.select({
+        total:        sql<number>`COALESCE(SUM(${triScanRollupTable.scanCount}), 0)`,
+        bestProfitPct: sql<number>`MAX(CAST(${triScanRollupTable.bestProfitPct} AS NUMERIC))`,
+        sumProfitPct: sql<number>`SUM(CAST(${triScanRollupTable.sumProfitPct} AS NUMERIC))`,
+      }).from(triScanRollupTable),
+    ]);
 
-    const total         = Number(row?.total          ?? 0);
-    const avgProfitPct  = parseFloat(String(row?.avgProfitPct  ?? "0")) || 0;
-    const bestProfitPct = parseFloat(String(row?.bestProfitPct ?? "0")) || 0;
-    const sumProfitPct  = parseFloat(String(row?.sumProfitPct  ?? "0")) || 0;
+    const liveTotal   = Number(row?.total ?? 0);
+    const rolledTotal = Number(rollup?.total ?? 0);
+    const total       = liveTotal + rolledTotal;
+    const liveSum     = parseFloat(String(row?.sumProfitPct    ?? "0")) || 0;
+    const rolledSum   = parseFloat(String(rollup?.sumProfitPct ?? "0")) || 0;
+    const sumProfitPct = liveSum + rolledSum;
+    const liveBest    = row?.bestProfitPct    != null ? parseFloat(String(row.bestProfitPct))    : null;
+    const rolledBest  = rollup?.bestProfitPct != null ? parseFloat(String(rollup.bestProfitPct)) : null;
+    const bestProfitPct = (liveBest == null && rolledBest == null)
+      ? 0
+      : Math.max(liveBest ?? -Infinity, rolledBest ?? -Infinity);
+    const avgProfitPct  = total > 0 ? sumProfitPct / total : 0;
     // Counterfactual P&L: if every detected opportunity had been traded at tradeSizeUsd
     const counterfactualPnlUsd = (sumProfitPct / 100) * tradeSizeUsd;
 

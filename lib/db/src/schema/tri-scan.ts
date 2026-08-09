@@ -1,4 +1,4 @@
-import { pgTable, serial, text, numeric, timestamp } from "drizzle-orm/pg-core";
+import { pgTable, serial, text, numeric, timestamp, index } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod/v4";
 
@@ -17,7 +17,7 @@ export const triScanTable = pgTable("tri_scans", {
   variant: text("variant"),
   /** ISO timestamp captured at scan time (from TriOpp.timestamp) */
   scannedAt: text("scanned_at").notNull(),
-});
+}, (t) => [index("tri_scans_created_at_idx").on(t.createdAt)]);
 
 export const insertTriScanSchema = createInsertSchema(triScanTable).omit({
   id: true,
