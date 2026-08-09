@@ -16,4 +16,5 @@
 - [Merge clobber recovery](merge-clobber-recovery.md) — task merges can silently revert uncommitted work (exports, route mounts, openapi spec); check git stash@{0} first, tsc + endpoint smoke after every merge.
 - [Orphan server process](orphan-server-process.md) — EADDRINUSE after restart = stale pre-fix server may still serve the port; fuser -k then verify one process.
 - [Lock heartbeat coverage](lock-heartbeat-coverage.md) — every private exchange call must beat the live-lock heartbeat; stale window = 30s, sized to one HTTP timeout.
+- [Read-only service token gate](service-token-gate.md) — external agents get a hashed X-Service-Token with a GET allowlist; GET ≠ read-only here, audit handlers for side effects before allowlisting.
 - [Paged list atomicity](paged-list-atomicity.md) — {items,total} envelopes need ONE SQL statement (CTE+COUNT subquery); Promise.all(select,count) drifts across snapshots and fails review.
