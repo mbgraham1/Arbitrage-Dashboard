@@ -17,4 +17,5 @@
 - [Orphan server process](orphan-server-process.md) — EADDRINUSE after restart = stale pre-fix server may still serve the port; fuser -k then verify one process.
 - [Lock heartbeat coverage](lock-heartbeat-coverage.md) — heartbeats are ownership-scoped (ALS bind after lock acquire); unrelated calls must never refresh a lock; stale window = 30s.
 - [Read-only service token gate](service-token-gate.md) — external agents get a hashed X-Service-Token with a GET allowlist; GET ≠ read-only here, audit handlers for side effects before allowlisting.
+- [Graph limitPrice contract](graph-limitprice-contract.md) — edges stamp taker-side top-of-book (buy→ask, sell→bid) on every venue; maker executors derive fresh join prices, never rest at limitPrice.
 - [Paged list atomicity](paged-list-atomicity.md) — {items,total} envelopes need ONE SQL statement (CTE+COUNT subquery); Promise.all(select,count) drifts across snapshots and fails review.

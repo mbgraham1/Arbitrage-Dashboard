@@ -99,7 +99,15 @@ export interface GraphEdge {
   pair: string;         // raw pair/product name used for execution
   side: "buy" | "sell" | "bridge";
   feePct: number;
-  /** Best bid (for post-only sells) or ask (for post-only buys) */
+  /** CONTRACT (all exchanges, all edges): the marketable TAKER-side top-of-book
+   *  price for this leg — best ASK for a buy, best BID for a sell. This is the
+   *  price a taker order crosses at, and what taker executors may use as a
+   *  marketable reference (e.g. Coinbase market-IOC quote sizing in
+   *  routes/arb.ts graph-execute). Maker executors must NEVER rest an order at
+   *  this price — a post-only join price is the OPPOSITE side of the book and
+   *  must be derived from a FRESH quote at execution time (limitPrice may only
+   *  serve as approved-price context/cap). Kept identical on Kraken, Coinbase,
+   *  and Gemini edges; a regression test locks the convention down. */
   limitPrice: number;
   /** How to interpret the book when walking this edge for the actual amount. */
   pricingSide: EdgePricingSide;
@@ -129,6 +137,8 @@ export interface GraphRouteHop {
   amountIn: number;
   amountOut: number;
   feePct: number;
+  /** Copied from GraphEdge.limitPrice — see the contract there: marketable
+   *  TAKER-side top-of-book (buy→best ask, sell→best bid) on every exchange. */
   limitPrice: number;
   /** Whether this leg was priced from a LIVE stream book (false = REST fallback). */
   streamed: boolean;
@@ -433,16 +443,16 @@ async function buildGraph(
     if (!bestAsk || !bestBid) continue;
     const streamed = isStreamedPair(pair);
 
-    // USD → asset (buy base with USD)
+    // USD → asset (buy base with USD) — limitPrice = taker side (best ASK)
     add("kraken:USD", {
       to: `kraken:${asset}`, exchange: "kraken", pair, side: "buy",
-      feePct: krakenFeesPct, limitPrice: bestBid,
+      feePct: krakenFeesPct, limitPrice: bestAsk,
       pricingSide: "buyBaseWithQuote", asks: book.asks, bids: book.bids, streamed,
     });
-    // asset → USD (sell base for USD)
+    // asset → USD (sell base for USD) — limitPrice = taker side (best BID)
     add(`kraken:${asset}`, {
       to: "kraken:USD", exchange: "kraken", pair, side: "sell",
-      feePct: krakenFeesPct, limitPrice: bestAsk,
+      feePct: krakenFeesPct, limitPrice: bestBid,
       pricingSide: "sellBaseForQuote", asks: book.asks, bids: book.bids, streamed,
     });
   }
@@ -463,14 +473,14 @@ async function buildGraph(
       // fromAsset is quote, toAsset is base → BUY the base (walk asks).
       add(`kraken:${fromAsset}`, {
         to: `kraken:${toAsset}`, exchange: "kraken", pair: cross.pair, side: "buy",
-        feePct: krakenFeesPct, limitPrice: bestBid,
+        feePct: krakenFeesPct, limitPrice: bestAsk,
         pricingSide: "buyBaseWithQuote", asks: book.asks, bids: book.bids, streamed,
       });
     } else {
       // fromAsset is base, toAsset is quote → SELL the base (walk bids).
       add(`kraken:${fromAsset}`, {
         to: `kraken:${toAsset}`, exchange: "kraken", pair: cross.pair, side: "sell",
-        feePct: krakenFeesPct, limitPrice: bestAsk,
+        feePct: krakenFeesPct, limitPrice: bestBid,
         pricingSide: "sellBaseForQuote", asks: book.asks, bids: book.bids, streamed,
       });
     }

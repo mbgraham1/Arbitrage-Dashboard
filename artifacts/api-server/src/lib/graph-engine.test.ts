@@ -270,6 +270,45 @@ describe("scanGraphOpportunities — drops routes when books can't fill the size
     expect(route!.netProfitUsd).toBeCloseTo(120 * Math.pow(1 - 0.004, 3) - 100, 6);
   });
 
+  // ── Regression: GraphEdge.limitPrice CONTRACT ──────────────────────────────
+  // limitPrice is the marketable TAKER side of the book on EVERY exchange:
+  // buy → best ASK, sell → best BID. (Kraken once stamped the opposite side
+  // while Coinbase stamped the taker side — a buy "limit" at the bid would
+  // never fill / invert a marketable-limit intent depending on the venue.)
+  it("stamps limitPrice on the TAKER side (buy→ask, sell→bid) on BOTH Kraken and Coinbase", async () => {
+    const cbBook = {
+      asks: [["3011", "100", 1]],
+      bids: [["3001", "100", 1]],
+    };
+    vi.stubGlobal("fetch", vi.fn((url: string) => {
+      if (url.includes("ETH-USD/book")) {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve(cbBook) });
+      }
+      return (mockFetch(DEEP) as (u: string) => Promise<{ ok: boolean; json: () => Promise<object> }>)(url);
+    }));
+    const result = await scanGraphOpportunities(100, 0.40, 0.60, 4, "taker");
+
+    // Kraken triangle: USD→BTC (buy XXBTZUSD), BTC→ETH (buy ETHXBT), ETH→USD (sell ETHUSD)
+    const tri = result.routes.find(r => r.description === ROUTE);
+    expect(tri).toBeDefined();
+    const [h1, h2, h3] = tri!.hops;
+    expect(h1!.side).toBe("buy");
+    expect(h1!.limitPrice).toBeCloseTo(50_000, 9); // best ASK, not the 49 900 bid
+    expect(h2!.side).toBe("buy");
+    expect(h2!.limitPrice).toBeCloseTo(0.05, 12);  // ETHXBT best ASK
+    expect(h3!.side).toBe("sell");
+    expect(h3!.limitPrice).toBeCloseTo(3_000, 9);  // best BID, not the 3 010 ask
+
+    // Coinbase edges obey the SAME contract. Any route touching coinbase:ETH
+    // carries buy hops at the CB ask (3011) and sell hops at the CB bid (3001).
+    const cbHops = result.routes.flatMap(r => r.hops).filter(h => h.exchange === "coinbase");
+    expect(cbHops.length).toBeGreaterThan(0);
+    for (const h of cbHops) {
+      if (h.side === "buy")  expect(h.limitPrice).toBeCloseTo(3011, 9);
+      if (h.side === "sell") expect(h.limitPrice).toBeCloseTo(3001, 9);
+    }
+  });
+
   it("drops the route when the first leg's ask book is too thin for the size", async () => {
     // Only 0.001 BTC visible at 50 000 = $50 depth — cannot fill $100.
     vi.stubGlobal("fetch", mockFetch({

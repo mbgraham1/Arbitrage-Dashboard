@@ -3195,7 +3195,16 @@ router.post("/arb/graph-execute", async (req, res): Promise<void> => {
       //              from it, keeping per-unit economics identical.
       // taker style: market order; must FULLY fill or the run aborts.
       if (executionStyle === "maker" && buyHop.exchange === "kraken") {
-        const r = await krakenRawLimitOrder(kCreds, "buy", plannedVolume, buyHop.limitPrice, buyHop.pair);
+        // CONTRACT: hop.limitPrice is the marketable TAKER side (best ASK for a
+        // buy) — resting a post-only order there would be rejected as crossing.
+        // Derive the join price (best BID) from a FRESH book instead, capped at
+        // the scan's approved price so we never rest above what was priced.
+        const freshBid = await freshJoinPrice(buyHop.pair, "buy");
+        if (freshBid == null || !(freshBid > 0)) {
+          throw new Error(`Cannot derive a fresh post-only join price for ${buyHop.pair} — order book unavailable. Nothing executed.`);
+        }
+        const joinPx = Math.min(freshBid, buyHop.limitPrice);
+        const r = await krakenRawLimitOrder(kCreds, "buy", plannedVolume, joinPx, buyHop.pair);
         buyOrderId = r.txid[0] ?? "";
         if (!buyOrderId) throw new Error("Kraken maker buy order was not accepted (no txid returned) — nothing executed.");
         anyAccepted = true;
@@ -3207,8 +3216,8 @@ router.post("/arb/graph-execute", async (req, res): Promise<void> => {
         }
         log.info(`Maker buy leg ${buyOrderId} terminal ${fill.status}: ${filledVolume.toFixed(8)}/${plannedVolume.toFixed(8)} filled — hedging ACTUAL fill only`);
       } else if (executionStyle === "maker") {
-        // Join price for a BUY is the best BID — the scan's limitPrice for a
-        // Coinbase buy hop is the ask, which post-only would reject. Rest at
+        // Join price for a BUY is the best BID — the scan's limitPrice is the
+        // marketable taker side (the ask), which post-only would reject. Rest at
         // the live bid, never above the approved price. Price AND size are
         // quantized DOWN to the product's REAL increments (fetched live from
         // Coinbase — never guessed) in the SAFE direction, and the price is

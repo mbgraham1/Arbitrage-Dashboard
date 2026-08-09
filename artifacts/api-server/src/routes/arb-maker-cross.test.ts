@@ -99,7 +99,7 @@ vi.mock("../lib/order-book.js", () => ({
   scanOrderBookCycles: vi.fn(() => Promise.resolve({ cycles: [] })),
   preflightObCycle:    vi.fn(),
   discoverCrossPairs:  vi.fn(() => Promise.resolve({ lookup: new Map() })),
-  freshJoinPrice:      vi.fn(),
+  freshJoinPrice:      vi.fn(() => Promise.resolve(150.0)),
   waitForBookTouch:    vi.fn(() => Promise.resolve(false)),
   formatLegAges:       vi.fn(() => "legs"),
   OB_ASSETS:           ["SOL"] as string[],
@@ -238,6 +238,10 @@ describe("POST /arb/graph-execute — maker cross-exchange execution", () => {
     expect(body["success"]).toBe(false);
     expect(String(body["error"])).toContain("MK-STUCK-1");
     expect(String(body["error"])).toMatch(/INDETERMINATE/i);
+    // CONTRACT: the Kraken maker buy must rest at the FRESH join bid (capped at
+    // the approved hop price), never at hop.limitPrice (the taker-side ask).
+    const submittedKrakenPx = krakenRawLimitOrder.mock.calls[0]![3] as number;
+    expect(submittedKrakenPx).toBeCloseTo(150.0, 10);
     // No hedge of any kind was placed
     expect(coinbaseMarketOrder).not.toHaveBeenCalled();
     expect(krakenRawMarketOrder).not.toHaveBeenCalled();
